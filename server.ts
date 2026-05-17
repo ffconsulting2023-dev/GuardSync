@@ -547,6 +547,16 @@ app.put('/api/invoices/:id/send', authenticate, requireRole('ADMIN', 'MANAGER'),
   res.json(invoice)
 })
 
+app.put('/api/invoices/:id/paid', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const invoice = await prisma.invoice.updateMany({
+    where: { id: req.params.id, companyId, status: { in: ['SENT', 'OVERDUE'] } },
+    data: { status: 'PAID' },
+  })
+  if (invoice.count === 0) { res.status(404).json({ error: '請求書が見つかりません' }); return }
+  res.json({ success: true })
+})
+
 // ─────────────────────────────────────────────
 // 日払い API
 // ─────────────────────────────────────────────

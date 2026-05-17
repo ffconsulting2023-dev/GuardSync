@@ -46,6 +46,11 @@ export default function InvoicesPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['invoices'] }),
   })
 
+  const paidMutation = useMutation({
+    mutationFn: (id: string) => api.put(`/invoices/${id}/paid`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['invoices'] }),
+  })
+
   const resetForm = () => {
     setForm(EMPTY_FORM)
     setItems([{ description: '', quantity: 1, unitPrice: 0 }])
@@ -98,9 +103,14 @@ export default function InvoicesPage() {
                       <span className={`badge ${STATUS_LABELS[inv.status]?.className}`}>{STATUS_LABELS[inv.status]?.label}</span>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {canEdit && inv.status === 'DRAFT' && (
-                        <button onClick={() => { if (window.confirm('請求書を送付済みにしますか？')) sendMutation.mutate(inv.id) }} className="text-blue-600 hover:text-blue-800 text-xs">送付済みにする</button>
-                      )}
+                      <div className="flex gap-2 justify-end">
+                        {canEdit && inv.status === 'DRAFT' && (
+                          <button onClick={() => { if (window.confirm('請求書を送付済みにしますか？')) sendMutation.mutate(inv.id) }} className="text-blue-600 hover:text-blue-800 text-xs whitespace-nowrap">送付済みにする</button>
+                        )}
+                        {canEdit && (inv.status === 'SENT' || inv.status === 'OVERDUE') && (
+                          <button onClick={() => { if (window.confirm('入金済みにしますか？')) paidMutation.mutate(inv.id) }} className="text-green-600 hover:text-green-800 text-xs whitespace-nowrap">入金済み</button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
