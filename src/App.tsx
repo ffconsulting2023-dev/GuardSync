@@ -16,6 +16,7 @@ import EContractsPage from './pages/EContractsPage'
 import SignContractPage from './pages/SignContractPage'
 import RegisterPage from './pages/RegisterPage'
 import SuperAdminPage from './pages/SuperAdminPage'
+import SecurityReportsPage from './pages/SecurityReportsPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -53,6 +54,7 @@ export default function App() {
                     <Route path="daily-pay/*" element={<DailyPayPage />} />
                     <Route path="partners/*" element={<PartnersPage />} />
                     <Route path="e-contracts/*" element={<EContractsPage />} />
+                    <Route path="reports/*" element={<SecurityReportsPage />} />
                     <Route path="super-admin/*" element={<SuperAdminPage />} />
                   </Routes>
                 </Layout>

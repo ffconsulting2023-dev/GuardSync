@@ -656,6 +656,363 @@ cron.schedule('0 10 * * *', async () => {
 })
 
 // ─────────────────────────────────────────────
+// 管制機能 - 一括配員 API
+// ─────────────────────────────────────────────
+
+// 空きの隊員を返す（指定日・時間帯で未配員の隊員）
+app.get('/api/schedules/available-guards', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { date, startTime, endTime } = req.query
+  if (!date) { res.status(400).json({ error: 'dateは必須です' }); return }
+
+  // 指定日にすでに配員されている隊員ID
+  const assigned = await prisma.schedule.findMany({
+    where: { companyId, date: new Date(String(date)), status: { not: 'CANCELLED' } },
+    select: { guardId: true },
+  })
+  const assignedIds = assigned.map(s => s.guardId)
+
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: true, id: { notIn: assignedIds } },
+    orderBy: { employeeNumber: 'asc' },
+  })
+  res.json(guards)
+})
+
+// 月間シフト一覧（CSV出力用）
+app.get('/api/schedules/monthly', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { year, month } = req.query
+  if (!year || !month) { res.status(400).json({ error: 'year・monthは必須です' }); return }
+
+  const y = Number(year)
+  const m = Number(month)
+  const from = new Date(y, m - 1, 1)
+  const to = new Date(y, m, 0)
+
+  const schedules = await prisma.schedule.findMany({
+    where: { companyId, date: { gte: from, lte: to } },
+    include: { guard: true, site: true, attendance: true },
+    orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
+  })
+
+  if (req.headers.accept === 'text/csv') {
+    const rows = [
+      ['日付', '曜日', '隊員番号', '隊員名', '現場', '開始', '終了', '出勤時刻', '退勤時刻', 'ステータス'],
+      ...schedules.map(s => {
+        const d = new Date(s.date)
+        const weekdays = ['日', '月', '火', '水', '木', '金', '土']
+        return [
+          `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`,
+          weekdays[d.getDay()],
+          s.guard.employeeNumber,
+          s.guard.name,
+          s.site.name,
+          s.startTime,
+          s.endTime,
+          s.attendance?.clockInAt ? new Date(s.attendance.clockInAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '',
+          s.attendance?.clockOutAt ? new Date(s.attendance.clockOutAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '',
+          s.status,
+        ].join(',')
+      }),
+    ]
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="schedule_${year}_${month}.csv"`)
+    res.send('\uFEFF' + rows.join('\n')) // BOM付きUTF-8
+    return
+  }
+
+  res.json(schedules)
+})
+
+// 隊員の月間シフト（隊員アプリ用）
+app.get('/api/guards/:id/schedule', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { year, month } = req.query
+
+  const y = Number(year) || new Date().getFullYear()
+  const m = Number(month) || new Date().getMonth() + 1
+  const from = new Date(y, m - 1, 1)
+  const to = new Date(y, m, 0)
+
+  const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  const schedules = await prisma.schedule.findMany({
+    where: { guardId: req.params.id, companyId, date: { gte: from, lte: to }, status: { not: 'CANCELLED' } },
+    include: { site: true, attendance: true },
+    orderBy: { date: 'asc' },
+  })
+  res.json({ guard, schedules })
+})
+
+// ─────────────────────────────────────────────
+// 管制機能 - 警備報告書 API
+// ─────────────────────────────────────────────
+
+app.get('/api/security-reports', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId, siteId, from, to } = req.query
+
+  const reports = await prisma.securityReport.findMany({
+    where: {
+      companyId,
+      ...(guardId ? { guardId: String(guardId) } : {}),
+      ...(siteId ? { siteId: String(siteId) } : {}),
+      ...(from || to ? { reportDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
+    },
+    include: { guard: true, site: true },
+    orderBy: { reportDate: 'desc' },
+  })
+  res.json(reports)
+})
+
+app.post('/api/security-reports', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId, siteId, reportDate, content } = req.body
+  if (!guardId || !siteId || !reportDate || !content) {
+    res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  const report = await prisma.securityReport.create({
+    data: { companyId, guardId, siteId, reportDate: new Date(reportDate), content },
+    include: { guard: true, site: true },
+  })
+  res.status(201).json(report)
+})
+
+// メールリンクによる承認（認証不要）
+app.post('/api/security-reports/approve/:token', async (req, res) => {
+  const report = await prisma.securityReport.findFirst({ where: { approvalToken: req.params.token } })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (report.approvedAt) { res.status(409).json({ error: '既に承認済みです' }); return }
+
+  const { approvedBy } = req.body
+  await prisma.securityReport.update({
+    where: { id: report.id },
+    data: { approvedAt: new Date(), approvedBy: approvedBy || '承認者' },
+  })
+  res.json({ success: true, message: '警備報告書が承認されました' })
+})
+
+// ─────────────────────────────────────────────
+// CSV出力 API
+// ─────────────────────────────────────────────
+
+// 隊員一覧CSV
+app.get('/api/export/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guards = await prisma.guard.findMany({ where: { companyId }, orderBy: { employeeNumber: 'asc' } })
+
+  const rows = [
+    ['社員番号', '氏名', 'フリガナ', '生年月日', '性別', '電話番号', 'メール', '雇用形態', '日払い対象', '入社日', '資格'],
+    ...guards.map(g => [
+      g.employeeNumber, g.name, g.nameKana,
+      g.birthDate ? new Date(g.birthDate).toLocaleDateString('ja-JP') : '',
+      g.gender || '',
+      g.phone || '', g.email || '',
+      g.employmentType,
+      g.dailyPayEnabled ? '○' : '×',
+      g.joinedAt ? new Date(g.joinedAt).toLocaleDateString('ja-JP') : '',
+      (g.certifications || []).join('・'),
+    ].join(',')),
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="guards.csv"')
+  res.send('\uFEFF' + rows.join('\n'))
+})
+
+// 請求書CSV（会計ソフト連携用）
+app.get('/api/export/invoices', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { from, to, format: fmt } = req.query
+
+  const invoices = await prisma.invoice.findMany({
+    where: {
+      companyId,
+      ...(from || to ? { issueDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
+    },
+    include: { items: true },
+    orderBy: { issueDate: 'asc' },
+  })
+
+  // マネーフォワード・弥生・freee共通フォーマット（仕訳形式）
+  const rows = [
+    ['請求番号', '発行日', '支払期限', '発注元', '品目', '数量', '単価', '金額', '税率', '税額', '合計', 'ステータス'],
+    ...invoices.flatMap(inv =>
+      inv.items.map(item => [
+        inv.invoiceNumber,
+        new Date(inv.issueDate).toLocaleDateString('ja-JP'),
+        new Date(inv.dueDate).toLocaleDateString('ja-JP'),
+        inv.clientName,
+        item.description,
+        item.quantity,
+        item.unitPrice,
+        item.amount,
+        `${inv.taxRate * 100}%`,
+        inv.taxAmount,
+        inv.total,
+        inv.status,
+      ].join(','))
+    ),
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="invoices.csv"')
+  res.send('\uFEFF' + rows.join('\n'))
+})
+
+// 日払い集計CSV（月末給与差引用）
+app.get('/api/export/daily-pay', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { year, month } = req.query
+  if (!year || !month) { res.status(400).json({ error: 'year・monthは必須です' }); return }
+
+  const y = Number(year)
+  const m = Number(month)
+  const from = new Date(y, m - 1, 1)
+  const to = new Date(y, m, 0)
+
+  const requests = await prisma.dailyPayRequest.findMany({
+    where: { companyId, status: 'APPROVED', requestDate: { gte: from, lte: to } },
+    include: { guard: true },
+    orderBy: [{ guard: { employeeNumber: 'asc' } }, { requestDate: 'asc' }],
+  })
+
+  // 隊員別集計
+  const summary = new Map<string, { guard: any; totalAmount: number; totalFee: number; count: number }>()
+  for (const r of requests) {
+    const key = r.guardId
+    if (!summary.has(key)) summary.set(key, { guard: r.guard, totalAmount: 0, totalFee: 0, count: 0 })
+    const s = summary.get(key)!
+    s.totalAmount += r.amount
+    s.totalFee += r.feeAmount
+    s.count += 1
+  }
+
+  const rows = [
+    [`${y}年${m}月 日払い集計`],
+    ['社員番号', '氏名', '申請回数', '申請合計額', '手数料合計', '差引額（月末給与から控除）'],
+    ...[...summary.values()].map(s => [
+      s.guard.employeeNumber, s.guard.name, s.count,
+      s.totalAmount, s.totalFee, s.totalFee,
+    ].join(',')),
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename="daily_pay_${year}_${month}.csv"`)
+  res.send('\uFEFF' + rows.join('\n'))
+})
+
+// ─────────────────────────────────────────────
+// 通知 API
+// ─────────────────────────────────────────────
+
+app.get('/api/notifications', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const notifications = await prisma.notification.findMany({
+    where: { companyId },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+  })
+  res.json(notifications)
+})
+
+app.post('/api/notifications/send', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { type, title, body, targetIds, channel = 'LINE_WORKS' } = req.body
+  if (!type || !title || !body) { res.status(400).json({ error: '必須項目が不足しています' }); return }
+
+  const targets = targetIds?.length ? targetIds : ['ALL']
+  const notifications = await prisma.$transaction(
+    targets.map((targetId: string) =>
+      prisma.notification.create({
+        data: { companyId, type, title, body, targetId, channel, status: 'PENDING' },
+      })
+    )
+  )
+
+  // LINE Works送信は Week 3 で実装
+  // ここではDBに記録してPENDINGのまま
+  res.json({ sent: notifications.length, notifications })
+})
+
+// ─────────────────────────────────────────────
+// 自動受付 API (FAX/メール OCR)
+// ─────────────────────────────────────────────
+
+app.get('/api/auto-receipts', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const receipts = await prisma.autoReceipt.findMany({
+    where: { companyId, status: 'PENDING' },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(receipts)
+})
+
+app.post('/api/auto-receipts/:id/accept', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const receipt = await prisma.autoReceipt.findFirst({ where: { id: req.params.id, companyId } })
+  if (!receipt) { res.status(404).json({ error: '受付データが見つかりません' }); return }
+
+  // サジェストをスケジュールに登録
+  const { scheduleData } = req.body // { guardId, siteId, date, startTime, endTime }
+  if (scheduleData) {
+    await prisma.schedule.create({
+      data: { companyId, ...scheduleData, date: new Date(scheduleData.date) },
+    })
+  }
+
+  await prisma.autoReceipt.update({
+    where: { id: receipt.id },
+    data: { status: 'ACCEPTED', processedAt: new Date() },
+  })
+  res.json({ success: true })
+})
+
+app.post('/api/auto-receipts/:id/reject', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  await prisma.autoReceipt.updateMany({
+    where: { id: req.params.id, companyId },
+    data: { status: 'REJECTED', processedAt: new Date() },
+  })
+  res.json({ success: true })
+})
+
+// ─────────────────────────────────────────────
+// ダッシュボード統計 API
+// ─────────────────────────────────────────────
+
+app.get('/api/stats/dashboard', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(today.getDate() + 1)
+
+  const [
+    todayCount, tomorrowCount, activeGuards, pendingInvoices,
+    pendingDailyPay, monthlySchedules, openContracts,
+  ] = await Promise.all([
+    prisma.schedule.count({ where: { companyId, date: today, status: { not: 'CANCELLED' } } }),
+    prisma.schedule.count({ where: { companyId, date: tomorrow, status: { not: 'CANCELLED' } } }),
+    prisma.guard.count({ where: { companyId, isActive: true } }),
+    prisma.invoice.count({ where: { companyId, status: { in: ['SENT', 'OVERDUE'] } } }),
+    prisma.dailyPayRequest.count({ where: { companyId, status: 'PENDING' } }),
+    prisma.schedule.count({
+      where: {
+        companyId,
+        date: {
+          gte: new Date(today.getFullYear(), today.getMonth(), 1),
+          lte: new Date(today.getFullYear(), today.getMonth() + 1, 0),
+        },
+      },
+    }),
+    prisma.contract.count({ where: { companyId, status: 'ACTIVE' } }),
+  ])
+
+  res.json({ todayCount, tomorrowCount, activeGuards, pendingInvoices, pendingDailyPay, monthlySchedules, openContracts })
+})
+
+// ─────────────────────────────────────────────
 // 静的ファイル配信（本番）
 // ─────────────────────────────────────────────
 

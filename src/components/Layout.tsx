@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { path: '/daily-pay',   label: '日払い',         icon: '💵' },
   { path: '/e-contracts', label: '電子契約',       icon: '✍️' },
   { path: '/partners',    label: '協力会社',       icon: '🤝' },
+  { path: '/reports',     label: '警備報告書',     icon: '📝' },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {
