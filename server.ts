@@ -843,6 +843,40 @@ cron.schedule('0 10 * * *', async () => {
 })
 
 // ─────────────────────────────────────────────
+// 設定 API
+// ─────────────────────────────────────────────
+
+app.get('/api/settings/line-works', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const settings = await prisma.lineWorksSettings.findUnique({ where: { companyId } })
+  if (!settings) { res.status(404).json({ error: 'LINE Works未設定' }); return }
+  res.json({ botId: settings.botId, channelId: settings.channelId, tokenExpiresAt: settings.tokenExpiresAt })
+})
+
+app.post('/api/settings/line-works', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { botId, channelId } = req.body
+  if (!botId || !channelId) { res.status(400).json({ error: 'Bot IDとChannel IDは必須です' }); return }
+
+  const settings = await prisma.lineWorksSettings.upsert({
+    where: { companyId },
+    create: { companyId, botId, channelId },
+    update: { botId, channelId, accessToken: null, tokenExpiresAt: null },
+  })
+  res.json(settings)
+})
+
+app.get('/api/settings/users', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const users = await prisma.user.findMany({
+    where: { companyId, isActive: true },
+    select: { id: true, name: true, email: true, role: true, lastLoginAt: true },
+    orderBy: { name: 'asc' },
+  })
+  res.json(users)
+})
+
+// ─────────────────────────────────────────────
 // 管制機能 - 一括配員 API
 // ─────────────────────────────────────────────
 
@@ -1226,6 +1260,43 @@ app.get('/api/stats/dashboard', authenticate, async (req, res) => {
   ])
 
   res.json({ todayCount, tomorrowCount, activeGuards, pendingInvoices, pendingDailyPay, monthlySchedules, openContracts })
+})
+
+// ─────────────────────────────────────────────
+// cron: 月末日払い手数料差引処理（毎月末日 23:55）
+// ─────────────────────────────────────────────
+
+cron.schedule('55 23 28-31 * *', async () => {
+  const now = new Date()
+  const tomorrow = new Date(now)
+  tomorrow.setDate(now.getDate() + 1)
+
+  // 今日が月末日のときのみ実行
+  if (tomorrow.getMonth() === now.getMonth()) return
+
+  console.log('[cron] 月末日払い差引処理 開始')
+
+  const approvedRequests = await prisma.dailyPayRequest.findMany({
+    where: {
+      status: 'PAID',
+      deductedAt: null,
+      requestDate: {
+        gte: new Date(now.getFullYear(), now.getMonth(), 1),
+        lte: new Date(now.getFullYear(), now.getMonth() + 1, 0),
+      },
+    },
+    include: { guard: true },
+  })
+
+  for (const req of approvedRequests) {
+    await prisma.dailyPayRequest.update({
+      where: { id: req.id },
+      data: { status: 'DEDUCTED', deductedAt: new Date() },
+    })
+    console.log(`[cron] 日払い差引: ${req.guard.name} 手数料¥${req.feeAmount}`)
+  }
+
+  console.log(`[cron] 月末日払い差引処理 完了: ${approvedRequests.length}件`)
 })
 
 // ─────────────────────────────────────────────

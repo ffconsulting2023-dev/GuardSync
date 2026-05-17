@@ -18,6 +18,7 @@ import RegisterPage from './pages/RegisterPage'
 import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
 import GuardAppPage from './pages/guard/GuardAppPage'
+import SettingsPage from './pages/SettingsPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -57,6 +58,7 @@ export default function App() {
                     <Route path="partners/*" element={<PartnersPage />} />
                     <Route path="e-contracts/*" element={<EContractsPage />} />
                     <Route path="reports/*" element={<SecurityReportsPage />} />
+                    <Route path="settings/*" element={<SettingsPage />} />
                     <Route path="super-admin/*" element={<SuperAdminPage />} />
                   </Routes>
                 </Layout>
