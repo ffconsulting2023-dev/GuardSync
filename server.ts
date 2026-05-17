@@ -9,8 +9,83 @@ import jwt from 'jsonwebtoken'
 import cron from 'node-cron'
 import dotenv from 'dotenv'
 import { z } from 'zod'
+import nodemailer from 'nodemailer'
 
 dotenv.config()
+
+// ─────────────────────────────────────────────
+// メール送信ヘルパー
+// ─────────────────────────────────────────────
+
+function createMailTransport() {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.sendgrid.net',
+    port: Number(process.env.SMTP_PORT) || 587,
+    auth: {
+      user: process.env.SMTP_USER || 'apikey',
+      pass: process.env.SMTP_PASS || process.env.SENDGRID_API_KEY || '',
+    },
+  })
+}
+
+async function sendEmail(to: string, subject: string, html: string, text?: string): Promise<boolean> {
+  if (!process.env.SMTP_PASS && !process.env.SENDGRID_API_KEY) {
+    console.log(`[email] SMTP未設定 - メール送信スキップ: ${subject} → ${to}`)
+    return false
+  }
+  try {
+    const transport = createMailTransport()
+    await transport.sendMail({
+      from: process.env.SMTP_FROM || 'noreply@guardsync.jp',
+      to,
+      subject,
+      html,
+      text,
+    })
+    return true
+  } catch (e) {
+    console.error('[email] 送信エラー:', e)
+    return false
+  }
+}
+
+// ─────────────────────────────────────────────
+// LINE Works送信ヘルパー
+// ─────────────────────────────────────────────
+
+async function getLineWorksToken(clientId: string, clientSecret: string): Promise<string | null> {
+  const params = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+    scope: 'bot',
+  })
+  try {
+    const res = await fetch('https://auth.worksmobile.com/oauth2/v2.0/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { access_token: string }
+    return data.access_token
+  } catch {
+    return null
+  }
+}
+
+async function sendLineWorksMessage(botId: string, channelId: string, accessToken: string, text: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://www.worksapis.com/v1.0/bots/${botId}/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: { type: 'text', text } }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
 
 const app = express()
 const prisma = new PrismaClient()
@@ -442,10 +517,33 @@ app.post('/api/invoices', authenticate, requireRole('ADMIN', 'MANAGER'), async (
 
 app.put('/api/invoices/:id/send', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const existing = await prisma.invoice.findFirst({ where: { id: req.params.id, companyId } })
+  const existing = await prisma.invoice.findFirst({ where: { id: req.params.id, companyId }, include: { company: true } })
   if (!existing) { res.status(404).json({ error: '請求書が見つかりません' }); return }
 
   const invoice = await prisma.invoice.update({ where: { id: req.params.id }, data: { status: 'SENT', sentAt: new Date() } })
+
+  // 請求書メール送信
+  if (existing.clientEmail) {
+    const subject = `【請求書】${existing.invoiceNumber} - ${existing.company.name}`
+    const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;font-size:18px">請求書のご送付</h2>
+  </div>
+  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+    <p>${existing.clientName} 御中</p>
+    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
+      <p><strong>請求番号:</strong> ${existing.invoiceNumber}</p>
+      <p><strong>合計金額:</strong> ¥${existing.total.toLocaleString()}</p>
+      <p><strong>支払期限:</strong> ${new Date(existing.dueDate).toLocaleDateString('ja-JP')}</p>
+    </div>
+    <p style="font-size:13px;color:#666">ご不明な点は担当者までお問い合わせください。</p>
+    <p style="font-size:12px;color:#999">${existing.company.name} | GuardSync</p>
+  </div>
+</div>`
+    await sendEmail(existing.clientEmail, subject, html)
+  }
+
   res.json(invoice)
 })
 
@@ -513,16 +611,47 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
+  const company = await prisma.company.findUnique({ where: { id: companyId } })
+  const expiry = expiresAt ? new Date(expiresAt) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+
   const eContract = await prisma.electronicContract.create({
     data: {
       companyId, title, content, contractId,
-      expiresAt: expiresAt ? new Date(expiresAt) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      expiresAt: expiry,
       status: 'SENT',
       auditLog: [{ action: 'CREATED', at: new Date().toISOString(), by: companyId }],
       signatures: { create: signers.map((s: any) => ({ signerEmail: s.email, signerName: s.name })) },
     },
     include: { signatures: true },
   })
+
+  // 署名依頼メール送信
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  for (const sig of eContract.signatures) {
+    const signUrl = `${baseUrl}/sign/${sig.token}`
+    const subject = `【署名依頼】${title}`
+    const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;font-size:18px">電子契約 署名依頼</h2>
+  </div>
+  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+    <p>${sig.signerName} 様</p>
+    <p>下記の契約書への電子署名をお願いします。</p>
+    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0">
+      <p style="margin:0;font-weight:bold">${title}</p>
+      <p style="margin:8px 0 0;font-size:13px;color:#666">署名期限: ${expiry.toLocaleDateString('ja-JP')}</p>
+    </div>
+    <div style="text-align:center;margin:24px 0">
+      <a href="${signUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">署名する</a>
+    </div>
+    <p style="font-size:12px;color:#999">署名時のIPアドレス・ブラウザ情報が記録されます。</p>
+    <p style="font-size:12px;color:#999">${company?.name} | GuardSync</p>
+  </div>
+</div>`
+    await sendEmail(sig.signerEmail, subject, html)
+  }
+
   res.status(201).json(eContract)
 })
 
@@ -644,13 +773,71 @@ cron.schedule('0 10 * * *', async () => {
 
   const schedules = await prisma.schedule.findMany({
     where: { date: new Date(tomorrowDate), status: 'ASSIGNED' },
-    include: { guard: true, site: true, company: true },
+    include: { guard: true, site: true, company: { include: { lineWorksSettings: true } } },
   })
 
   for (const schedule of schedules) {
-    // LINE Works / メール通知をここに実装（Week 3で追加）
-    console.log(`[cron] 前日確認: ${schedule.guard.name} → ${schedule.site.name} (${schedule.startTime}~${schedule.endTime})`)
+    const dateStr = `${tomorrow.getFullYear()}年${tomorrow.getMonth() + 1}月${tomorrow.getDate()}日`
+
+    // LINE Works送信
+    if (schedule.company.lineWorksSettings) {
+      const lw = schedule.company.lineWorksSettings
+      let token = lw.accessToken
+      if (!token || (lw.tokenExpiresAt && lw.tokenExpiresAt < new Date())) {
+        const clientId = process.env.LINE_WORKS_CLIENT_ID
+        const clientSecret = process.env.LINE_WORKS_CLIENT_SECRET
+        if (clientId && clientSecret) {
+          token = await getLineWorksToken(clientId, clientSecret)
+          if (token) {
+            await prisma.lineWorksSettings.update({
+              where: { companyId: schedule.companyId },
+              data: { accessToken: token, tokenExpiresAt: new Date(Date.now() + 3600 * 1000) },
+            })
+          }
+        }
+      }
+      if (token) {
+        const msg = `【前日確認】${schedule.guard.name} 様\n明日（${dateStr}）の出動をご確認ください。\n\n📍 ${schedule.site.name}\n🕐 ${schedule.startTime}〜${schedule.endTime}\n📌 ${schedule.site.address}`
+        await sendLineWorksMessage(lw.botId, lw.channelId, token, msg)
+      }
+    }
+
+    // メール送信
+    if (schedule.guard.email) {
+      const subject = `【前日確認】${dateStr} ${schedule.site.name} 出動のご確認`
+      const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;font-size:18px">明日の出動確認</h2>
+  </div>
+  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+    <p>${schedule.guard.name} 様</p>
+    <p>明日の出動についてご確認ください。</p>
+    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
+      <p><strong>日時:</strong> ${dateStr} ${schedule.startTime}〜${schedule.endTime}</p>
+      <p><strong>現場:</strong> ${schedule.site.name}</p>
+      <p><strong>住所:</strong> ${schedule.site.address}</p>
+    </div>
+    <p style="font-size:13px;color:#666">不明点・変更がある場合は管理者にご連絡ください。</p>
+    <p style="font-size:12px;color:#999">${schedule.company.name} | GuardSync</p>
+  </div>
+</div>`
+      await sendEmail(schedule.guard.email, subject, html)
+    }
+
     await prisma.schedule.update({ where: { id: schedule.id }, data: { confirmedAt: new Date() } })
+    await prisma.notification.create({
+      data: {
+        companyId: schedule.companyId,
+        type: 'DAY_BEFORE_CONFIRM',
+        title: '前日確認送信',
+        body: `${schedule.guard.name} → ${schedule.site.name}`,
+        targetId: schedule.guardId,
+        status: 'SENT',
+        sentAt: new Date(),
+      },
+    })
+    console.log(`[cron] 前日確認: ${schedule.guard.name} → ${schedule.site.name}`)
   }
   console.log(`[cron] 前日確認通知 完了: ${schedules.length}件`)
 })
@@ -769,15 +956,44 @@ app.get('/api/security-reports', authenticate, async (req, res) => {
 
 app.post('/api/security-reports', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, reportDate, content } = req.body
+  const { guardId, siteId, reportDate, content, clientEmail } = req.body
   if (!guardId || !siteId || !reportDate || !content) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
   const report = await prisma.securityReport.create({
     data: { companyId, guardId, siteId, reportDate: new Date(reportDate), content },
-    include: { guard: true, site: true },
+    include: { guard: true, site: true, company: true },
   })
+
+  // 発注元への承認依頼メール
+  if (clientEmail) {
+    const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+    const approvalUrl = `${baseUrl}/api/security-reports/approve/${report.approvalToken}`
+    const dateStr = new Date(reportDate).toLocaleDateString('ja-JP')
+    const subject = `【承認依頼】${dateStr} ${(report as any).site.name} 警備報告書`
+    const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;font-size:18px">警備報告書 承認依頼</h2>
+  </div>
+  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+    <p>担当者様</p>
+    <p>下記の警備報告書のご確認・承認をお願いします。</p>
+    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
+      <p><strong>報告日:</strong> ${dateStr}</p>
+      <p><strong>現場:</strong> ${(report as any).site.name}</p>
+      <p><strong>担当隊員:</strong> ${(report as any).guard.name}</p>
+    </div>
+    <div style="text-align:center;margin:24px 0">
+      <a href="${approvalUrl}" style="background:#27ae60;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">報告書を承認する</a>
+    </div>
+    <p style="font-size:12px;color:#999">${(report as any).company.name} | GuardSync</p>
+  </div>
+</div>`
+    await sendEmail(clientEmail, subject, html)
+  }
+
   res.status(201).json(report)
 })
 

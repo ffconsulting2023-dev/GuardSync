@@ -36,6 +36,7 @@ model Company {
   autoReceipts  AutoReceipt[]
   invitations   Invitation[]
   lineWorksSettings LineWorksSettings?
+  securityReports SecurityReport[]
 }
 
 enum Plan {
@@ -437,6 +438,7 @@ model EContractSignature {
 model SecurityReport {
   id          String   @id @default(uuid())
   companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
   guardId     String
   guard       Guard    @relation(fields: [guardId], references: [id])
   siteId      String
