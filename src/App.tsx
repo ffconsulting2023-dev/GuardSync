@@ -17,6 +17,7 @@ import SignContractPage from './pages/SignContractPage'
 import RegisterPage from './pages/RegisterPage'
 import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
+import GuardAppPage from './pages/guard/GuardAppPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="/login" element={auth.user ? <Navigate to="/" replace /> : <LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/sign/:token" element={<SignContractPage />} />
+          <Route path="/guard/*" element={auth.user ? <GuardAppPage /> : <Navigate to="/login" replace />} />
           <Route
             path="/"
             element={
