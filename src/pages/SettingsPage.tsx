@@ -27,6 +27,10 @@ export default function SettingsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['lw-settings'] }),
   })
 
+  const testLwMutation = useMutation({
+    mutationFn: () => api.post('/settings/line-works/test'),
+  })
+
   const inviteMutation = useMutation({
     mutationFn: (email: string) => api.post('/auth/invite', { email }),
     onSuccess: (res) => { setInviteResult(res.data); setInviteEmail('') },
@@ -113,6 +117,22 @@ export default function SettingsPage() {
                 {saveLwMutation.isPending ? '保存中...' : '保存'}
               </button>
               {saveLwMutation.isSuccess && <p className="text-green-600 text-sm">✅ 保存しました</p>}
+            </div>
+          )}
+
+          {lwSettings && canAdmin && (
+            <div className="card space-y-3">
+              <h3 className="font-semibold text-gray-800">接続テスト</h3>
+              <p className="text-xs text-gray-500">設定済みのBot IDとChannel IDに対してテストメッセージを送信します。</p>
+              <button
+                onClick={() => testLwMutation.mutate()}
+                disabled={testLwMutation.isPending}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {testLwMutation.isPending ? '送信中...' : '📨 テストメッセージ送信'}
+              </button>
+              {testLwMutation.isSuccess && <p className="text-green-600 text-sm">✅ {(testLwMutation.data as any)?.data?.message}</p>}
+              {testLwMutation.isError && <p className="text-red-600 text-sm">❌ {(testLwMutation.error as any)?.response?.data?.error}</p>}
             </div>
           )}
         </div>

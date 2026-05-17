@@ -1381,6 +1381,90 @@ cron.schedule('55 23 28-31 * *', async () => {
 })
 
 // ─────────────────────────────────────────────
+// メール受信 Webhook (SendGrid Inbound Parse)
+// ─────────────────────────────────────────────
+// SendGrid → Settings > Inbound Parse > POST /api/inbound/email
+app.post('/api/inbound/email', express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    const from: string = req.body.from || req.body.sender || ''
+    const subject: string = req.body.subject || ''
+    const text: string = req.body.text || req.body.html || ''
+    const rawContent = `差出人: ${from}\n件名: ${subject}\n\n${text}`.slice(0, 2000)
+
+    // メールアドレスドメインからテナント特定（例: receive@{company_code}.guardsync.jp）
+    // シンプルに全会社共通受信 → 会社コードが件名またはToに含まれる場合に振り分け
+    // ここでは最初に見つかった有効会社に登録（本番は会社コード解析を追加）
+    const firstCompany = await prisma.company.findFirst({ where: { isActive: true } })
+    if (!firstCompany) { res.status(200).send('ok'); return }
+
+    await prisma.autoReceipt.create({
+      data: {
+        companyId: firstCompany.id,
+        source: 'EMAIL',
+        rawContent,
+        status: 'PENDING',
+      },
+    })
+    console.log('[inbound/email] AutoReceipt created')
+    res.status(200).send('ok')
+  } catch (err) {
+    console.error('[inbound/email] error:', err)
+    res.status(200).send('ok') // SendGridは200以外でリトライするため必ず200を返す
+  }
+})
+
+// ─────────────────────────────────────────────
+// FAX受信 Webhook stub (Google Vision API OCR)
+// ─────────────────────────────────────────────
+// FAX受信サービス（eFax, RingCentral等）からPDFをPOSTで受け取り、
+// Google Vision API でOCRしてAutoReceiptに登録する
+app.post('/api/inbound/fax', async (req, res) => {
+  try {
+    // req.body.pdfBase64 または req.body.imageBase64 を想定
+    const rawText: string = req.body.text || req.body.ocrText || 'FAX受信（OCR未処理）'
+    const from: string = req.body.from || req.body.callerNumber || '不明'
+    const rawContent = `FAX送信元: ${from}\n\n${rawText}`.slice(0, 2000)
+
+    const firstCompany = await prisma.company.findFirst({ where: { isActive: true } })
+    if (!firstCompany) { res.status(200).send('ok'); return }
+
+    await prisma.autoReceipt.create({
+      data: {
+        companyId: firstCompany.id,
+        source: 'FAX',
+        rawContent,
+        status: 'PENDING',
+      },
+    })
+    console.log('[inbound/fax] AutoReceipt created from FAX')
+    res.status(200).json({ success: true })
+  } catch (err) {
+    console.error('[inbound/fax] error:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// LINE Works 接続テスト
+// ─────────────────────────────────────────────
+app.post('/api/settings/line-works/test', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const settings = await prisma.lineWorksSettings.findUnique({ where: { companyId } })
+  if (!settings) { res.status(400).json({ error: 'LINE Works設定が見つかりません' }); return }
+
+  try {
+    const clientId = process.env.LINE_WORKS_CLIENT_ID || ''
+    const clientSecret = process.env.LINE_WORKS_CLIENT_SECRET || ''
+    const token = await getLineWorksToken(clientId, clientSecret)
+    if (!token) { res.status(400).json({ error: 'アクセストークン取得失敗。環境変数（LINE_WORKS_CLIENT_ID等）を確認してください' }); return }
+    await sendLineWorksMessage(settings.botId, settings.channelId, token, '🔔 GuardSync LINE Works 接続テスト成功！')
+    res.json({ success: true, message: 'テストメッセージを送信しました' })
+  } catch (err: any) {
+    res.status(400).json({ error: `接続失敗: ${err.message}` })
+  }
+})
+
+// ─────────────────────────────────────────────
 // 静的ファイル配信（本番）
 // ─────────────────────────────────────────────
 
