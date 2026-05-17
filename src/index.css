@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-primary: #1e3a5f;
+  --color-primary-light: #2d5282;
+  --color-accent: #e67e22;
+  --color-success: #27ae60;
+  --color-warning: #f39c12;
+  --color-danger: #e74c3c;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+  background-color: #f5f6fa;
+  color: #2c3e50;
+  overflow-x: hidden;
+}
+
+/* PWA safe area */
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* スクロールバー非表示（モバイル） */
+::-webkit-scrollbar {
+  display: none;
+}
+
+/* カード共通スタイル */
+.card {
+  @apply bg-white rounded-xl shadow-sm border border-gray-100 p-4;
+}
+
+/* ボタン共通スタイル */
+.btn-primary {
+  @apply bg-[#1e3a5f] text-white px-4 py-2 rounded-lg font-medium hover:bg-[#2d5282] active:scale-95 transition-all;
+}
+
+.btn-secondary {
+  @apply bg-white text-[#1e3a5f] border border-[#1e3a5f] px-4 py-2 rounded-lg font-medium hover:bg-gray-50 active:scale-95 transition-all;
+}
+
+.btn-danger {
+  @apply bg-red-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-red-600 active:scale-95 transition-all;
+}
+
+/* ステータスバッジ */
+.badge {
+  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+}
+
+.badge-success { @apply bg-green-100 text-green-800; }
+.badge-warning { @apply bg-yellow-100 text-yellow-800; }
+.badge-danger  { @apply bg-red-100 text-red-800; }
+.badge-info    { @apply bg-blue-100 text-blue-800; }
+.badge-gray    { @apply bg-gray-100 text-gray-800; }
+
+/* フォーム */
+.form-input {
+  @apply w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#1e3a5f] focus:border-transparent;
+}
+
+.form-label {
+  @apply block text-sm font-medium text-gray-700 mb-1;
+}

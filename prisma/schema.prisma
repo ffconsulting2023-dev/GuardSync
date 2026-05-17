@@ -1,0 +1,524 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// マルチテナント
+// ─────────────────────────────────────────────
+
+model Company {
+  id          String   @id @default(uuid())
+  name        String
+  code        String   @unique // 会社コード（ログイン用）
+  plan        Plan     @default(MIN)
+  isActive    Boolean  @default(true)
+  isSuperAdmin Boolean @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users         User[]
+  guards        Guard[]
+  sites         Site[]
+  contracts     Contract[]
+  partners      Partner[]
+  vehicles      Vehicle[]
+  schedules     Schedule[]
+  attendances   Attendance[]
+  invoices      Invoice[]
+  dailyPayRequests DailyPayRequest[]
+  eContracts    ElectronicContract[]
+  notifications Notification[]
+  autoReceipts  AutoReceipt[]
+  invitations   Invitation[]
+  lineWorksSettings LineWorksSettings?
+}
+
+enum Plan {
+  MIN
+  MAX
+}
+
+model Invitation {
+  id          String   @id @default(uuid())
+  email       String
+  token       String   @unique @default(uuid())
+  companyId   String?
+  company     Company? @relation(fields: [companyId], references: [id])
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────
+// ユーザー（管理者・オペレーター）
+// ─────────────────────────────────────────────
+
+model User {
+  id          String   @id @default(uuid())
+  email       String   @unique
+  password    String
+  name        String
+  role        UserRole @default(OPERATOR)
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  isSuperAdmin Boolean @default(false)
+  isActive    Boolean  @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdContracts     Contract[]
+  createdInvoices      Invoice[]
+  approvedDailyPays    DailyPayRequest[] @relation("ApprovedBy")
+  eContractSignatures  EContractSignature[]
+}
+
+enum UserRole {
+  SUPER_ADMIN   // 開発者（全テナント閲覧）
+  ADMIN         // 会社管理者
+  MANAGER       // 管理者（配員・請求）
+  OPERATOR      // オペレーター（管制）
+  VIEWER        // 閲覧のみ
+}
+
+// ─────────────────────────────────────────────
+// 隊員（Guard）
+// ─────────────────────────────────────────────
+
+model Guard {
+  id              String      @id @default(uuid())
+  companyId       String
+  company         Company     @relation(fields: [companyId], references: [id])
+  employeeNumber  String
+  name            String
+  nameKana        String
+  birthDate       DateTime?
+  gender          Gender?
+  phone           String?
+  email           String?
+  address         String?
+  certifications  String[]    // 警備業務検定等
+  employmentType  EmploymentType @default(PART_TIME)
+  bankAccount     Json?       // { bank, branch, type, number, holder }
+  dailyPayEnabled Boolean     @default(false)
+  lineWorksId     String?     // LINE Works メンバーID
+  isActive        Boolean     @default(true)
+  joinedAt        DateTime?
+  leftAt          DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  schedules       Schedule[]
+  attendances     Attendance[]
+  dailyPayRequests DailyPayRequest[]
+  securityReports SecurityReport[]
+
+  @@unique([companyId, employeeNumber])
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum EmploymentType {
+  FULL_TIME     // 正社員
+  PART_TIME     // アルバイト・パート
+  CONTRACT      // 契約社員
+  DISPATCH      // 派遣
+}
+
+// ─────────────────────────────────────────────
+// 現場（Site）
+// ─────────────────────────────────────────────
+
+model Site {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  name        String
+  address     String
+  lat         Float?
+  lng         Float?
+  clientName  String?  // 発注元名
+  clientPhone String?
+  notes       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  contracts   Contract[]
+  schedules   Schedule[]
+  securityReports SecurityReport[]
+}
+
+// ─────────────────────────────────────────────
+// 契約（Contract）
+// ─────────────────────────────────────────────
+
+model Contract {
+  id            String         @id @default(uuid())
+  companyId     String
+  company       Company        @relation(fields: [companyId], references: [id])
+  siteId        String
+  site          Site           @relation(fields: [siteId], references: [id])
+  contractNumber String        @unique
+  clientName    String
+  startDate     DateTime
+  endDate       DateTime?
+  unitPrice     Int            // 単価（円）
+  guardCount    Int            @default(1)
+  shiftPattern  Json?          // { start, end, breakMinutes }
+  status        ContractStatus @default(ACTIVE)
+  notes         String?
+  createdById   String
+  createdBy     User           @relation(fields: [createdById], references: [id])
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  invoiceItems  InvoiceItem[]
+  eContracts    ElectronicContract[]
+}
+
+enum ContractStatus {
+  DRAFT
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  CANCELLED
+}
+
+// ─────────────────────────────────────────────
+// 協力会社（Partner）
+// ─────────────────────────────────────────────
+
+model Partner {
+  id          String      @id @default(uuid())
+  companyId   String
+  company     Company     @relation(fields: [companyId], references: [id])
+  name        String
+  type        PartnerType @default(GENERAL)
+  contactName String?
+  phone       String?
+  email       String?
+  priority    Int         @default(0) // 優先度（高いほど優先）
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+enum PartnerType {
+  GROUP      // グループ会社（最優先）
+  PREFERRED  // 優先協力会社
+  GENERAL    // 一般協力会社
+}
+
+// ─────────────────────────────────────────────
+// 車両（Vehicle）
+// ─────────────────────────────────────────────
+
+model Vehicle {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  plateNumber String
+  model       String?
+  year        Int?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────
+// シフト・配員（Schedule）
+// ─────────────────────────────────────────────
+
+model Schedule {
+  id          String         @id @default(uuid())
+  companyId   String
+  company     Company        @relation(fields: [companyId], references: [id])
+  guardId     String
+  guard       Guard          @relation(fields: [guardId], references: [id])
+  siteId      String
+  site        Site           @relation(fields: [siteId], references: [id])
+  date        DateTime       @db.Date
+  startTime   String         // "09:00"
+  endTime     String         // "17:00"
+  status      ScheduleStatus @default(ASSIGNED)
+  confirmedAt DateTime?      // 前日確認送信日時
+  notes       String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  attendance  Attendance?
+
+  @@index([companyId, date])
+  @@index([guardId, date])
+}
+
+enum ScheduleStatus {
+  DRAFT       // 下書き
+  ASSIGNED    // 配員済み
+  CONFIRMED   // 隊員確認済み
+  CANCELLED   // キャンセル
+}
+
+// ─────────────────────────────────────────────
+// 出退勤（Attendance）
+// ─────────────────────────────────────────────
+
+model Attendance {
+  id           String           @id @default(uuid())
+  companyId    String
+  company      Company          @relation(fields: [companyId], references: [id])
+  guardId      String
+  guard        Guard            @relation(fields: [guardId], references: [id])
+  scheduleId   String           @unique
+  schedule     Schedule         @relation(fields: [scheduleId], references: [id])
+  clockInAt    DateTime?
+  clockOutAt   DateTime?
+  breakMinutes Int              @default(0)
+  status       AttendanceStatus @default(PENDING)
+  notes        String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+}
+
+enum AttendanceStatus {
+  PENDING     // 未打刻
+  CLOCKED_IN  // 出勤済み
+  COMPLETED   // 退勤済み
+  ABSENT      // 欠勤
+  LATE        // 遅刻
+}
+
+// ─────────────────────────────────────────────
+// 請求（Invoice）
+// ─────────────────────────────────────────────
+
+model Invoice {
+  id            String        @id @default(uuid())
+  companyId     String
+  company       Company       @relation(fields: [companyId], references: [id])
+  invoiceNumber String        @unique
+  clientName    String
+  clientEmail   String?
+  issueDate     DateTime      @db.Date
+  dueDate       DateTime      @db.Date
+  subtotal      Int
+  taxRate       Float         @default(0.1)
+  taxAmount     Int
+  total         Int
+  status        InvoiceStatus @default(DRAFT)
+  sentAt        DateTime?
+  paidAt        DateTime?
+  notes         String?
+  createdById   String
+  createdBy     User          @relation(fields: [createdById], references: [id])
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  items         InvoiceItem[]
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  contractId  String?
+  contract    Contract? @relation(fields: [contractId], references: [id])
+  description String
+  quantity    Int
+  unitPrice   Int
+  amount      Int
+  date        DateTime? @db.Date
+}
+
+// ─────────────────────────────────────────────
+// 日払い（DailyPay）
+// ─────────────────────────────────────────────
+
+model DailyPayRequest {
+  id           String          @id @default(uuid())
+  companyId    String
+  company      Company         @relation(fields: [companyId], references: [id])
+  guardId      String
+  guard        Guard           @relation(fields: [guardId], references: [id])
+  requestDate  DateTime        @db.Date
+  amount       Int             // 申請金額
+  feeRate      Float           @default(0.03) // 手数料率（3%等）
+  feeAmount    Int             // 手数料
+  netAmount    Int             // 振込額
+  status       DailyPayStatus  @default(PENDING)
+  approvedById String?
+  approvedBy   User?           @relation("ApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  paidAt       DateTime?
+  deductedAt   DateTime?       // 月末給与差引日
+  notes        String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+}
+
+enum DailyPayStatus {
+  PENDING     // 申請中
+  APPROVED    // 承認済み
+  PAID        // 支払済み
+  REJECTED    // 否認
+  DEDUCTED    // 給与差引済み
+}
+
+// ─────────────────────────────────────────────
+// 電子契約（ElectronicContract）
+// ─────────────────────────────────────────────
+
+model ElectronicContract {
+  id              String          @id @default(uuid())
+  companyId       String
+  company         Company         @relation(fields: [companyId], references: [id])
+  contractId      String?
+  contract        Contract?       @relation(fields: [contractId], references: [id])
+  title           String
+  content         String          // 契約文書テキスト
+  pdfPath         String?         // 生成されたPDFパス
+  status          EContractStatus @default(DRAFT)
+  expiresAt       DateTime?       // 署名期限
+  timestampToken  String?         // RFC3161 TSAトークン（Base64）
+  timestampAt     DateTime?       // タイムスタンプ取得日時
+  auditLog        Json[]          @default([]) // 操作ログ
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  signatures      EContractSignature[]
+}
+
+enum EContractStatus {
+  DRAFT
+  SENT       // 署名依頼送信済み
+  PARTIALLY_SIGNED
+  COMPLETED  // 全員署名済み
+  EXPIRED
+  CANCELLED
+}
+
+model EContractSignature {
+  id              String     @id @default(uuid())
+  eContractId     String
+  eContract       ElectronicContract @relation(fields: [eContractId], references: [id], onDelete: Cascade)
+  signerEmail     String
+  signerName      String
+  userId          String?
+  user            User?      @relation(fields: [userId], references: [id])
+  token           String     @unique @default(uuid()) // 署名URLトークン
+  signedAt        DateTime?
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime   @default(now())
+}
+
+// ─────────────────────────────────────────────
+// 警備報告書（SecurityReport）
+// ─────────────────────────────────────────────
+
+model SecurityReport {
+  id          String   @id @default(uuid())
+  companyId   String
+  guardId     String
+  guard       Guard    @relation(fields: [guardId], references: [id])
+  siteId      String
+  site        Site     @relation(fields: [siteId], references: [id])
+  reportDate  DateTime @db.Date
+  content     Json     // 報告内容（パトロール記録・特記事項等）
+  approvalToken String? @unique @default(uuid()) // メールリンク承認用
+  approvedAt  DateTime?
+  approvedBy  String?
+  pdfPath     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────
+// LINE Works設定
+// ─────────────────────────────────────────────
+
+model LineWorksSettings {
+  id            String   @id @default(uuid())
+  companyId     String   @unique
+  company       Company  @relation(fields: [companyId], references: [id])
+  botId         String
+  channelId     String
+  accessToken   String?
+  tokenExpiresAt DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────
+// 通知（Notification）
+// ─────────────────────────────────────────────
+
+model Notification {
+  id          String           @id @default(uuid())
+  companyId   String
+  company     Company          @relation(fields: [companyId], references: [id])
+  type        NotificationType
+  title       String
+  body        String
+  targetId    String?          // 対象ID（guardId等）
+  channel     String           @default("LINE_WORKS") // LINE_WORKS / EMAIL / BOTH
+  sentAt      DateTime?
+  status      String           @default("PENDING")
+  createdAt   DateTime         @default(now())
+}
+
+enum NotificationType {
+  DAY_BEFORE_CONFIRM  // 前日確認
+  SHIFT_CHANGE        // シフト変更
+  EMERGENCY           // 緊急連絡
+  ANNOUNCEMENT        // お知らせ
+  DAILY_PAY           // 日払い通知
+}
+
+// ─────────────────────────────────────────────
+// 自動受付（AutoReceipt）- FAX/メール/LINE Works
+// ─────────────────────────────────────────────
+
+model AutoReceipt {
+  id          String            @id @default(uuid())
+  companyId   String
+  company     Company           @relation(fields: [companyId], references: [id])
+  source      ReceiptSource
+  rawContent  String            // OCR結果・メール本文等
+  parsedData  Json?             // 解析済みデータ
+  suggestion  Json?             // サジェスト（現場・日時・人数）
+  status      ReceiptStatus     @default(PENDING)
+  processedAt DateTime?
+  createdAt   DateTime          @default(now())
+}
+
+enum ReceiptSource {
+  FAX
+  EMAIL
+  LINE_WORKS
+}
+
+enum ReceiptStatus {
+  PENDING     // 未処理
+  SUGGESTED   // サジェスト表示中
+  ACCEPTED    // 受入済み（スケジュール登録）
+  REJECTED    // 却下
+}
