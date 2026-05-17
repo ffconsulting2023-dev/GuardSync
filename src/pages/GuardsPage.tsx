@@ -88,11 +88,14 @@ export default function GuardsPage() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">隊員管理</h1>
-        {canEdit && (
-          <button onClick={() => { setEditTarget(null); setForm(EMPTY_FORM); setShowForm(true) }} className="btn-primary text-sm">
-            + 隊員登録
-          </button>
-        )}
+        <div className="flex gap-2">
+          <a href={`${import.meta.env.VITE_API_URL || ''}/api/export/guards`} download className="btn-secondary text-sm">⬇ CSV</a>
+          {canEdit && (
+            <button onClick={() => { setEditTarget(null); setForm(EMPTY_FORM); setShowForm(true) }} className="btn-primary text-sm">
+              + 隊員登録
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 検索 */}

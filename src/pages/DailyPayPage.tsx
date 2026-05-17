@@ -50,7 +50,10 @@ export default function DailyPayPage() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">日払い管理</h1>
-        <button onClick={() => setShowForm(true)} className="btn-primary text-sm">+ 日払い申請</button>
+        <div className="flex gap-2">
+          <a href={`${import.meta.env.VITE_API_URL || ''}/api/export/daily-pay`} download className="btn-secondary text-sm">⬇ CSV</a>
+          <button onClick={() => setShowForm(true)} className="btn-primary text-sm">+ 日払い申請</button>
+        </div>
       </div>
 
       {isLoading ? (

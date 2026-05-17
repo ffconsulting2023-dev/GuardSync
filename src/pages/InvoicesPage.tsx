@@ -61,7 +61,10 @@ export default function InvoicesPage() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">請求管理</h1>
-        {canEdit && <button onClick={() => setShowForm(true)} className="btn-primary text-sm">+ 請求書作成</button>}
+        <div className="flex gap-2">
+          <a href={`${import.meta.env.VITE_API_URL || ''}/api/export/invoices`} download className="btn-secondary text-sm">⬇ CSV</a>
+          {canEdit && <button onClick={() => setShowForm(true)} className="btn-primary text-sm">+ 請求書作成</button>}
+        </div>
       </div>
 
       {isLoading ? (
