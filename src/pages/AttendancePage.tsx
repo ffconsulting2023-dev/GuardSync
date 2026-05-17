@@ -37,7 +37,14 @@ export default function AttendancePage() {
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-bold text-gray-800">出退勤管理</h1>
-        <input type="date" value={date} onChange={e => setDate(e.target.value)} className="form-input w-auto" />
+        <div className="flex items-center gap-2">
+          <a
+            href={`${import.meta.env.VITE_API_URL || ''}/api/export/attendance?from=${date}&to=${date}`}
+            download
+            className="btn-secondary text-sm"
+          >⬇ CSV</a>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} className="form-input w-auto" />
+        </div>
       </div>
 
       {/* サマリー */}

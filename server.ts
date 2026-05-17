@@ -1243,6 +1243,46 @@ app.get('/api/export/daily-pay', authenticate, requireRole('ADMIN', 'MANAGER'), 
   res.send('\uFEFF' + rows.join('\n'))
 })
 
+app.get('/api/export/attendance', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { from, to, year, month } = req.query
+  const y = year ? Number(year) : new Date().getFullYear()
+  const m = month ? Number(month) : new Date().getMonth() + 1
+  const dateFrom = from ? new Date(String(from)) : new Date(y, m - 1, 1)
+  const dateTo = to ? new Date(String(to)) : new Date(y, m, 0, 23, 59, 59)
+
+  const records = await prisma.attendance.findMany({
+    where: { companyId, clockInAt: { gte: dateFrom, lte: dateTo } },
+    include: { schedule: { include: { guard: true, site: true } } },
+    orderBy: { clockInAt: 'asc' },
+  })
+
+  const rows = [
+    ['社員番号', '氏名', '現場', '日付', '出勤時刻', '退勤時刻', '勤務時間（分）', '休憩時間（分）'],
+    ...records.map(a => {
+      const s = a.schedule as any
+      const clockIn = new Date(a.clockInAt as Date)
+      const clockOut = a.clockOutAt ? new Date(a.clockOutAt as Date) : null
+      const workMin = clockOut
+        ? Math.floor((clockOut.getTime() - clockIn.getTime()) / 60000) - (a.breakMinutes || 0)
+        : ''
+      return [
+        s?.guard?.employeeNumber || '',
+        s?.guard?.name || '',
+        s?.site?.name || '',
+        clockIn.toLocaleDateString('ja-JP'),
+        clockIn.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
+        clockOut ? clockOut.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '未退勤',
+        workMin,
+        a.breakMinutes || 0,
+      ].join(',')
+    }),
+  ]
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename="attendance_${y}_${m}.csv"`)
+  res.send('\uFEFF' + rows.join('\n'))
+})
+
 // ─────────────────────────────────────────────
 // 通知 API
 // ─────────────────────────────────────────────
