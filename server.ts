@@ -843,6 +843,87 @@ cron.schedule('0 10 * * *', async () => {
 })
 
 // ─────────────────────────────────────────────
+// 車両 API
+// ─────────────────────────────────────────────
+
+app.get('/api/vehicles', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const vehicles = await prisma.vehicle.findMany({
+    where: { companyId },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(vehicles)
+})
+
+app.post('/api/vehicles', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { plateNumber, model, year } = req.body
+  if (!plateNumber) { res.status(400).json({ error: 'ナンバープレートは必須です' }); return }
+
+  const vehicle = await prisma.vehicle.create({
+    data: { companyId, plateNumber, model, year: year ? Number(year) : undefined },
+  })
+  res.status(201).json(vehicle)
+})
+
+app.put('/api/vehicles/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.vehicle.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '車両が見つかりません' }); return }
+
+  const { plateNumber, model, year, isActive } = req.body
+  const vehicle = await prisma.vehicle.update({
+    where: { id: req.params.id },
+    data: { plateNumber, model, year: year ? Number(year) : undefined, isActive },
+  })
+  res.json(vehicle)
+})
+
+app.delete('/api/vehicles/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  await prisma.vehicle.updateMany({
+    where: { id: req.params.id, companyId },
+    data: { isActive: false },
+  })
+  res.json({ success: true })
+})
+
+// ─────────────────────────────────────────────
+// LINE Works Webhook API（自動受付）
+// ─────────────────────────────────────────────
+
+app.post('/api/webhook/line-works', async (req, res) => {
+  // LINE Works はBotが登録されているChanne IDを識別
+  const { type, content, source } = req.body
+
+  if (type !== 'message') { res.json({ ok: true }); return }
+
+  // テキストメッセージのみ処理
+  const text = content?.text
+  if (!text) { res.json({ ok: true }); return }
+
+  // チャンネルIDからCompanyを特定
+  const channelId = source?.channelId
+  if (!channelId) { res.json({ ok: true }); return }
+
+  const lwSettings = await prisma.lineWorksSettings.findFirst({ where: { channelId } })
+  if (!lwSettings) { res.json({ ok: true }); return }
+
+  // 簡易パース：「○月○日 ×現場 △名」のような文言を受信した場合
+  const autoReceipt = await prisma.autoReceipt.create({
+    data: {
+      companyId: lwSettings.companyId,
+      source: 'LINE_WORKS',
+      rawContent: text,
+      status: 'PENDING',
+    },
+  })
+
+  console.log(`[webhook] LINE Works自動受付: ${text.slice(0, 50)} (companyId: ${lwSettings.companyId})`)
+  res.json({ ok: true })
+})
+
+// ─────────────────────────────────────────────
 // 設定 API
 // ─────────────────────────────────────────────
 

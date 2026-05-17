@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { path: '/e-contracts', label: '電子契約',       icon: '✍️' },
   { path: '/partners',    label: '協力会社',       icon: '🤝' },
   { path: '/reports',     label: '警備報告書',     icon: '📝' },
+  { path: '/vehicles',    label: '車両管理',       icon: '🚗' },
   { path: '/settings',    label: '設定',           icon: '⚙️' },
 ]
 
