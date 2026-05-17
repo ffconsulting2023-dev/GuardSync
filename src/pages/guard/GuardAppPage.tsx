@@ -11,10 +11,17 @@ import { ja } from 'date-fns/locale'
 
 type Tab = 'today' | 'schedule' | 'attendance' | 'reports'
 
+const EMPTY_REPORT = {
+  guardId: '', siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd'),
+  weather: '晴れ', incidents: '', specialNotes: '',
+}
+
 export default function GuardAppPage() {
   const { user, logout } = useAuth()
   const [tab, setTab] = useState<Tab>('today')
   const [viewMonth, setViewMonth] = useState(new Date())
+  const [reportForm, setReportForm] = useState(EMPTY_REPORT)
+  const [showReportForm, setShowReportForm] = useState(false)
   const qc = useQueryClient()
 
   // 今日のシフト
@@ -44,6 +51,29 @@ export default function GuardAppPage() {
   const clockOutMutation = useMutation({
     mutationFn: (scheduleId: string) => api.post('/attendance/clock-out', { scheduleId, breakMinutes: 60 }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['guard-today'] }),
+  })
+
+  // 報告書取得
+  const { data: myReports = [] } = useQuery({
+    queryKey: ['guard-reports', user?.id],
+    queryFn: () => api.get('/security-reports').then(r => r.data.filter((rep: any) => rep.guardId === user?.id)),
+    enabled: !!user?.id && tab === 'reports',
+  })
+
+  // 現場取得（報告書用）
+  const { data: mySites = [] } = useQuery({
+    queryKey: ['sites'],
+    queryFn: () => api.get('/sites').then(r => r.data),
+    enabled: tab === 'reports',
+  })
+
+  const submitReportMutation = useMutation({
+    mutationFn: (data: any) => api.post('/security-reports', data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['guard-reports'] })
+      setShowReportForm(false)
+      setReportForm(EMPTY_REPORT)
+    },
   })
 
   const TAB_ITEMS = [
@@ -312,12 +342,97 @@ export default function GuardAppPage() {
         {/* 報告書タブ */}
         {tab === 'reports' && (
           <div className="p-4 space-y-4">
-            <h2 className="text-xl font-bold text-gray-800">警備報告書</h2>
-            <p className="text-sm text-gray-500">報告書の提出・確認はPCからも可能です。</p>
-            <div className="card text-center py-8">
-              <p className="text-3xl mb-3">📝</p>
-              <p className="text-gray-500 text-sm">報告書機能は管制画面から利用してください</p>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-800">警備報告書</h2>
+              <button onClick={() => {
+                setReportForm({ ...EMPTY_REPORT, guardId: user?.id || '' })
+                setShowReportForm(true)
+              }} className="btn-primary text-sm">+ 提出</button>
             </div>
+
+            {myReports.length === 0 ? (
+              <div className="card text-center py-8">
+                <p className="text-3xl mb-3">📝</p>
+                <p className="text-gray-400 text-sm">提出済みの報告書はありません</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {myReports.map((rep: any) => (
+                  <div key={rep.id} className="card">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="font-medium text-gray-800">{rep.site?.name}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.weather}</p>
+                      </div>
+                      <span className={`badge ${rep.approvedAt ? 'badge-success' : 'badge-warning'}`}>
+                        {rep.approvedAt ? '承認済' : '確認待ち'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 報告書提出フォーム */}
+            {showReportForm && (
+              <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
+                <div className="sticky top-0 bg-white px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                  <h3 className="font-semibold text-gray-800">警備報告書 提出</h3>
+                  <button onClick={() => setShowReportForm(false)} className="text-gray-400">✕</button>
+                </div>
+                <form onSubmit={e => {
+                  e.preventDefault()
+                  submitReportMutation.mutate({
+                    ...reportForm,
+                    content: { patrolRecords: [], incidents: reportForm.incidents, specialNotes: reportForm.specialNotes, weather: reportForm.weather }
+                  })
+                }} className="p-4 space-y-4">
+                  <div>
+                    <label className="form-label">現場 *</label>
+                    <select value={reportForm.siteId} onChange={e => setReportForm(f => ({ ...f, siteId: e.target.value }))} className="form-input" required>
+                      <option value="">選択してください</option>
+                      {mySites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="form-label">日付 *</label>
+                    <input type="date" value={reportForm.reportDate} onChange={e => setReportForm(f => ({ ...f, reportDate: e.target.value }))} className="form-input" required />
+                  </div>
+                  <div>
+                    <label className="form-label">天候</label>
+                    <select value={reportForm.weather} onChange={e => setReportForm(f => ({ ...f, weather: e.target.value }))} className="form-input">
+                      {['晴れ', '曇り', '雨', '雪', '強風'].map(w => <option key={w} value={w}>{w}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="form-label">特記事項・インシデント</label>
+                    <textarea
+                      value={reportForm.incidents}
+                      onChange={e => setReportForm(f => ({ ...f, incidents: e.target.value }))}
+                      className="form-input"
+                      rows={4}
+                      placeholder="異常なし、または発生した事象を記載"
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label">その他連絡事項</label>
+                    <textarea
+                      value={reportForm.specialNotes}
+                      onChange={e => setReportForm(f => ({ ...f, specialNotes: e.target.value }))}
+                      className="form-input"
+                      rows={3}
+                      placeholder="引き継ぎ事項等"
+                    />
+                  </div>
+                  <div className="flex gap-3 pb-8">
+                    <button type="button" onClick={() => setShowReportForm(false)} className="btn-secondary flex-1">キャンセル</button>
+                    <button type="submit" disabled={submitReportMutation.isPending} className="btn-primary flex-1 disabled:opacity-50">
+                      {submitReportMutation.isPending ? '提出中...' : '提出'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
           </div>
         )}
       </main>
