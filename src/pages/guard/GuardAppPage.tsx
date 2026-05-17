@@ -56,7 +56,7 @@ export default function GuardAppPage() {
   // 報告書取得
   const { data: myReports = [] } = useQuery({
     queryKey: ['guard-reports', user?.id],
-    queryFn: () => api.get('/security-reports').then(r => r.data.filter((rep: any) => rep.guardId === user?.id)),
+    queryFn: () => api.get(`/security-reports?guardId=${user?.id}`).then(r => r.data),
     enabled: !!user?.id && tab === 'reports',
   })
 

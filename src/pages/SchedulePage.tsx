@@ -58,6 +58,10 @@ export default function SchedulePage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   })
 
+  const reminderMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/schedules/${id}/send-reminder`),
+  })
+
   const resetForm = () => setForm({ guardId: '', siteId: '', date: format(new Date(), 'yyyy-MM-dd'), startTime: '09:00', endTime: '17:00', notes: '' })
 
   const weekDays = view === 'week'
@@ -153,7 +157,15 @@ export default function SchedulePage() {
                         </div>
                       )}
                       {canEdit && s.status !== 'CANCELLED' && (
-                        <button onClick={() => { if (window.confirm('キャンセルしますか？')) cancelMutation.mutate(s.id) }} className="text-red-400 hover:text-red-600 text-xs">✕</button>
+                        <div className="flex gap-2 items-center">
+                          <button
+                            onClick={() => reminderMutation.mutate(s.id)}
+                            disabled={reminderMutation.isPending}
+                            title="前日確認メール送信"
+                            className="text-blue-400 hover:text-blue-600 text-xs"
+                          >📨</button>
+                          <button onClick={() => { if (window.confirm('キャンセルしますか？')) cancelMutation.mutate(s.id) }} className="text-red-400 hover:text-red-600 text-xs">✕</button>
+                        </div>
                       )}
                     </div>
                   ))}

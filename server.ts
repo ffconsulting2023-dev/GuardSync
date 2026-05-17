@@ -1381,6 +1381,44 @@ cron.schedule('55 23 28-31 * *', async () => {
 })
 
 // ─────────────────────────────────────────────
+// スケジュール 前日確認メール 手動送信
+// ─────────────────────────────────────────────
+app.post('/api/schedules/:id/send-reminder', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const schedule = await prisma.schedule.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { guard: true, site: true, company: { include: { lineWorksSettings: true } } },
+  })
+  if (!schedule) { res.status(404).json({ error: '配員データが見つかりません' }); return }
+
+  const { guard, site, company } = schedule as any
+  const dateStr = new Date(schedule.date).toLocaleDateString('ja-JP')
+  const text = `【前日確認】${guard.name}様\n明日 ${dateStr} ${schedule.startTime}〜${schedule.endTime}\n現場: ${site.name}\nご確認ください。`
+
+  let emailSent = false
+  let lineWorksSent = false
+
+  if (guard.email) {
+    emailSent = await sendEmail(
+      guard.email,
+      `【前日確認】${dateStr} ${site.name}`,
+      `<p>${text.replace(/\n/g, '<br>')}</p>`,
+      text
+    )
+  }
+
+  const lw = company.lineWorksSettings
+  if (lw) {
+    const clientId = process.env.LINE_WORKS_CLIENT_ID || ''
+    const clientSecret = process.env.LINE_WORKS_CLIENT_SECRET || ''
+    const token = await getLineWorksToken(clientId, clientSecret)
+    if (token) lineWorksSent = await sendLineWorksMessage(lw.botId, lw.channelId, token, text)
+  }
+
+  res.json({ success: true, emailSent, lineWorksSent })
+})
+
+// ─────────────────────────────────────────────
 // メール受信 Webhook (SendGrid Inbound Parse)
 // ─────────────────────────────────────────────
 // SendGrid → Settings > Inbound Parse > POST /api/inbound/email
