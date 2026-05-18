@@ -146,12 +146,17 @@ model Site {
   company     Company  @relation(fields: [companyId], references: [id])
   clientId    String?
   client      Client?  @relation(fields: [clientId], references: [id])
+  siteContactId    String?
+  siteContact      ClientContact? @relation("SiteContactRef", fields: [siteContactId], references: [id])
   name        String
   address     String
   lat         Float?
   lng         Float?
   clientName  String?  // 発注元名（取引先マスタ未設定時のフォールバック / スナップショット）
   clientPhone String?
+  siteContactName  String?  // 現場担当者名（マスタ未設定 or 自由記述上書き時のスナップショット）
+  siteContactPhone String?
+  siteContactEmail String?
   notes       String?
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
@@ -171,18 +176,46 @@ model Client {
   companyId   String
   company     Company  @relation(fields: [companyId], references: [id])
   name        String
-  contactName String?
+  contactName String?  // （旧）代表担当名 — 後方互換のため残置
   phone       String?
   email       String?
   address     String?
   notes       String?
+  // 代表者情報
+  representativeName  String?
+  representativeTitle String?
+  representativePhone String?
+  representativeEmail String?
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  contacts    ClientContact[]
   sites       Site[]
   contracts   Contract[]
   invoices    Invoice[]
+}
+
+enum ClientContactType {
+  SITE        // 現場担当
+  ACCOUNTING  // 経理担当
+}
+
+model ClientContact {
+  id          String   @id @default(uuid())
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  type        ClientContactType
+  name        String
+  title       String?
+  phone       String?
+  email       String?
+  notes       String?
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sitesAsSiteContact Site[] @relation("SiteContactRef")
 }
 
 // ─────────────────────────────────────────────

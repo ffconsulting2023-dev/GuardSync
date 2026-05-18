@@ -332,7 +332,7 @@ app.get('/api/sites', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const sites = await prisma.site.findMany({
     where: { companyId, isActive: true },
-    include: { client: true },
+    include: { client: true, siteContact: true },
     orderBy: { name: 'asc' },
   })
   res.json(sites)
@@ -345,18 +345,37 @@ async function resolveClientSnapshot(companyId: string, clientId: string | undef
   return client
 }
 
+async function resolveSiteContactSnapshot(companyId: string, clientId: string | null | undefined, siteContactId: string | undefined | null) {
+  if (!siteContactId) return null
+  const contact = await prisma.clientContact.findFirst({
+    where: { id: siteContactId, client: { companyId }, type: 'SITE' },
+  })
+  if (!contact) throw Object.assign(new Error('現場担当者が見つかりません'), { status: 400 })
+  if (clientId && contact.clientId !== clientId) {
+    throw Object.assign(new Error('現場担当者が選択した取引先に属していません'), { status: 400 })
+  }
+  return contact
+}
+
 app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { clientId, name, address, lat, lng, clientName, clientPhone, notes } = req.body
+  const { clientId, siteContactId, name, address, lat, lng, clientName, clientPhone,
+          siteContactName, siteContactPhone, siteContactEmail, notes } = req.body
   if (!name || !address) { res.status(400).json({ error: '現場名と住所は必須です' }); return }
 
   try {
     const client = await resolveClientSnapshot(companyId, clientId)
+    const contact = await resolveSiteContactSnapshot(companyId, client?.id ?? null, siteContactId)
     const site = await prisma.site.create({
       data: {
-        companyId, clientId: client?.id ?? null, name, address, lat, lng,
+        companyId, clientId: client?.id ?? null,
+        siteContactId: contact?.id ?? null,
+        name, address, lat, lng,
         clientName: client?.name ?? clientName ?? null,
         clientPhone: client?.phone ?? clientPhone ?? null,
+        siteContactName:  siteContactName  ?? contact?.name  ?? null,
+        siteContactPhone: siteContactPhone ?? contact?.phone ?? null,
+        siteContactEmail: siteContactEmail ?? contact?.email ?? null,
         notes,
       },
     })
@@ -371,16 +390,22 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
   const existing = await prisma.site.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '現場が見つかりません' }); return }
 
-  const { clientId, name, address, lat, lng, clientName, clientPhone, notes, isActive } = req.body
+  const { clientId, siteContactId, name, address, lat, lng, clientName, clientPhone,
+          siteContactName, siteContactPhone, siteContactEmail, notes, isActive } = req.body
   try {
     const client = await resolveClientSnapshot(companyId, clientId)
+    const contact = await resolveSiteContactSnapshot(companyId, client?.id ?? null, siteContactId)
     const site = await prisma.site.update({
       where: { id: req.params.id },
       data: {
         clientId: clientId === undefined ? undefined : (client?.id ?? null),
+        siteContactId: siteContactId === undefined ? undefined : (contact?.id ?? null),
         name, address, lat, lng,
         clientName: client?.name ?? clientName,
         clientPhone: client?.phone ?? clientPhone,
+        siteContactName: siteContactName !== undefined ? siteContactName : (contact?.name ?? undefined),
+        siteContactPhone: siteContactPhone !== undefined ? siteContactPhone : (contact?.phone ?? undefined),
+        siteContactEmail: siteContactEmail !== undefined ? siteContactEmail : (contact?.email ?? undefined),
         notes, isActive,
       },
     })
@@ -398,29 +423,103 @@ app.get('/api/clients', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const clients = await prisma.client.findMany({
     where: { companyId, isActive: true },
+    include: { contacts: { orderBy: [{ type: 'asc' }, { sortOrder: 'asc' }] } },
     orderBy: { name: 'asc' },
   })
   res.json(clients)
 })
 
+type IncomingContact = {
+  id?: string
+  type: 'SITE' | 'ACCOUNTING'
+  name: string
+  title?: string | null
+  phone?: string | null
+  email?: string | null
+  notes?: string | null
+  sortOrder?: number
+}
+
+function normalizeContacts(input: any): IncomingContact[] {
+  if (!Array.isArray(input)) return []
+  return input
+    .filter((c: any) => c && c.name && (c.type === 'SITE' || c.type === 'ACCOUNTING'))
+    .map((c: any, i: number) => ({
+      id: c.id || undefined,
+      type: c.type,
+      name: String(c.name),
+      title: c.title ?? null,
+      phone: c.phone ?? null,
+      email: c.email ?? null,
+      notes: c.notes ?? null,
+      sortOrder: typeof c.sortOrder === 'number' ? c.sortOrder : i,
+    }))
+}
+
 app.post('/api/clients', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { name, contactName, phone, email, address, notes } = req.body
+  const { name, contactName, phone, email, address, notes,
+          representativeName, representativeTitle, representativePhone, representativeEmail,
+          contacts } = req.body
   if (!name) { res.status(400).json({ error: '取引先名は必須です' }); return }
+  const incomingContacts = normalizeContacts(contacts)
   const client = await prisma.client.create({
-    data: { companyId, name, contactName, phone, email, address, notes },
+    data: {
+      companyId, name, contactName, phone, email, address, notes,
+      representativeName, representativeTitle, representativePhone, representativeEmail,
+      contacts: { create: incomingContacts.map(({ id: _id, ...c }) => c) },
+    },
+    include: { contacts: true },
   })
   res.status(201).json(client)
 })
 
 app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const existing = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  const existing = await prisma.client.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { contacts: true },
+  })
   if (!existing) { res.status(404).json({ error: '取引先が見つかりません' }); return }
-  const { name, contactName, phone, email, address, notes, isActive } = req.body
-  const client = await prisma.client.update({
-    where: { id: req.params.id },
-    data: { name, contactName, phone, email, address, notes, isActive },
+
+  const { name, contactName, phone, email, address, notes, isActive,
+          representativeName, representativeTitle, representativePhone, representativeEmail,
+          contacts } = req.body
+
+  const incoming = normalizeContacts(contacts)
+  const incomingIds = new Set(incoming.filter(c => c.id).map(c => c.id!))
+  const toDelete = existing.contacts.filter(c => !incomingIds.has(c.id)).map(c => c.id)
+  const toUpdate = incoming.filter(c => c.id)
+  const toCreate = incoming.filter(c => !c.id)
+
+  const client = await prisma.$transaction(async (tx) => {
+    await tx.client.update({
+      where: { id: req.params.id },
+      data: {
+        name, contactName, phone, email, address, notes, isActive,
+        representativeName, representativeTitle, representativePhone, representativeEmail,
+      },
+    })
+    if (toDelete.length) {
+      // Site 側の siteContactId を NULL に戻してからコンタクトを削除
+      await tx.site.updateMany({ where: { siteContactId: { in: toDelete } }, data: { siteContactId: null } })
+      await tx.clientContact.deleteMany({ where: { id: { in: toDelete } } })
+    }
+    for (const c of toUpdate) {
+      await tx.clientContact.update({
+        where: { id: c.id! },
+        data: { type: c.type, name: c.name, title: c.title, phone: c.phone, email: c.email, notes: c.notes, sortOrder: c.sortOrder },
+      })
+    }
+    if (toCreate.length) {
+      await tx.clientContact.createMany({
+        data: toCreate.map(({ id: _id, ...c }) => ({ ...c, clientId: req.params.id })),
+      })
+    }
+    return tx.client.findUnique({
+      where: { id: req.params.id },
+      include: { contacts: { orderBy: [{ type: 'asc' }, { sortOrder: 'asc' }] } },
+    })
   })
   res.json(client)
 })
