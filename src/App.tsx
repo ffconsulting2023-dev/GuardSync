@@ -45,7 +45,7 @@ export default function App() {
           <Route path="/sign/:token" element={<SignContractPage />} />
           <Route path="/guard/*" element={auth.user ? <GuardAppPage /> : <Navigate to="/login" replace />} />
           <Route
-            path="/"
+            path="/*"
             element={
               auth.user ? (
                 <Layout>
