@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { path: '/attendance',  label: '出退勤',         icon: '⏰' },
   { path: '/guards',      label: '隊員管理',       icon: '👷' },
   { path: '/sites',       label: '現場管理',       icon: '📍' },
+  { path: '/clients',     label: '取引先管理',     icon: '🏢' },
   { path: '/contracts',   label: '契約管理',       icon: '📄' },
   { path: '/invoices',    label: '請求管理',       icon: '💴' },
   { path: '/daily-pay',   label: '日払い',         icon: '💵' },

@@ -14,7 +14,7 @@ const STATUS_LABELS: Record<string, { label: string; className: string }> = {
 }
 
 const EMPTY_FORM = {
-  siteId: '', contractNumber: '', clientName: '', startDate: '', endDate: '',
+  siteId: '', clientId: '', contractNumber: '', clientName: '', startDate: '', endDate: '',
   unitPrice: '', guardCount: '1', notes: '',
 }
 
@@ -30,6 +30,22 @@ export default function ContractsPage() {
   })
 
   const { data: sites = [] } = useQuery({ queryKey: ['sites'], queryFn: () => api.get('/sites').then(r => r.data) })
+  const { data: clients = [] } = useQuery({ queryKey: ['clients'], queryFn: () => api.get('/clients').then(r => r.data) })
+
+  const handleSiteChange = (siteId: string) => {
+    const s = sites.find((x: any) => x.id === siteId)
+    setForm(f => ({
+      ...f,
+      siteId,
+      clientId: s?.clientId || f.clientId,
+      clientName: s?.client?.name ?? s?.clientName ?? f.clientName,
+    }))
+  }
+
+  const handleClientChange = (clientId: string) => {
+    const c = clients.find((x: any) => x.id === clientId)
+    setForm(f => ({ ...f, clientId, clientName: c?.name ?? f.clientName }))
+  }
 
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/contracts', data),
@@ -98,9 +114,16 @@ export default function ContractsPage() {
             <form onSubmit={e => { e.preventDefault(); createMutation.mutate(form) }} className="p-6 space-y-4">
               <div>
                 <label className="form-label">現場 *</label>
-                <select value={form.siteId} onChange={e => setForm(f => ({ ...f, siteId: e.target.value }))} className="form-input" required>
+                <select value={form.siteId} onChange={e => handleSiteChange(e.target.value)} className="form-input" required>
                   <option value="">選択してください</option>
                   {sites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="form-label">取引先（発注元）</label>
+                <select value={form.clientId} onChange={e => handleClientChange(e.target.value)} className="form-input">
+                  <option value="">— 未指定（手入力） —</option>
+                  {clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -110,7 +133,7 @@ export default function ContractsPage() {
                 </div>
                 <div>
                   <label className="form-label">発注元名 *</label>
-                  <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" required />
+                  <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" required disabled={!!form.clientId} />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">

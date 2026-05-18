@@ -26,6 +26,7 @@ model Company {
   sites         Site[]
   contracts     Contract[]
   partners      Partner[]
+  clients       Client[]
   vehicles      Vehicle[]
   schedules     Schedule[]
   attendances   Attendance[]
@@ -143,11 +144,13 @@ model Site {
   id          String   @id @default(uuid())
   companyId   String
   company     Company  @relation(fields: [companyId], references: [id])
+  clientId    String?
+  client      Client?  @relation(fields: [clientId], references: [id])
   name        String
   address     String
   lat         Float?
   lng         Float?
-  clientName  String?  // 発注元名
+  clientName  String?  // 発注元名（取引先マスタ未設定時のフォールバック / スナップショット）
   clientPhone String?
   notes       String?
   isActive    Boolean  @default(true)
@@ -160,6 +163,29 @@ model Site {
 }
 
 // ─────────────────────────────────────────────
+// 取引先（Client / 発注元）
+// ─────────────────────────────────────────────
+
+model Client {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  name        String
+  contactName String?
+  phone       String?
+  email       String?
+  address     String?
+  notes       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sites       Site[]
+  contracts   Contract[]
+  invoices    Invoice[]
+}
+
+// ─────────────────────────────────────────────
 // 契約（Contract）
 // ─────────────────────────────────────────────
 
@@ -169,6 +195,8 @@ model Contract {
   company       Company        @relation(fields: [companyId], references: [id])
   siteId        String
   site          Site           @relation(fields: [siteId], references: [id])
+  clientId      String?
+  client        Client?        @relation(fields: [clientId], references: [id])
   contractNumber String        @unique
   clientName    String
   startDate     DateTime
@@ -307,6 +335,8 @@ model Invoice {
   id            String        @id @default(uuid())
   companyId     String
   company       Company       @relation(fields: [companyId], references: [id])
+  clientId      String?
+  client        Client?       @relation(fields: [clientId], references: [id])
   invoiceNumber String        @unique
   clientName    String
   clientEmail   String?

@@ -19,6 +19,7 @@ import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
 import GuardAppPage from './pages/guard/GuardAppPage'
 import SettingsPage from './pages/SettingsPage'
+import ClientsPage from './pages/ClientsPage'
 import VehiclesPage from './pages/VehiclesPage'
 import AutoReceiptPage from './pages/AutoReceiptPage'
 import NotificationsPage from './pages/NotificationsPage'
@@ -59,6 +60,7 @@ export default function App() {
                     <Route path="invoices/*" element={<InvoicesPage />} />
                     <Route path="daily-pay/*" element={<DailyPayPage />} />
                     <Route path="partners/*" element={<PartnersPage />} />
+                    <Route path="clients/*" element={<ClientsPage />} />
                     <Route path="e-contracts/*" element={<EContractsPage />} />
                     <Route path="reports/*" element={<SecurityReportsPage />} />
                     <Route path="vehicles/*" element={<VehiclesPage />} />

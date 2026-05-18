@@ -20,7 +20,7 @@ interface InvoiceItem {
 }
 
 const EMPTY_FORM = {
-  invoiceNumber: '', clientName: '', clientEmail: '', issueDate: format(new Date(), 'yyyy-MM-dd'),
+  invoiceNumber: '', clientId: '', clientName: '', clientEmail: '', issueDate: format(new Date(), 'yyyy-MM-dd'),
   dueDate: '', taxRate: '0.1', notes: '',
 }
 
@@ -35,6 +35,21 @@ export default function InvoicesPage() {
     queryKey: ['invoices'],
     queryFn: () => api.get('/invoices').then(r => r.data),
   })
+
+  const { data: clients = [] } = useQuery({
+    queryKey: ['clients'],
+    queryFn: () => api.get('/clients').then(r => r.data),
+  })
+
+  const handleClientChange = (clientId: string) => {
+    const c = clients.find((x: any) => x.id === clientId)
+    setForm(f => ({
+      ...f,
+      clientId,
+      clientName: c?.name ?? f.clientName,
+      clientEmail: c?.email ?? f.clientEmail,
+    }))
+  }
 
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/invoices', data),
@@ -134,13 +149,22 @@ export default function InvoicesPage() {
                   <input type="text" value={form.invoiceNumber} onChange={e => setForm(f => ({ ...f, invoiceNumber: e.target.value }))} className="form-input" required />
                 </div>
                 <div>
-                  <label className="form-label">発注元名 *</label>
-                  <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" required />
+                  <label className="form-label">取引先（発注元）</label>
+                  <select value={form.clientId} onChange={e => handleClientChange(e.target.value)} className="form-input">
+                    <option value="">— 未指定（手入力） —</option>
+                    {clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
                 </div>
               </div>
-              <div>
-                <label className="form-label">発注元メールアドレス</label>
-                <input type="email" value={form.clientEmail} onChange={e => setForm(f => ({ ...f, clientEmail: e.target.value }))} className="form-input" />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="form-label">発注元名 *</label>
+                  <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" required disabled={!!form.clientId} />
+                </div>
+                <div>
+                  <label className="form-label">発注元メール</label>
+                  <input type="email" value={form.clientEmail} onChange={e => setForm(f => ({ ...f, clientEmail: e.target.value }))} className="form-input" disabled={!!form.clientId} />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

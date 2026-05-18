@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const EMPTY_FORM = { name: '', address: '', clientName: '', clientPhone: '', notes: '' }
+const EMPTY_FORM = { clientId: '', name: '', address: '', clientName: '', clientPhone: '', notes: '' }
 
 export default function SitesPage() {
   const { user } = useAuth()
@@ -18,6 +18,21 @@ export default function SitesPage() {
     queryFn: () => api.get('/sites').then(r => r.data),
   })
 
+  const { data: clients = [] } = useQuery({
+    queryKey: ['clients'],
+    queryFn: () => api.get('/clients').then(r => r.data),
+  })
+
+  const handleClientChange = (clientId: string) => {
+    const c = clients.find((x: any) => x.id === clientId)
+    setForm(f => ({
+      ...f,
+      clientId,
+      clientName: c?.name ?? f.clientName,
+      clientPhone: c?.phone ?? f.clientPhone,
+    }))
+  }
+
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/sites', data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sites'] }); setShowForm(false); setForm(EMPTY_FORM) },
@@ -30,7 +45,14 @@ export default function SitesPage() {
 
   const openEdit = (site: any) => {
     setEditTarget(site)
-    setForm({ name: site.name, address: site.address, clientName: site.clientName || '', clientPhone: site.clientPhone || '', notes: site.notes || '' })
+    setForm({
+      clientId: site.clientId || '',
+      name: site.name,
+      address: site.address,
+      clientName: site.clientName || '',
+      clientPhone: site.clientPhone || '',
+      notes: site.notes || '',
+    })
     setShowForm(true)
   }
 
@@ -93,12 +115,20 @@ export default function SitesPage() {
                 <input type="text" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))} className="form-input" required />
               </div>
               <div>
+                <label className="form-label">取引先（発注元）</label>
+                <select value={form.clientId} onChange={e => handleClientChange(e.target.value)} className="form-input">
+                  <option value="">— 未指定（手入力） —</option>
+                  {clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">取引先を選ぶと下記が自動入力されます。</p>
+              </div>
+              <div>
                 <label className="form-label">発注元名</label>
-                <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" />
+                <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" disabled={!!form.clientId} />
               </div>
               <div>
                 <label className="form-label">発注元電話番号</label>
-                <input type="tel" value={form.clientPhone} onChange={e => setForm(f => ({ ...f, clientPhone: e.target.value }))} className="form-input" />
+                <input type="tel" value={form.clientPhone} onChange={e => setForm(f => ({ ...f, clientPhone: e.target.value }))} className="form-input" disabled={!!form.clientId} />
               </div>
               <div>
                 <label className="form-label">備考</label>

@@ -332,18 +332,38 @@ app.get('/api/sites', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const sites = await prisma.site.findMany({
     where: { companyId, isActive: true },
+    include: { client: true },
     orderBy: { name: 'asc' },
   })
   res.json(sites)
 })
 
+async function resolveClientSnapshot(companyId: string, clientId: string | undefined | null) {
+  if (!clientId) return null
+  const client = await prisma.client.findFirst({ where: { id: clientId, companyId } })
+  if (!client) throw Object.assign(new Error('取引先が見つかりません'), { status: 400 })
+  return client
+}
+
 app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { name, address, lat, lng, clientName, clientPhone, notes } = req.body
+  const { clientId, name, address, lat, lng, clientName, clientPhone, notes } = req.body
   if (!name || !address) { res.status(400).json({ error: '現場名と住所は必須です' }); return }
 
-  const site = await prisma.site.create({ data: { companyId, name, address, lat, lng, clientName, clientPhone, notes } })
-  res.status(201).json(site)
+  try {
+    const client = await resolveClientSnapshot(companyId, clientId)
+    const site = await prisma.site.create({
+      data: {
+        companyId, clientId: client?.id ?? null, name, address, lat, lng,
+        clientName: client?.name ?? clientName ?? null,
+        clientPhone: client?.phone ?? clientPhone ?? null,
+        notes,
+      },
+    })
+    res.status(201).json(site)
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message || 'サーバーエラー' })
+  }
 })
 
 app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
@@ -351,9 +371,66 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
   const existing = await prisma.site.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '現場が見つかりません' }); return }
 
-  const { name, address, lat, lng, clientName, clientPhone, notes, isActive } = req.body
-  const site = await prisma.site.update({ where: { id: req.params.id }, data: { name, address, lat, lng, clientName, clientPhone, notes, isActive } })
-  res.json(site)
+  const { clientId, name, address, lat, lng, clientName, clientPhone, notes, isActive } = req.body
+  try {
+    const client = await resolveClientSnapshot(companyId, clientId)
+    const site = await prisma.site.update({
+      where: { id: req.params.id },
+      data: {
+        clientId: clientId === undefined ? undefined : (client?.id ?? null),
+        name, address, lat, lng,
+        clientName: client?.name ?? clientName,
+        clientPhone: client?.phone ?? clientPhone,
+        notes, isActive,
+      },
+    })
+    res.json(site)
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message || 'サーバーエラー' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// 取引先 API
+// ─────────────────────────────────────────────
+
+app.get('/api/clients', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const clients = await prisma.client.findMany({
+    where: { companyId, isActive: true },
+    orderBy: { name: 'asc' },
+  })
+  res.json(clients)
+})
+
+app.post('/api/clients', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { name, contactName, phone, email, address, notes } = req.body
+  if (!name) { res.status(400).json({ error: '取引先名は必須です' }); return }
+  const client = await prisma.client.create({
+    data: { companyId, name, contactName, phone, email, address, notes },
+  })
+  res.status(201).json(client)
+})
+
+app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+  const { name, contactName, phone, email, address, notes, isActive } = req.body
+  const client = await prisma.client.update({
+    where: { id: req.params.id },
+    data: { name, contactName, phone, email, address, notes, isActive },
+  })
+  res.json(client)
+})
+
+app.delete('/api/clients/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+  await prisma.client.update({ where: { id: req.params.id }, data: { isActive: false } })
+  res.json({ success: true })
 })
 
 // ─────────────────────────────────────────────
@@ -364,7 +441,7 @@ app.get('/api/contracts', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const contracts = await prisma.contract.findMany({
     where: { companyId },
-    include: { site: true },
+    include: { site: true, client: true },
     orderBy: { createdAt: 'desc' },
   })
   res.json(contracts)
@@ -372,16 +449,31 @@ app.get('/api/contracts', authenticate, async (req, res) => {
 
 app.post('/api/contracts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId, userId } = (req as any).user as JwtPayload
-  const { siteId, contractNumber, clientName, startDate, endDate, unitPrice, guardCount, shiftPattern, notes } = req.body
-  if (!siteId || !contractNumber || !clientName || !startDate || !unitPrice) {
+  const { siteId, clientId, contractNumber, clientName, startDate, endDate, unitPrice, guardCount, shiftPattern, notes } = req.body
+  if (!siteId || !contractNumber || !startDate || !unitPrice) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
-  const contract = await prisma.contract.create({
-    data: { companyId, siteId, contractNumber, clientName, startDate: new Date(startDate), endDate: endDate ? new Date(endDate) : null, unitPrice: Number(unitPrice), guardCount: Number(guardCount) || 1, shiftPattern, notes, createdById: userId },
-    include: { site: true },
-  })
-  res.status(201).json(contract)
+  try {
+    const client = await resolveClientSnapshot(companyId, clientId)
+    const finalClientName = client?.name ?? clientName
+    if (!finalClientName) { res.status(400).json({ error: '取引先または発注元名は必須です' }); return }
+
+    const contract = await prisma.contract.create({
+      data: {
+        companyId, siteId, clientId: client?.id ?? null,
+        contractNumber, clientName: finalClientName,
+        startDate: new Date(startDate),
+        endDate: endDate ? new Date(endDate) : null,
+        unitPrice: Number(unitPrice), guardCount: Number(guardCount) || 1,
+        shiftPattern, notes, createdById: userId,
+      },
+      include: { site: true, client: true },
+    })
+    res.status(201).json(contract)
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message || 'サーバーエラー' })
+  }
 })
 
 // ─────────────────────────────────────────────
@@ -487,7 +579,7 @@ app.get('/api/invoices', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const invoices = await prisma.invoice.findMany({
     where: { companyId },
-    include: { items: true },
+    include: { items: true, client: true },
     orderBy: { issueDate: 'desc' },
   })
   res.json(invoices)
@@ -495,24 +587,35 @@ app.get('/api/invoices', authenticate, async (req, res) => {
 
 app.post('/api/invoices', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId, userId } = (req as any).user as JwtPayload
-  const { invoiceNumber, clientName, clientEmail, issueDate, dueDate, items, taxRate = 0.1, notes } = req.body
-  if (!invoiceNumber || !clientName || !issueDate || !dueDate || !items?.length) {
+  const { invoiceNumber, clientId, clientName, clientEmail, issueDate, dueDate, items, taxRate = 0.1, notes } = req.body
+  if (!invoiceNumber || !issueDate || !dueDate || !items?.length) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
-  const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.unitPrice, 0)
-  const taxAmount = Math.floor(subtotal * taxRate)
-  const total = subtotal + taxAmount
+  try {
+    const client = await resolveClientSnapshot(companyId, clientId)
+    const finalClientName = client?.name ?? clientName
+    if (!finalClientName) { res.status(400).json({ error: '取引先または発注元名は必須です' }); return }
 
-  const invoice = await prisma.invoice.create({
-    data: {
-      companyId, invoiceNumber, clientName, clientEmail, issueDate: new Date(issueDate), dueDate: new Date(dueDate),
-      subtotal, taxRate, taxAmount, total, notes, createdById: userId,
-      items: { create: items.map((item: any) => ({ description: item.description, quantity: item.quantity, unitPrice: item.unitPrice, amount: item.quantity * item.unitPrice, contractId: item.contractId, date: item.date ? new Date(item.date) : undefined })) },
-    },
-    include: { items: true },
-  })
-  res.status(201).json(invoice)
+    const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.unitPrice, 0)
+    const taxAmount = Math.floor(subtotal * taxRate)
+    const total = subtotal + taxAmount
+
+    const invoice = await prisma.invoice.create({
+      data: {
+        companyId, clientId: client?.id ?? null,
+        invoiceNumber, clientName: finalClientName,
+        clientEmail: client?.email ?? clientEmail,
+        issueDate: new Date(issueDate), dueDate: new Date(dueDate),
+        subtotal, taxRate, taxAmount, total, notes, createdById: userId,
+        items: { create: items.map((item: any) => ({ description: item.description, quantity: item.quantity, unitPrice: item.unitPrice, amount: item.quantity * item.unitPrice, contractId: item.contractId, date: item.date ? new Date(item.date) : undefined })) },
+      },
+      include: { items: true, client: true },
+    })
+    res.status(201).json(invoice)
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message || 'サーバーエラー' })
+  }
 })
 
 app.put('/api/invoices/:id/send', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
