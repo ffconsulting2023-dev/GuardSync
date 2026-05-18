@@ -7,6 +7,7 @@ import { hasRole } from '../lib/auth'
 type ContactType = 'SITE' | 'ACCOUNTING'
 type Contact = {
   id?: string
+  _uid: string  // React key 用の安定識別子（新規含む）
   type: ContactType
   name: string
   title?: string
@@ -14,6 +15,8 @@ type Contact = {
   email?: string
   notes?: string
 }
+
+const newUid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2))
 
 const EMPTY_FORM = {
   name: '', contactName: '', phone: '', email: '', address: '', notes: '',
@@ -77,14 +80,14 @@ export default function ClientsPage() {
       representativeEmail: c.representativeEmail || '',
     })
     setContacts((c.contacts || []).map((x: any) => ({
-      id: x.id, type: x.type, name: x.name,
+      id: x.id, _uid: x.id, type: x.type, name: x.name,
       title: x.title || '', phone: x.phone || '', email: x.email || '', notes: x.notes || '',
     })))
     setShowForm(true)
   }
 
   const addContact = (type: ContactType) => {
-    setContacts(cs => [...cs, { type, name: '', title: '', phone: '', email: '', notes: '' }])
+    setContacts(cs => [...cs, { _uid: newUid(), type, name: '', title: '', phone: '', email: '', notes: '' }])
   }
 
   const updateContact = (idx: number, patch: Partial<Contact>) => {
@@ -97,7 +100,12 @@ export default function ClientsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const payload = { ...form, contacts: contacts.filter(c => c.name.trim()) }
+    const payload = {
+      ...form,
+      contacts: contacts
+        .filter(c => c.name.trim())
+        .map(({ _uid: _u, ...rest }) => rest),
+    }
     if (editTarget) updateMutation.mutate({ id: editTarget.id, data: payload })
     else createMutation.mutate(payload)
   }
@@ -291,7 +299,7 @@ function ContactSection(props: {
       ) : (
         <div className="space-y-2">
           {items.map(({ c, i }) => (
-            <div key={i} className="bg-gray-50 rounded p-3 space-y-2 relative">
+            <div key={c._uid} className="bg-gray-50 rounded p-3 space-y-2 relative">
               <button type="button" onClick={() => onRemove(i)} className="absolute top-2 right-2 text-red-400 hover:text-red-600 text-xs">✕</button>
               <div className="grid grid-cols-2 gap-2 pr-6">
                 <input type="text" value={c.name} onChange={e => onUpdate(i, { name: e.target.value })} placeholder="氏名 *" className="form-input text-sm" required />
