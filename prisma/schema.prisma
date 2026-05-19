@@ -23,6 +23,7 @@ model Company {
 
   users         User[]
   guards        Guard[]
+  clients       Client[]
   sites         Site[]
   contracts     Contract[]
   partners      Partner[]
@@ -136,6 +137,104 @@ enum EmploymentType {
 }
 
 // ─────────────────────────────────────────────
+// 取引先（Client）
+// ─────────────────────────────────────────────
+
+model Client {
+  id          String   @id @default(uuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+
+  // ①基本情報
+  clientCode    String?  // C00001
+  name          String
+  nameKana      String?
+  category      String   @default("OTHER")
+  positionTitle String?  // 代表役職
+  contactName   String?  // 代表者名
+  phone         String?  // 代表電話
+  fax           String?  // FAX番号
+  email         String?
+  website       String?  // HP
+  industry      String?  // 業種
+  relationship  String?  // 関係性（依頼主/協力会社等）
+  // 経理担当
+  accountingContactName String?
+  accountingPhone       String?
+  accountingEmail       String?
+  notes         String?
+
+  // ②担当者（最大4名・JSON配列）
+  // [{ name, phone, email }, ...]
+  subContacts   Json?
+
+  // ③会社住所（構造化）
+  postalCode    String?
+  prefecture    String?
+  city          String?
+  addressDetail String?
+  buildingName  String?
+  addressee     String?  // 宛名
+
+  // ④請求先住所
+  billingSameAsCompany Boolean @default(true)
+  billingPostalCode    String?
+  billingPrefecture    String?
+  billingCity          String?
+  billingAddressDetail String?
+  billingBuildingName  String?
+  billingAddressee     String?
+
+  // ④書類チェック（JSON）
+  // { unitPriceContract, otherContract, invoiceSend, invoiceReceive, securityLog, securityCommission, other }
+  documents     Json?
+
+  // ⑤振込先
+  bankName          String?
+  bankBranch        String?
+  bankAccountType   String?  // 普通/当座
+  bankAccountNumber String?
+  bankAccountHolder String?
+
+  // ⑥契約単価
+  contractDate           DateTime?
+  unitPriceDay           Int?
+  unitPriceNight         Int?
+  unitPriceHolidayDay    Int?
+  unitPriceHolidayNight  Int?
+  overtimeDayRate        Int?
+  overtimeNightRate      Int?
+  overtimeHolidayDayRate Int?
+  overtimeHolidayNightRate Int?
+  qualificationAllowance Int?
+  radioAllowance         Int?
+  otherAllowance1        Int?
+  otherAllowance2        Int?
+
+  // 旧フィールド（後方互換）
+  address       String?
+  invoiceRegistrationNumber String?
+
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sites       Site[]
+  logs        ClientLog[]
+}
+
+model ClientLog {
+  id            String   @id @default(uuid())
+  clientId      String
+  client        Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  companyId     String
+  logType       String   @default("NOTE") // NOTE/CALL/MEETING/EMAIL
+  content       String
+  createdByName String?
+  createdAt     DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────
 // 現場（Site）
 // ─────────────────────────────────────────────
 
@@ -143,11 +242,13 @@ model Site {
   id          String   @id @default(uuid())
   companyId   String
   company     Company  @relation(fields: [companyId], references: [id])
+  clientId    String?
+  client      Client?  @relation(fields: [clientId], references: [id])
   name        String
   address     String
   lat         Float?
   lng         Float?
-  clientName  String?  // 発注元名
+  clientName  String?  // 発注元名（clientId未設定時の手入力用）
   clientPhone String?
   notes       String?
   isActive    Boolean  @default(true)
@@ -462,6 +563,7 @@ model LineWorksSettings {
   companyId     String   @unique
   company       Company  @relation(fields: [companyId], references: [id])
   botId         String
+  botSecret     String?
   channelId     String
   accessToken   String?
   tokenExpiresAt DateTime?

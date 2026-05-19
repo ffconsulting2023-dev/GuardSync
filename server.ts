@@ -53,11 +53,11 @@ async function sendEmail(to: string, subject: string, html: string, text?: strin
 // LINE Works送信ヘルパー
 // ─────────────────────────────────────────────
 
-async function getLineWorksToken(clientId: string, clientSecret: string): Promise<string | null> {
+async function getLineWorksToken(botId: string, botSecret: string): Promise<string | null> {
   const params = new URLSearchParams({
     grant_type: 'client_credentials',
-    client_id: clientId,
-    client_secret: clientSecret,
+    client_id: botId,
+    client_secret: botSecret,
     scope: 'bot',
   })
   try {
@@ -66,23 +66,34 @@ async function getLineWorksToken(clientId: string, clientSecret: string): Promis
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[LINE Works] token error:', res.status, errText)
+      return null
+    }
     const data = await res.json() as { access_token: string }
     return data.access_token
-  } catch {
+  } catch (e) {
+    console.error('[LINE Works] token fetch error:', e)
     return null
   }
 }
 
-async function sendLineWorksMessage(botId: string, channelId: string, accessToken: string, text: string): Promise<boolean> {
+// 個人宛メッセージ送信
+async function sendLineWorksMessage(botId: string, userId: string, accessToken: string, text: string): Promise<boolean> {
   try {
-    const res = await fetch(`https://www.worksapis.com/v1.0/bots/${botId}/channels/${channelId}/messages`, {
+    const res = await fetch(`https://www.worksapis.com/v1.0/bots/${botId}/users/${userId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: { type: 'text', text } }),
     })
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[LINE Works] send error:', res.status, errText)
+    }
     return res.ok
-  } catch {
+  } catch (e) {
+    console.error('[LINE Works] send error:', e)
     return false
   }
 }
@@ -325,6 +336,163 @@ app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, re
 })
 
 // ─────────────────────────────────────────────
+// 取引先 API
+// ─────────────────────────────────────────────
+
+app.get('/api/clients', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { category, search } = req.query
+  const where: any = { companyId, isActive: true }
+  if (category && category !== 'ALL') where.category = category
+  if (search) where.OR = [
+    { name: { contains: String(search) } },
+    { nameKana: { contains: String(search) } },
+    { contactName: { contains: String(search) } },
+    { clientCode: { contains: String(search) } },
+  ]
+  const clients = await prisma.client.findMany({
+    where,
+    include: { _count: { select: { sites: true } } },
+    orderBy: { clientCode: 'asc' },
+  })
+  res.json(clients)
+})
+
+app.get('/api/clients/:id', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({
+    where: { id: req.params.id, companyId },
+    include: {
+      sites: { where: { isActive: true }, select: { id: true, name: true, address: true } },
+      logs: { orderBy: { createdAt: 'desc' }, take: 20 },
+      _count: { select: { sites: true } },
+    },
+  })
+  if (!client) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+  res.json(client)
+})
+
+app.post('/api/clients', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  if (!req.body.name) { res.status(400).json({ error: '取引先名は必須です' }); return }
+
+  // 取引先コード自動生成（C00001形式）
+  const count = await prisma.client.count({ where: { companyId } })
+  const clientCode = `C${String(count + 1).padStart(5, '0')}`
+
+  const { name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
+    accountingContactName, accountingPhone, accountingEmail, notes,
+    subContacts, postalCode, prefecture, city, addressDetail, buildingName, addressee,
+    billingSameAsCompany, billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
+    documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
+    contractDate, unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
+    overtimeDayRate, overtimeNightRate, overtimeHolidayDayRate, overtimeHolidayNightRate,
+    qualificationAllowance, radioAllowance, otherAllowance1, otherAllowance2,
+    invoiceRegistrationNumber } = req.body
+
+  const client = await prisma.client.create({
+    data: {
+      companyId, clientCode, name, nameKana, category: category || 'OTHER',
+      positionTitle, contactName, phone, fax, email, website, industry, relationship,
+      accountingContactName, accountingPhone, accountingEmail, notes,
+      subContacts, postalCode, prefecture, city, addressDetail, buildingName, addressee,
+      billingSameAsCompany: billingSameAsCompany !== false,
+      billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
+      documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
+      contractDate: contractDate ? new Date(contractDate) : null,
+      unitPriceDay: unitPriceDay ? Number(unitPriceDay) : null,
+      unitPriceNight: unitPriceNight ? Number(unitPriceNight) : null,
+      unitPriceHolidayDay: unitPriceHolidayDay ? Number(unitPriceHolidayDay) : null,
+      unitPriceHolidayNight: unitPriceHolidayNight ? Number(unitPriceHolidayNight) : null,
+      overtimeDayRate: overtimeDayRate ? Number(overtimeDayRate) : null,
+      overtimeNightRate: overtimeNightRate ? Number(overtimeNightRate) : null,
+      overtimeHolidayDayRate: overtimeHolidayDayRate ? Number(overtimeHolidayDayRate) : null,
+      overtimeHolidayNightRate: overtimeHolidayNightRate ? Number(overtimeHolidayNightRate) : null,
+      qualificationAllowance: qualificationAllowance ? Number(qualificationAllowance) : null,
+      radioAllowance: radioAllowance ? Number(radioAllowance) : null,
+      otherAllowance1: otherAllowance1 ? Number(otherAllowance1) : null,
+      otherAllowance2: otherAllowance2 ? Number(otherAllowance2) : null,
+      invoiceRegistrationNumber,
+    },
+  })
+  res.status(201).json(client)
+})
+
+app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+
+  const { name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
+    accountingContactName, accountingPhone, accountingEmail, notes,
+    subContacts, postalCode, prefecture, city, addressDetail, buildingName, addressee,
+    billingSameAsCompany, billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
+    documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
+    contractDate, unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
+    overtimeDayRate, overtimeNightRate, overtimeHolidayDayRate, overtimeHolidayNightRate,
+    qualificationAllowance, radioAllowance, otherAllowance1, otherAllowance2,
+    invoiceRegistrationNumber, isActive } = req.body
+
+  const client = await prisma.client.update({
+    where: { id: req.params.id },
+    data: {
+      name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
+      accountingContactName, accountingPhone, accountingEmail, notes,
+      subContacts, postalCode, prefecture, city, addressDetail, buildingName, addressee,
+      billingSameAsCompany: billingSameAsCompany !== false,
+      billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
+      documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
+      contractDate: contractDate ? new Date(contractDate) : null,
+      unitPriceDay: unitPriceDay ? Number(unitPriceDay) : null,
+      unitPriceNight: unitPriceNight ? Number(unitPriceNight) : null,
+      unitPriceHolidayDay: unitPriceHolidayDay ? Number(unitPriceHolidayDay) : null,
+      unitPriceHolidayNight: unitPriceHolidayNight ? Number(unitPriceHolidayNight) : null,
+      overtimeDayRate: overtimeDayRate ? Number(overtimeDayRate) : null,
+      overtimeNightRate: overtimeNightRate ? Number(overtimeNightRate) : null,
+      overtimeHolidayDayRate: overtimeHolidayDayRate ? Number(overtimeHolidayDayRate) : null,
+      overtimeHolidayNightRate: overtimeHolidayNightRate ? Number(overtimeHolidayNightRate) : null,
+      qualificationAllowance: qualificationAllowance ? Number(qualificationAllowance) : null,
+      radioAllowance: radioAllowance ? Number(radioAllowance) : null,
+      otherAllowance1: otherAllowance1 ? Number(otherAllowance1) : null,
+      otherAllowance2: otherAllowance2 ? Number(otherAllowance2) : null,
+      invoiceRegistrationNumber, isActive,
+    },
+  })
+  res.json(client)
+})
+
+app.delete('/api/clients/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+
+  await prisma.client.update({ where: { id: req.params.id }, data: { isActive: false } })
+  res.json({ success: true })
+})
+
+// 連絡ログ
+app.get('/api/clients/:id/logs', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  if (!client) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+  const logs = await prisma.clientLog.findMany({ where: { clientId: req.params.id }, orderBy: { createdAt: 'desc' } })
+  res.json(logs)
+})
+
+app.post('/api/clients/:id/logs', authenticate, async (req, res) => {
+  const { companyId, userId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
+  if (!client) { res.status(404).json({ error: '取引先が見つかりません' }); return }
+  const { logType, content } = req.body
+  if (!content) { res.status(400).json({ error: '内容は必須です' }); return }
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } })
+  const log = await prisma.clientLog.create({
+    data: { clientId: req.params.id, companyId, logType: logType || 'NOTE', content, createdByName: user?.name },
+  })
+  res.status(201).json(log)
+})
+
+// ─────────────────────────────────────────────
 // 現場 API
 // ─────────────────────────────────────────────
 
@@ -332,6 +500,7 @@ app.get('/api/sites', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const sites = await prisma.site.findMany({
     where: { companyId, isActive: true },
+    include: { client: true },
     orderBy: { name: 'asc' },
   })
   res.json(sites)
@@ -339,10 +508,13 @@ app.get('/api/sites', authenticate, async (req, res) => {
 
 app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { name, address, lat, lng, clientName, clientPhone, notes } = req.body
+  const { name, address, lat, lng, clientId, clientName, clientPhone, notes } = req.body
   if (!name || !address) { res.status(400).json({ error: '現場名と住所は必須です' }); return }
 
-  const site = await prisma.site.create({ data: { companyId, name, address, lat, lng, clientName, clientPhone, notes } })
+  const site = await prisma.site.create({
+    data: { companyId, name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes },
+    include: { client: true },
+  })
   res.status(201).json(site)
 })
 
@@ -351,8 +523,12 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
   const existing = await prisma.site.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '現場が見つかりません' }); return }
 
-  const { name, address, lat, lng, clientName, clientPhone, notes, isActive } = req.body
-  const site = await prisma.site.update({ where: { id: req.params.id }, data: { name, address, lat, lng, clientName, clientPhone, notes, isActive } })
+  const { name, address, lat, lng, clientId, clientName, clientPhone, notes, isActive } = req.body
+  const site = await prisma.site.update({
+    where: { id: req.params.id },
+    data: { name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes, isActive },
+    include: { client: true },
+  })
   res.json(site)
 })
 
@@ -794,10 +970,10 @@ cron.schedule('0 10 * * *', async () => {
       const lw = schedule.company.lineWorksSettings
       let token = lw.accessToken
       if (!token || (lw.tokenExpiresAt && lw.tokenExpiresAt < new Date())) {
-        const clientId = process.env.LINE_WORKS_CLIENT_ID
-        const clientSecret = process.env.LINE_WORKS_CLIENT_SECRET
-        if (clientId && clientSecret) {
-          token = await getLineWorksToken(clientId, clientSecret)
+        const botId = lw.botId || process.env.LINE_WORKS_BOT_ID || ''
+        const botSecret = lw.botSecret || process.env.LINE_WORKS_BOT_SECRET || ''
+        if (botId && botSecret) {
+          token = await getLineWorksToken(botId, botSecret)
           if (token) {
             await prisma.lineWorksSettings.update({
               where: { companyId: schedule.companyId },
@@ -806,9 +982,9 @@ cron.schedule('0 10 * * *', async () => {
           }
         }
       }
-      if (token) {
+      if (token && (schedule.guard as any).lineWorksId) {
         const msg = `【前日確認】${schedule.guard.name} 様\n明日（${dateStr}）の出動をご確認ください。\n\n📍 ${schedule.site.name}\n🕐 ${schedule.startTime}〜${schedule.endTime}\n📌 ${schedule.site.address}`
-        await sendLineWorksMessage(lw.botId, lw.channelId, token, msg)
+        await sendLineWorksMessage(lw.botId, (schedule.guard as any).lineWorksId, token, msg)
       }
     }
 
@@ -941,18 +1117,18 @@ app.get('/api/settings/line-works', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const settings = await prisma.lineWorksSettings.findUnique({ where: { companyId } })
   if (!settings) { res.status(404).json({ error: 'LINE Works未設定' }); return }
-  res.json({ botId: settings.botId, channelId: settings.channelId, tokenExpiresAt: settings.tokenExpiresAt })
+  res.json({ botId: settings.botId, channelId: settings.channelId, hasBotSecret: !!settings.botSecret, tokenExpiresAt: settings.tokenExpiresAt })
 })
 
 app.post('/api/settings/line-works', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { botId, channelId } = req.body
-  if (!botId || !channelId) { res.status(400).json({ error: 'Bot IDとChannel IDは必須です' }); return }
+  const { botId, botSecret, channelId } = req.body
+  if (!botId) { res.status(400).json({ error: 'Bot IDは必須です' }); return }
 
   const settings = await prisma.lineWorksSettings.upsert({
     where: { companyId },
-    create: { companyId, botId, channelId },
-    update: { botId, channelId, accessToken: null, tokenExpiresAt: null },
+    create: { companyId, botId, botSecret: botSecret || null, channelId: channelId || '' },
+    update: { botId, botSecret: botSecret || undefined, channelId: channelId || undefined, accessToken: null, tokenExpiresAt: null },
   })
   res.json(settings)
 })
@@ -1458,11 +1634,13 @@ app.post('/api/schedules/:id/send-reminder', authenticate, requireRole('ADMIN', 
   }
 
   const lw = company.lineWorksSettings
-  if (lw) {
-    const clientId = process.env.LINE_WORKS_CLIENT_ID || ''
-    const clientSecret = process.env.LINE_WORKS_CLIENT_SECRET || ''
-    const token = await getLineWorksToken(clientId, clientSecret)
-    if (token) lineWorksSent = await sendLineWorksMessage(lw.botId, lw.channelId, token, text)
+  if (lw && guard.lineWorksId) {
+    const botId = lw.botId || process.env.LINE_WORKS_BOT_ID || ''
+    const botSecret = lw.botSecret || process.env.LINE_WORKS_BOT_SECRET || ''
+    if (botId && botSecret) {
+      const token = await getLineWorksToken(botId, botSecret)
+      if (token) lineWorksSent = await sendLineWorksMessage(botId, guard.lineWorksId, token, text)
+    }
   }
 
   res.json({ success: true, emailSent, lineWorksSent })
@@ -1537,16 +1715,27 @@ app.post('/api/inbound/fax', async (req, res) => {
 // ─────────────────────────────────────────────
 app.post('/api/settings/line-works/test', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
+  const { testUserId } = req.body // テスト送信先のLINE WorksメンバーID
   const settings = await prisma.lineWorksSettings.findUnique({ where: { companyId } })
   if (!settings) { res.status(400).json({ error: 'LINE Works設定が見つかりません' }); return }
 
   try {
-    const clientId = process.env.LINE_WORKS_CLIENT_ID || ''
-    const clientSecret = process.env.LINE_WORKS_CLIENT_SECRET || ''
-    const token = await getLineWorksToken(clientId, clientSecret)
-    if (!token) { res.status(400).json({ error: 'アクセストークン取得失敗。環境変数（LINE_WORKS_CLIENT_ID等）を確認してください' }); return }
-    await sendLineWorksMessage(settings.botId, settings.channelId, token, '🔔 GuardSync LINE Works 接続テスト成功！')
-    res.json({ success: true, message: 'テストメッセージを送信しました' })
+    const botId = settings.botId || process.env.LINE_WORKS_BOT_ID || ''
+    const botSecret = settings.botSecret || process.env.LINE_WORKS_BOT_SECRET || ''
+    if (!botId || !botSecret) {
+      res.status(400).json({ error: 'Bot IDまたはBot Secretが未設定です。設定画面で入力してください。' })
+      return
+    }
+    const token = await getLineWorksToken(botId, botSecret)
+    if (!token) { res.status(400).json({ error: 'アクセストークン取得失敗。Bot IDとBot Secretを確認してください。' }); return }
+
+    if (!testUserId) {
+      res.status(400).json({ error: 'テスト送信先のメンバーIDを入力してください。' })
+      return
+    }
+    const ok = await sendLineWorksMessage(botId, testUserId, token, '🔔 GuardSync LINE Works 接続テスト成功！')
+    if (!ok) { res.status(400).json({ error: 'メッセージ送信失敗。メンバーIDを確認してください。' }); return }
+    res.json({ success: true, message: `${testUserId} にテストメッセージを送信しました` })
   } catch (err: any) {
     res.status(400).json({ error: `接続失敗: ${err.message}` })
   }

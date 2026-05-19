@@ -14,12 +14,13 @@ export default function SettingsPage() {
     queryFn: () => api.get('/settings/line-works').then(r => r.data).catch(() => null),
   })
 
-  const [lwForm, setLwForm] = useState({ botId: '', channelId: '' })
+  const [lwForm, setLwForm] = useState({ botId: '', botSecret: '', channelId: '' })
+  const [testUserId, setTestUserId] = useState('')
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteResult, setInviteResult] = useState<any>(null)
 
   React.useEffect(() => {
-    if (lwSettings) setLwForm({ botId: lwSettings.botId || '', channelId: lwSettings.channelId || '' })
+    if (lwSettings) setLwForm({ botId: lwSettings.botId || '', botSecret: '', channelId: lwSettings.channelId || '' })
   }, [lwSettings])
 
   const saveLwMutation = useMutation({
@@ -28,7 +29,7 @@ export default function SettingsPage() {
   })
 
   const testLwMutation = useMutation({
-    mutationFn: () => api.post('/settings/line-works/test'),
+    mutationFn: (userId: string) => api.post('/settings/line-works/test', { testUserId: userId }),
   })
 
   const inviteMutation = useMutation({
@@ -71,17 +72,19 @@ export default function SettingsPage() {
       {tab === 'lineworks' && (
         <div className="space-y-4">
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
-            <p className="font-medium mb-1">LINE Works Bot API v2 設定</p>
-            <p className="text-xs">LINE Worksテナントでボットを作成し、Bot IDとChannel IDを入力してください。</p>
-            <p className="text-xs mt-1">認証情報（Client ID / Secret）はサーバーの環境変数に設定します。</p>
+            <p className="font-medium mb-1">LINE Works Bot API v2 設定（個人メッセージ方式）</p>
+            <p className="text-xs">Bot IDとBot Secretを入力してください。メッセージは隊員ごとのLINE WorksメンバーIDに個別送信されます。</p>
+            <p className="text-xs mt-1">隊員のメンバーIDは「隊員管理」画面で各隊員に登録してください。</p>
           </div>
 
           {lwSettings ? (
             <div className="card space-y-1 text-sm">
               <p className="text-xs text-gray-500">接続状態</p>
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                <p className="text-green-700 font-medium">設定済み</p>
+                <div className={`w-2 h-2 rounded-full ${lwSettings.hasBotSecret ? 'bg-green-500' : 'bg-yellow-400'}`}></div>
+                <p className={lwSettings.hasBotSecret ? 'text-green-700 font-medium' : 'text-yellow-700 font-medium'}>
+                  {lwSettings.hasBotSecret ? '設定済み' : 'Bot Secret未設定'}
+                </p>
               </div>
               <p className="text-gray-500 text-xs">Bot ID: {lwSettings.botId}</p>
             </div>
@@ -100,18 +103,19 @@ export default function SettingsPage() {
               <h3 className="font-semibold text-gray-800">LINE Works 接続設定</h3>
               <div>
                 <label className="form-label">Bot ID</label>
-                <input type="text" value={lwForm.botId} onChange={e => setLwForm(f => ({ ...f, botId: e.target.value }))} className="form-input" placeholder="例: 12345678" />
+                <input type="text" value={lwForm.botId} onChange={e => setLwForm(f => ({ ...f, botId: e.target.value }))} className="form-input" placeholder="例: 12266640" />
               </div>
               <div>
-                <label className="form-label">Channel ID（送信先チャンネル）</label>
-                <input type="text" value={lwForm.channelId} onChange={e => setLwForm(f => ({ ...f, channelId: e.target.value }))} className="form-input" placeholder="例: 98765432" />
+                <label className="form-label">Bot Secret</label>
+                <input type="password" value={lwForm.botSecret} onChange={e => setLwForm(f => ({ ...f, botSecret: e.target.value }))} className="form-input" placeholder={lwSettings?.hasBotSecret ? '（変更する場合のみ入力）' : 'Bot Secretを入力'} />
+                {lwSettings?.hasBotSecret && <p className="text-xs text-gray-400 mt-1">Bot Secretは設定済みです。変更する場合のみ入力してください。</p>}
               </div>
-              <p className="text-xs text-gray-400">
-                Client ID / Client Secretは管理者に環境変数（LINE_WORKS_CLIENT_ID / LINE_WORKS_CLIENT_SECRET）で設定してもらってください。
-              </p>
               <button
-                onClick={() => saveLwMutation.mutate(lwForm)}
-                disabled={!lwForm.botId || !lwForm.channelId || saveLwMutation.isPending}
+                onClick={() => {
+                  if (!lwForm.botId) { alert('Bot IDを入力してください'); return }
+                  saveLwMutation.mutate(lwForm)
+                }}
+                disabled={saveLwMutation.isPending}
                 className="btn-primary disabled:opacity-50"
               >
                 {saveLwMutation.isPending ? '保存中...' : '保存'}
@@ -123,9 +127,23 @@ export default function SettingsPage() {
           {lwSettings && canAdmin && (
             <div className="card space-y-3">
               <h3 className="font-semibold text-gray-800">接続テスト</h3>
-              <p className="text-xs text-gray-500">設定済みのBot IDとChannel IDに対してテストメッセージを送信します。</p>
+              <p className="text-xs text-gray-500">テスト送信先のLINE WorksメンバーIDを入力してテストメッセージを送信します。</p>
+              <div>
+                <label className="form-label">テスト送信先メンバーID</label>
+                <input
+                  type="text"
+                  value={testUserId}
+                  onChange={e => setTestUserId(e.target.value)}
+                  className="form-input"
+                  placeholder="例: user@example.com または メンバーID"
+                />
+                <p className="text-xs text-gray-400 mt-1">LINE Works管理画面でメンバーIDを確認してください。</p>
+              </div>
               <button
-                onClick={() => testLwMutation.mutate()}
+                onClick={() => {
+                  if (!testUserId) { alert('テスト送信先のメンバーIDを入力してください'); return }
+                  testLwMutation.mutate(testUserId)
+                }}
                 disabled={testLwMutation.isPending}
                 className="btn-secondary disabled:opacity-50"
               >
@@ -170,8 +188,11 @@ export default function SettingsPage() {
                   className="form-input flex-1"
                 />
                 <button
-                  onClick={() => inviteMutation.mutate(inviteEmail)}
-                  disabled={!inviteEmail || inviteMutation.isPending}
+                  onClick={() => {
+                    if (!inviteEmail) { alert('メールアドレスを入力してください'); return }
+                    inviteMutation.mutate(inviteEmail)
+                  }}
+                  disabled={inviteMutation.isPending}
                   className="btn-primary disabled:opacity-50 whitespace-nowrap"
                 >
                   招待

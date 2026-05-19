@@ -22,11 +22,13 @@ interface GuardFormData {
   employmentType: string
   certifications: string
   dailyPayEnabled: boolean
+  lineWorksId: string
 }
 
 const EMPTY_FORM: GuardFormData = {
   employeeNumber: '', name: '', nameKana: '', birthDate: '', gender: 'MALE',
   phone: '', email: '', address: '', employmentType: 'PART_TIME', certifications: '', dailyPayEnabled: false,
+  lineWorksId: '',
 }
 
 export default function GuardsPage() {
@@ -64,7 +66,7 @@ export default function GuardsPage() {
       birthDate: guard.birthDate ? guard.birthDate.split('T')[0] : '', gender: guard.gender || 'MALE',
       phone: guard.phone || '', email: guard.email || '', address: guard.address || '',
       employmentType: guard.employmentType, certifications: (guard.certifications || []).join(', '),
-      dailyPayEnabled: guard.dailyPayEnabled,
+      dailyPayEnabled: guard.dailyPayEnabled, lineWorksId: guard.lineWorksId || '',
     })
     setShowForm(true)
   }
@@ -221,6 +223,11 @@ export default function GuardsPage() {
               <div className="flex items-center gap-2">
                 <input type="checkbox" id="dailyPay" checked={form.dailyPayEnabled} onChange={e => setForm(f => ({ ...f, dailyPayEnabled: e.target.checked }))} className="w-4 h-4" />
                 <label htmlFor="dailyPay" className="text-sm text-gray-700">日払い対象にする</label>
+              </div>
+              <div>
+                <label className="form-label">LINE Works メンバーID</label>
+                <input type="text" value={form.lineWorksId} onChange={e => setForm(f => ({ ...f, lineWorksId: e.target.value }))} className="form-input" placeholder="例: user@example.com" />
+                <p className="text-xs text-gray-400 mt-1">前日確認などのLINE Works通知に使用します。LINE Works管理画面で確認してください。</p>
               </div>
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowForm(false)} className="btn-secondary flex-1">キャンセル</button>

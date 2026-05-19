@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const EMPTY_FORM = { name: '', address: '', clientName: '', clientPhone: '', notes: '' }
+const EMPTY_FORM = { name: '', address: '', clientId: '', clientName: '', clientPhone: '', notes: '' }
 
 export default function SitesPage() {
   const { user } = useAuth()
@@ -12,26 +12,56 @@ export default function SitesPage() {
   const [showForm, setShowForm] = useState(false)
   const [editTarget, setEditTarget] = useState<any>(null)
   const [form, setForm] = useState(EMPTY_FORM)
+  const [selectedClient, setSelectedClient] = useState<any>(null)
 
   const { data: sites = [], isLoading } = useQuery({
     queryKey: ['sites'],
     queryFn: () => api.get('/sites').then(r => r.data),
   })
 
+  const { data: clients = [] } = useQuery({
+    queryKey: ['clients'],
+    queryFn: () => api.get('/clients').then(r => r.data),
+  })
+
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/sites', data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sites'] }); setShowForm(false); setForm(EMPTY_FORM) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sites'] }); setShowForm(false); setForm(EMPTY_FORM); setSelectedClient(null) },
   })
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: any) => api.put(`/sites/${id}`, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sites'] }); setShowForm(false); setEditTarget(null) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sites'] }); setShowForm(false); setEditTarget(null); setSelectedClient(null) },
   })
 
   const openEdit = (site: any) => {
     setEditTarget(site)
-    setForm({ name: site.name, address: site.address, clientName: site.clientName || '', clientPhone: site.clientPhone || '', notes: site.notes || '' })
+    const client = site.client || null
+    setSelectedClient(client)
+    setForm({
+      name: site.name,
+      address: site.address,
+      clientId: site.clientId || '',
+      clientName: site.clientName || '',
+      clientPhone: site.clientPhone || '',
+      notes: site.notes || '',
+    })
     setShowForm(true)
+  }
+
+  const handleClientChange = (clientId: string) => {
+    const client = clients.find((c: any) => c.id === clientId) || null
+    setSelectedClient(client)
+    if (client) {
+      setForm(f => ({
+        ...f,
+        clientId,
+        clientName: client.name,
+        clientPhone: client.phone || '',
+      }))
+    } else {
+      setForm(f => ({ ...f, clientId: '', clientName: '', clientPhone: '' }))
+    }
   }
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -47,7 +77,7 @@ export default function SitesPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">現場管理</h1>
         {canEdit && (
-          <button onClick={() => { setEditTarget(null); setForm(EMPTY_FORM); setShowForm(true) }} className="btn-primary text-sm">+ 現場登録</button>
+          <button onClick={() => { setEditTarget(null); setForm(EMPTY_FORM); setSelectedClient(null); setShowForm(true) }} className="btn-primary text-sm">+ 現場登録</button>
         )}
       </div>
 
@@ -67,8 +97,19 @@ export default function SitesPage() {
                 <p className="text-sm text-gray-500 flex items-start gap-1">
                   <span>📍</span><span className="leading-tight">{site.address}</span>
                 </p>
-                {site.clientName && <p className="text-sm text-gray-600">発注元: {site.clientName}</p>}
-                {site.clientPhone && <p className="text-sm text-gray-600">📞 {site.clientPhone}</p>}
+                {/* 取引先表示 */}
+                {site.client ? (
+                  <div className="bg-blue-50 rounded-lg px-3 py-2 space-y-0.5">
+                    <p className="text-xs font-medium text-blue-700">🏢 {site.client.name}</p>
+                    {site.client.contactName && <p className="text-xs text-blue-600">担当: {site.client.contactName}</p>}
+                    {site.client.phone && <p className="text-xs text-blue-600">📞 {site.client.phone}</p>}
+                  </div>
+                ) : (
+                  <>
+                    {site.clientName && <p className="text-sm text-gray-600">発注元: {site.clientName}</p>}
+                    {site.clientPhone && <p className="text-sm text-gray-600">📞 {site.clientPhone}</p>}
+                  </>
+                )}
                 {site.notes && <p className="text-xs text-gray-400 border-t border-gray-100 pt-2">{site.notes}</p>}
               </div>
             ))
@@ -78,8 +119,8 @@ export default function SitesPage() {
 
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md">
-            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <h2 className="font-semibold text-gray-800">{editTarget ? '現場編集' : '現場登録'}</h2>
               <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600">✕</button>
             </div>
@@ -92,14 +133,44 @@ export default function SitesPage() {
                 <label className="form-label">住所 *</label>
                 <input type="text" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))} className="form-input" required />
               </div>
+
+              {/* 取引先選択 */}
               <div>
-                <label className="form-label">発注元名</label>
-                <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" />
+                <label className="form-label">取引先</label>
+                <select
+                  value={form.clientId}
+                  onChange={e => handleClientChange(e.target.value)}
+                  className="form-input"
+                >
+                  <option value="">未設定（手入力）</option>
+                  {clients.map((c: any) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+                {selectedClient && (
+                  <div className="mt-2 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-700 space-y-0.5">
+                    <p className="font-medium">{selectedClient.name}</p>
+                    {selectedClient.contactName && <p>担当者: {selectedClient.contactName}</p>}
+                    {selectedClient.phone && <p>電話: {selectedClient.phone}</p>}
+                    {selectedClient.email && <p>メール: {selectedClient.email}</p>}
+                  </div>
+                )}
               </div>
-              <div>
-                <label className="form-label">発注元電話番号</label>
-                <input type="tel" value={form.clientPhone} onChange={e => setForm(f => ({ ...f, clientPhone: e.target.value }))} className="form-input" />
-              </div>
+
+              {/* 取引先未設定時の手入力欄 */}
+              {!form.clientId && (
+                <>
+                  <div>
+                    <label className="form-label">発注元名（手入力）</label>
+                    <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" />
+                  </div>
+                  <div>
+                    <label className="form-label">発注元電話番号</label>
+                    <input type="tel" value={form.clientPhone} onChange={e => setForm(f => ({ ...f, clientPhone: e.target.value }))} className="form-input" />
+                  </div>
+                </>
+              )}
+
               <div>
                 <label className="form-label">備考</label>
                 <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className="form-input" rows={3} />

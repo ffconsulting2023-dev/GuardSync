@@ -11,6 +11,8 @@ import SchedulePage from './pages/SchedulePage'
 import AttendancePage from './pages/AttendancePage'
 import InvoicesPage from './pages/InvoicesPage'
 import DailyPayPage from './pages/DailyPayPage'
+import ClientsPage from './pages/ClientsPage'
+import ClientDetailPage from './pages/ClientDetailPage'
 import PartnersPage from './pages/PartnersPage'
 import EContractsPage from './pages/EContractsPage'
 import SignContractPage from './pages/SignContractPage'
@@ -23,6 +25,21 @@ import VehiclesPage from './pages/VehiclesPage'
 import AutoReceiptPage from './pages/AutoReceiptPage'
 import NotificationsPage from './pages/NotificationsPage'
 import LoadingSpinner from './components/LoadingSpinner'
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
+  state = { error: null }
+  static getDerivedStateFromError(e: Error) { return { error: e.message } }
+  render() {
+    if (this.state.error) return (
+      <div className="p-8 text-red-600">
+        <p className="font-bold text-lg">エラーが発生しました</p>
+        <pre className="mt-2 text-sm bg-red-50 p-4 rounded whitespace-pre-wrap">{this.state.error}</pre>
+        <button onClick={() => this.setState({ error: null })} className="mt-4 px-4 py-2 bg-red-600 text-white rounded">再試行</button>
+      </div>
+    )
+    return this.props.children
+  }
+}
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuthProvider()
@@ -45,7 +62,7 @@ export default function App() {
           <Route path="/sign/:token" element={<SignContractPage />} />
           <Route path="/guard/*" element={auth.user ? <GuardAppPage /> : <Navigate to="/login" replace />} />
           <Route
-            path="/"
+            path="/*"
             element={
               auth.user ? (
                 <Layout>
@@ -58,13 +75,15 @@ export default function App() {
                     <Route path="attendance/*" element={<AttendancePage />} />
                     <Route path="invoices/*" element={<InvoicesPage />} />
                     <Route path="daily-pay/*" element={<DailyPayPage />} />
+                    <Route path="clients" element={<ClientsPage />} />
+                    <Route path="clients/:id" element={<ClientDetailPage />} />
                     <Route path="partners/*" element={<PartnersPage />} />
                     <Route path="e-contracts/*" element={<EContractsPage />} />
                     <Route path="reports/*" element={<SecurityReportsPage />} />
                     <Route path="vehicles/*" element={<VehiclesPage />} />
                     <Route path="auto-receipts/*" element={<AutoReceiptPage />} />
                     <Route path="notifications/*" element={<NotificationsPage />} />
-                    <Route path="settings/*" element={<SettingsPage />} />
+                    <Route path="settings/*" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
                     <Route path="super-admin/*" element={<SuperAdminPage />} />
                   </Routes>
                 </Layout>

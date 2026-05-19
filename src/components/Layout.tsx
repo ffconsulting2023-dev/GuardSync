@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { path: '/attendance',  label: '出退勤',         icon: '⏰' },
   { path: '/guards',      label: '隊員管理',       icon: '👷' },
   { path: '/sites',       label: '現場管理',       icon: '📍' },
+  { path: '/clients',     label: '取引先管理',     icon: '🏢' },
   { path: '/contracts',   label: '契約管理',       icon: '📄' },
   { path: '/invoices',    label: '請求管理',       icon: '💴' },
   { path: '/daily-pay',   label: '日払い',         icon: '💵' },
@@ -23,13 +24,18 @@ const NAV_ITEMS = [
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const navigate = useNavigate()
+
+  const handleLogout = () => setShowLogoutConfirm(true)
+  const confirmLogout = () => { setShowLogoutConfirm(false); logout() }
+  const cancelLogout = () => setShowLogoutConfirm(false)
 
   return (
     <div className="flex h-screen bg-gray-50">
       {/* サイドバー（PC） */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 w-64 bg-[#1e3a5f] text-white transform transition-transform duration-200
+        flex flex-col fixed inset-y-0 left-0 z-50 w-64 bg-[#1e3a5f] text-white transform transition-transform duration-200
         md:relative md:translate-x-0
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
@@ -93,7 +99,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <p className="text-sm font-medium truncate">{user?.name}</p>
               <p className="text-xs text-white/60 truncate">{user?.role}</p>
             </div>
-            <button onClick={logout} className="text-white/60 hover:text-white text-xs">
+            <button onClick={handleLogout} className="text-white/60 hover:text-white text-xs">
               ログアウト
             </button>
           </div>
@@ -103,6 +109,19 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       {/* オーバーレイ（モバイル） */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* ログアウト確認ダイアログ */}
+      {showLogoutConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-2xl p-6 w-72 shadow-xl text-center space-y-4">
+            <p className="font-semibold text-gray-800 text-lg">ログアウトしますか？</p>
+            <div className="flex gap-3">
+              <button onClick={cancelLogout} className="flex-1 btn-secondary">いいえ</button>
+              <button onClick={confirmLogout} className="flex-1 btn-primary">はい</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* メインコンテンツ */}
@@ -118,9 +137,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </svg>
           </button>
           <div className="flex-1" />
-          <div className="text-sm text-gray-500">
+          <div className="text-sm text-gray-500 hidden md:block">
             {new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })}
           </div>
+          <button onClick={handleLogout} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+            ログアウト
+          </button>
         </header>
 
         {/* ページコンテンツ */}
