@@ -380,6 +380,70 @@ app.post('/api/auth/register', async (req, res) => {
 })
 
 // ─────────────────────────────────────────────
+// パスワードリセット API
+// ─────────────────────────────────────────────
+
+app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
+  const { email } = req.body
+  if (!email || typeof email !== 'string') { res.status(400).json({ error: 'メールアドレスは必須です' }); return }
+
+  // ユーザー存在の有無を外部に漏らさないため、常に200を返す
+  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase().trim() } })
+  if (!user || !user.isActive) { res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' }); return }
+
+  // 既存の未使用トークンを無効化
+  await prisma.passwordResetToken.updateMany({
+    where: { userId: user.id, usedAt: null },
+    data: { usedAt: new Date() },
+  })
+
+  // 新しいトークン生成（1時間有効）
+  const token = require('crypto').randomBytes(32).toString('hex')
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000)
+  await prisma.passwordResetToken.create({ data: { token, userId: user.id, expiresAt } })
+
+  const resetUrl = `${process.env.APP_URL || 'http://localhost:5173'}/reset-password?token=${token}`
+  await sendEmail(
+    user.email,
+    '【GuardSync】パスワードリセットのご案内',
+    `<p>${escapeHtml(user.name)} 様</p>
+<p>パスワードリセットのリクエストを受け付けました。</p>
+<p>下記のURLをクリックして新しいパスワードを設定してください（有効期限：1時間）。</p>
+<p><a href="${resetUrl}">${resetUrl}</a></p>
+<p>このメールに心当たりがない場合は無視してください。</p>
+<p>GuardSync 運営事務局</p>`
+  )
+
+  res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' })
+})
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { token, password, passwordConfirm } = req.body
+  if (!token || !password || !passwordConfirm) { res.status(400).json({ error: '必須項目が不足しています' }); return }
+  if (password !== passwordConfirm) { res.status(400).json({ error: 'パスワードが一致しません' }); return }
+
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/
+  if (!passwordRegex.test(password)) {
+    res.status(400).json({ error: 'パスワードは8文字以上で、大文字・小文字・数字を含めてください' }); return
+  }
+
+  const resetToken = await prisma.passwordResetToken.findUnique({
+    where: { token },
+    include: { user: true },
+  })
+
+  if (!resetToken || resetToken.usedAt || resetToken.expiresAt < new Date()) {
+    res.status(400).json({ error: 'リセット用URLが無効または期限切れです。再度パスワードリセットを申請してください。' }); return
+  }
+
+  const hashed = await bcrypt.hash(password, 12)
+  await prisma.user.update({ where: { id: resetToken.userId }, data: { password: hashed } })
+  await prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } })
+
+  res.json({ message: 'パスワードを更新しました。新しいパスワードでログインしてください。' })
+})
+
+// ─────────────────────────────────────────────
 // 隊員 API
 // ─────────────────────────────────────────────
 

@@ -74,6 +74,7 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  passwordResetTokens  PasswordResetToken[]
   createdContracts     Contract[]
   createdInvoices      Invoice[]
   approvedDailyPays    DailyPayRequest[] @relation("ApprovedBy")
@@ -625,4 +626,18 @@ enum ReceiptStatus {
   SUGGESTED   // サジェスト表示中
   ACCEPTED    // 受入済み（スケジュール登録）
   REJECTED    // 却下
+}
+
+// ─────────────────────────────────────────────
+// パスワードリセットトークン
+// ─────────────────────────────────────────────
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  token     String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 }

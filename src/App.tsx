@@ -24,6 +24,8 @@ import SettingsPage from './pages/SettingsPage'
 import VehiclesPage from './pages/VehiclesPage'
 import AutoReceiptPage from './pages/AutoReceiptPage'
 import NotificationsPage from './pages/NotificationsPage'
+import ForgotPasswordPage from './pages/ForgotPasswordPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
@@ -58,6 +60,8 @@ export default function App() {
       ) : (
         <Routes>
           <Route path="/login" element={auth.user ? <Navigate to="/" replace /> : <LoginPage />} />
+          <Route path="/forgot-password" element={auth.user ? <Navigate to="/" replace /> : <ForgotPasswordPage />} />
+          <Route path="/reset-password" element={auth.user ? <Navigate to="/" replace /> : <ResetPasswordPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/sign/:token" element={<SignContractPage />} />
           <Route path="/guard/*" element={auth.user ? <GuardAppPage /> : <Navigate to="/login" replace />} />
