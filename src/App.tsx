@@ -26,6 +26,8 @@ import AutoReceiptPage from './pages/AutoReceiptPage'
 import NotificationsPage from './pages/NotificationsPage'
 import ForgotPasswordPage from './pages/ForgotPasswordPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
+import PayrollPage from './pages/PayrollPage'
+import SubcontractorPaymentPage from './pages/SubcontractorPaymentPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
@@ -87,6 +89,8 @@ export default function App() {
                     <Route path="vehicles/*" element={<VehiclesPage />} />
                     <Route path="auto-receipts/*" element={<AutoReceiptPage />} />
                     <Route path="notifications/*" element={<NotificationsPage />} />
+                    <Route path="payroll/*" element={<PayrollPage />} />
+                    <Route path="subcontractor-payments/*" element={<SubcontractorPaymentPage />} />
                     <Route path="settings/*" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
                     <Route path="super-admin/*" element={
                       auth.user?.isSuperAdmin

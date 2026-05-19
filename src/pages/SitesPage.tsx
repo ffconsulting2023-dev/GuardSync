@@ -4,7 +4,11 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const EMPTY_FORM = { name: '', address: '', clientId: '', clientName: '', clientPhone: '', notes: '' }
+const EMPTY_FORM = {
+  name: '', address: '', clientId: '', clientName: '', clientPhone: '', notes: '',
+  siteCode: '', requiredCount: 1, requiredQualifiedA: 0, requiredQualifiedB: 0,
+  assemblyTime: '', defaultStartTime: '', defaultEndTime: '', assemblyPlace: '', cautions: '',
+}
 
 export default function SitesPage() {
   const { user } = useAuth()
@@ -45,6 +49,15 @@ export default function SitesPage() {
       clientName: site.clientName || '',
       clientPhone: site.clientPhone || '',
       notes: site.notes || '',
+      siteCode: site.siteCode || '',
+      requiredCount: site.requiredCount ?? 1,
+      requiredQualifiedA: site.requiredQualifiedA ?? 0,
+      requiredQualifiedB: site.requiredQualifiedB ?? 0,
+      assemblyTime: site.assemblyTime || '',
+      defaultStartTime: site.defaultStartTime || '',
+      defaultEndTime: site.defaultEndTime || '',
+      assemblyPlace: site.assemblyPlace || '',
+      cautions: site.cautions || '',
     })
     setShowForm(true)
   }
@@ -91,23 +104,40 @@ export default function SitesPage() {
             sites.map((site: any) => (
               <div key={site.id} className="card space-y-2">
                 <div className="flex items-start justify-between gap-2">
-                  <h3 className="font-semibold text-gray-800">{site.name}</h3>
+                  <div>
+                    <h3 className="font-semibold text-gray-800">{site.name}</h3>
+                    {site.siteCode && <span className="text-xs text-gray-400">{site.siteCode}</span>}
+                  </div>
                   {canEdit && <button onClick={() => openEdit(site)} className="text-blue-600 hover:text-blue-800 text-xs flex-shrink-0">編集</button>}
                 </div>
                 <p className="text-sm text-gray-500 flex items-start gap-1">
                   <span>📍</span><span className="leading-tight">{site.address}</span>
                 </p>
+                {/* 必要隊員数表示 */}
+                <div className="flex gap-2 text-xs text-gray-500">
+                  <span>必要人数: {site.requiredCount ?? 1}</span>
+                  {(site.requiredQualifiedA > 0 || site.requiredQualifiedB > 0) && (
+                    <span>(資格A:{site.requiredQualifiedA ?? 0} / 資格B:{site.requiredQualifiedB ?? 0})</span>
+                  )}
+                </div>
+                {/* 時間表示 */}
+                {(site.assemblyTime || site.defaultStartTime) && (
+                  <div className="text-xs text-gray-500">
+                    {site.assemblyTime && <span>集合: {site.assemblyTime}</span>}
+                    {site.defaultStartTime && <span className="ml-2">{site.defaultStartTime}~{site.defaultEndTime}</span>}
+                  </div>
+                )}
                 {/* 取引先表示 */}
                 {site.client ? (
                   <div className="bg-blue-50 rounded-lg px-3 py-2 space-y-0.5">
-                    <p className="text-xs font-medium text-blue-700">🏢 {site.client.name}</p>
+                    <p className="text-xs font-medium text-blue-700">{site.client.name}</p>
                     {site.client.contactName && <p className="text-xs text-blue-600">担当: {site.client.contactName}</p>}
-                    {site.client.phone && <p className="text-xs text-blue-600">📞 {site.client.phone}</p>}
+                    {site.client.phone && <p className="text-xs text-blue-600">TEL: {site.client.phone}</p>}
                   </div>
                 ) : (
                   <>
                     {site.clientName && <p className="text-sm text-gray-600">発注元: {site.clientName}</p>}
-                    {site.clientPhone && <p className="text-sm text-gray-600">📞 {site.clientPhone}</p>}
+                    {site.clientPhone && <p className="text-sm text-gray-600">TEL: {site.clientPhone}</p>}
                   </>
                 )}
                 {site.notes && <p className="text-xs text-gray-400 border-t border-gray-100 pt-2">{site.notes}</p>}
@@ -119,19 +149,62 @@ export default function SitesPage() {
 
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <h2 className="font-semibold text-gray-800">{editTarget ? '現場編集' : '現場登録'}</h2>
-              <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600">X</button>
             </div>
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
-              <div>
-                <label className="form-label">現場名 *</label>
-                <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="form-input" required />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="form-label">現場名 *</label>
+                  <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="form-input" required />
+                </div>
+                <div>
+                  <label className="form-label">現場コード</label>
+                  <input type="text" value={form.siteCode} onChange={e => setForm(f => ({ ...f, siteCode: e.target.value }))} className="form-input" placeholder="S00001" />
+                </div>
               </div>
               <div>
                 <label className="form-label">住所 *</label>
                 <input type="text" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))} className="form-input" required />
+              </div>
+
+              {/* 必要隊員数 */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="form-label">必要隊員数</label>
+                  <input type="number" min={0} value={form.requiredCount} onChange={e => setForm(f => ({ ...f, requiredCount: Number(e.target.value) }))} className="form-input" />
+                </div>
+                <div>
+                  <label className="form-label">資格者A必要数</label>
+                  <input type="number" min={0} value={form.requiredQualifiedA} onChange={e => setForm(f => ({ ...f, requiredQualifiedA: Number(e.target.value) }))} className="form-input" />
+                </div>
+                <div>
+                  <label className="form-label">資格者B必要数</label>
+                  <input type="number" min={0} value={form.requiredQualifiedB} onChange={e => setForm(f => ({ ...f, requiredQualifiedB: Number(e.target.value) }))} className="form-input" />
+                </div>
+              </div>
+
+              {/* 時間 */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="form-label">集合時間</label>
+                  <input type="time" value={form.assemblyTime} onChange={e => setForm(f => ({ ...f, assemblyTime: e.target.value }))} className="form-input" />
+                </div>
+                <div>
+                  <label className="form-label">開始予定</label>
+                  <input type="time" value={form.defaultStartTime} onChange={e => setForm(f => ({ ...f, defaultStartTime: e.target.value }))} className="form-input" />
+                </div>
+                <div>
+                  <label className="form-label">終了予定</label>
+                  <input type="time" value={form.defaultEndTime} onChange={e => setForm(f => ({ ...f, defaultEndTime: e.target.value }))} className="form-input" />
+                </div>
+              </div>
+
+              <div>
+                <label className="form-label">集合場所</label>
+                <input type="text" value={form.assemblyPlace} onChange={e => setForm(f => ({ ...f, assemblyPlace: e.target.value }))} className="form-input" />
               </div>
 
               {/* 取引先選択 */}
@@ -172,8 +245,12 @@ export default function SitesPage() {
               )}
 
               <div>
+                <label className="form-label">注意点</label>
+                <textarea value={form.cautions} onChange={e => setForm(f => ({ ...f, cautions: e.target.value }))} className="form-input" rows={2} placeholder="現場での注意点を記載" />
+              </div>
+              <div>
                 <label className="form-label">備考</label>
-                <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className="form-input" rows={3} />
+                <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className="form-input" rows={2} />
               </div>
               <div className="flex gap-3">
                 <button type="button" onClick={() => setShowForm(false)} className="btn-secondary flex-1">キャンセル</button>

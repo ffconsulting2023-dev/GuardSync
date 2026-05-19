@@ -38,6 +38,9 @@ model Company {
   invitations   Invitation[]
   lineWorksSettings LineWorksSettings?
   securityReports SecurityReport[]
+  shiftSurveys    ShiftSurvey[]
+  payrolls        Payroll[]
+  subcontractorPayments SubcontractorPayment[]
 }
 
 enum Plan {
@@ -116,10 +119,106 @@ model Guard {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
+  // 住所（構造化）
+  postalCode     String?
+  prefecture     String?
+  city           String?
+  addressDetail  String?
+  buildingName   String?
+
+  // 最寄駅
+  nearestStation1 String?
+  line1           String?
+  nearestStation2 String?
+  line2           String?
+
+  // 追加属性
+  birthplace     String?   // 本籍地
+  medicalHistory String?   // 既往症
+  financialIssues Boolean  @default(false)  // 金銭問題
+  mbti           String?   // MBTI (ESTJ等)
+  dormitory      String?   // 寮利用（寮名または null）
+  guardClass     String?   // クラス（S/A/B/C）
+  skills         String[]  // スキル（隊長、方交 等）
+  nationality    String?   // 国籍
+  notes          String?   // 備考
+
+  // NG設定 (JSON配列)
+  ngGuardIds     Json?  // [{id, name}]
+  ngCompanies    Json?  // [{name}]
+  ngConditions   String?
+
+  // 評価
+  overallRating  Int?      // 1-5
+  ratingComment  String?
+  chartRatings   Json?     // {customerComm, teamComm, leadership, trafficControl, attendance} 各1-5
+
+  // 勤務希望条件
+  workConditions Json?     // {daysPerWeek, annualSalary, maxHours, remarks}
+
+  // 給与体系
+  payType        String?   @default("DAY")  // DAY/MONTH/HOUR
+  monthlyBase    Int?      // 基本給（月給の場合）
+  hourlyBase     Int?      // 時給（時給の場合）
+
+  // 勤務単価（日給・時給共通）
+  dayShiftRate        Int?   // 日勤単価
+  nightShiftRate      Int?   // 夜勤単価
+  holidayDayRate      Int?   // 休日日勤単価
+  holidayNightRate    Int?   // 休日夜勤単価
+  dayOvertimeRate     Int?   // (日)残業単価
+  nightOvertimeRate   Int?   // (夜)残業単価
+  holidayDayOtRate    Int?   // (休日)残業単価
+  holidayNightOtRate  Int?   // (休夜)残業単価
+
+  // 手当
+  positionAllowance   Int?  @default(0)  // 役職手当
+  qualificationAllowance Int? @default(0) // 資格手当
+  leaderAllowance     Int?  @default(0)  // 隊長手当
+  joiningAllowance    Int?  @default(0)  // 入社手当
+  otherAllowance1     Int?  @default(0)  // その他手当1
+  otherAllowance2     Int?  @default(0)  // その他手当2
+  otherAllowanceName1 String?  // その他手当1名称
+  otherAllowanceName2 String?  // その他手当2名称
+
+  // 社会保険
+  employmentInsurance     Boolean @default(false)
+  healthInsurance         Boolean @default(false)
+  healthInsuranceGrade    Int?
+  pensionInsurance        Boolean @default(false)
+  pensionInsuranceGrade   Int?
+  nursingInsurance        Boolean @default(false)  // 介護保険
+
+  // 家族構成
+  spouse          Boolean @default(false)  // 配偶者あり
+  spouseDeduction Boolean @default(false)  // 配偶者控除
+  dependents      Int     @default(0)      // 扶養人数
+
+  // 緊急連絡先（構造化）
+  emergencyName       String?
+  emergencyKana       String?
+  emergencyRelation   String?
+  emergencyPostal     String?
+  emergencyPrefecture String?
+  emergencyCity       String?
+  emergencyAddressDetail String?
+
+  // 書類（構造化：true=提出済）
+  docMyNumber         Boolean @default(false)
+  docIdCard           Boolean @default(false)
+  docIdentityCert     Boolean @default(false)
+  docResidenceCard    Boolean @default(false)
+  docResume           Boolean @default(false)
+  docPledge           Boolean @default(false)
+  docPhoto            Boolean @default(false)
+  docOther            Boolean @default(false)
+
   schedules       Schedule[]
   attendances     Attendance[]
   dailyPayRequests DailyPayRequest[]
   securityReports SecurityReport[]
+  shiftSurveyResponses ShiftSurveyResponse[]
+  payrolls        Payroll[]
 
   @@unique([companyId, employeeNumber])
 }
@@ -256,6 +355,16 @@ model Site {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  siteCode           String?  // 現場コード
+  requiredCount      Int      @default(1)       // 必要隊員数
+  requiredQualifiedA Int      @default(0)       // 資格者A必要数
+  requiredQualifiedB Int      @default(0)       // 資格者B必要数
+  assemblyTime       String?  // 集合時間 "08:00"
+  defaultStartTime   String?  // 開始予定 "08:30"
+  defaultEndTime     String?  // 終了予定 "17:30"
+  assemblyPlace      String?  // 集合場所
+  cautions           String?  // 注意点
+
   contracts   Contract[]
   schedules   Schedule[]
   securityReports SecurityReport[]
@@ -314,6 +423,8 @@ model Partner {
   isActive    Boolean     @default(true)
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
+
+  payments    SubcontractorPayment[]
 }
 
 enum PartnerType {
@@ -359,6 +470,10 @@ model Schedule {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
+  shiftType      String   @default("DAY")  // DAY/NIGHT/DAY_AM/DAY_PM
+  assemblyTime   String?  // 集合時間
+  sentAt         DateTime?  // 送信日時
+
   attendance  Attendance?
 
   @@index([companyId, date])
@@ -391,6 +506,12 @@ model Attendance {
   notes        String?
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
+
+  isHoliday          Boolean @default(false)  // 日・祝日フラグ
+  earlyOvertimeMin   Int     @default(0)      // 早出残業（分）
+  lateOvertimeMin    Int     @default(0)      // 遅出残業（分）
+  transportAmount    Int     @default(0)      // 旅費
+  otherAmount        Int     @default(0)      // その他手当
 }
 
 enum AttendanceStatus {
@@ -626,6 +747,154 @@ enum ReceiptStatus {
   SUGGESTED   // サジェスト表示中
   ACCEPTED    // 受入済み（スケジュール登録）
   REJECTED    // 却下
+}
+
+// ─────────────────────────────────────────────
+// シフトアンケート（ShiftSurvey）
+// ─────────────────────────────────────────────
+
+model ShiftSurvey {
+  id            String   @id @default(uuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  title         String
+  // シフト種別定義 JSON: [{type:"DAY", label:"①日勤8:00-17:00", startTime:"08:00", endTime:"17:00"}]
+  shiftTypes    Json
+  startDate     DateTime @db.Date  // 対象期間開始
+  endDate       DateTime @db.Date  // 対象期間終了
+  answerStartAt DateTime
+  answerEndAt   DateTime
+  isExported    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  responses ShiftSurveyResponse[]
+}
+
+model ShiftSurveyResponse {
+  id          String       @id @default(uuid())
+  surveyId    String
+  survey      ShiftSurvey  @relation(fields: [surveyId], references: [id])
+  guardId     String
+  guard       Guard        @relation(fields: [guardId], references: [id])
+  companyId   String
+  // answers JSON: [{date:"2025-04-14", shiftType:"DAY", available:true, note:""}]
+  answers     Json
+  submittedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([surveyId, guardId])
+}
+
+// ─────────────────────────────────────────────
+// 給与明細（Payroll）
+// ─────────────────────────────────────────────
+
+model Payroll {
+  id          String        @id @default(uuid())
+  companyId   String
+  company     Company       @relation(fields: [companyId], references: [id])
+  guardId     String
+  guard       Guard         @relation(fields: [guardId], references: [id])
+  year        Int
+  month       Int           // 1-12
+  status      PayrollStatus @default(DRAFT)
+
+  // 勤怠サマリ
+  workDays        Int @default(0)
+  holidayWorkDays Int @default(0)
+  totalWorkMinutes Int @default(0)
+  regularMinutes  Int @default(0)
+  overtimeMinutes Int @default(0)
+  earlyOtMinutes  Int @default(0)
+  lateOtMinutes   Int @default(0)
+  paidLeaveDays   Int @default(0)
+  absentDays      Int @default(0)
+
+  // 支給
+  basicPay          Int @default(0)
+  overtimePay       Int @default(0)
+  holidayPay        Int @default(0)
+  positionAllowance Int @default(0)
+  qualificationAllowance Int @default(0)
+  leaderAllowance   Int @default(0)
+  commuteAllowance  Int @default(0)
+  travelExpense     Int @default(0)
+  otherAllowance    Int @default(0)
+  taxableTotal      Int @default(0)
+  nonTaxableTotal   Int @default(0)
+  grossPay          Int @default(0)
+
+  // 控除
+  healthInsurance   Int @default(0)
+  pension           Int @default(0)
+  employmentIns     Int @default(0)
+  incomeTax         Int @default(0)
+  residentTax       Int @default(0)
+  otherDeduction    Int @default(0)
+  totalDeduction    Int @default(0)
+
+  // その他調整
+  yearEndAdj        Int @default(0)
+  netPay            Int @default(0)
+
+  // 発行・送信
+  issueDate   DateTime?
+  sentAt      DateTime?
+  confirmedAt DateTime?
+  payDate     DateTime?
+  notes       String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([companyId, guardId, year, month])
+}
+
+enum PayrollStatus {
+  DRAFT       // 未入力
+  IN_REVIEW   // 確認中
+  CONFIRMED   // 確認済み
+  PAID        // 支払済み
+}
+
+// ─────────────────────────────────────────────
+// 支払管理（SubcontractorPayment）
+// ─────────────────────────────────────────────
+
+model SubcontractorPayment {
+  id            String            @id @default(uuid())
+  companyId     String
+  company       Company           @relation(fields: [companyId], references: [id])
+  partnerId     String?
+  partner       Partner?          @relation(fields: [partnerId], references: [id])
+  partnerName   String            // 協力会社名（手入力も可）
+  invoiceNumber String?
+  year          Int
+  month         Int
+  status        SubPaymentStatus  @default(PENDING)
+  clientName    String?           // 発注先
+  siteNames     String?           // 現場名（カンマ区切り）
+  periodStart   DateTime          @db.Date
+  periodEnd     DateTime          @db.Date
+  amount        Int               // 税込金額
+  taxRate       Float             @default(0.1)
+  notes         String?
+  receivedAt    DateTime?         // 受領日
+  paidAt        DateTime?         // 支払日
+
+  // 明細 JSON: [{date, siteName, amount, count, qualifiedCount, unitPrice, qualifiedUnitPrice}]
+  items         Json?
+
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+}
+
+enum SubPaymentStatus {
+  PENDING   // 未受領
+  RECEIVED  // 受領済
+  PAID      // 支払済
 }
 
 // ─────────────────────────────────────────────

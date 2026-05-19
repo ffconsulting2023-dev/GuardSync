@@ -18,6 +18,8 @@ const NAV_ITEMS = [
   { path: '/vehicles',      label: '車両管理',       icon: '🚗' },
   { path: '/auto-receipts',  label: '自動受付',       icon: '📨' },
   { path: '/notifications',  label: '通知管理',       icon: '🔔' },
+  { path: '/payroll',        label: '給与管理',       icon: '💰' },
+  { path: '/subcontractor-payments', label: '支払管理', icon: '📑' },
   { path: '/settings',       label: '設定',           icon: '⚙️' },
 ]
 

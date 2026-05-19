@@ -497,6 +497,90 @@ const guardSchema = z.object({
   certifications: z.array(z.string()).optional(),
   employmentType: z.enum(['FULL_TIME', 'PART_TIME', 'CONTRACT', 'DISPATCH']).optional(),
   dailyPayEnabled: z.boolean().optional(),
+  lineWorksId: z.string().optional(),
+  // 住所（構造化）
+  postalCode: z.string().optional(),
+  prefecture: z.string().optional(),
+  city: z.string().optional(),
+  addressDetail: z.string().optional(),
+  buildingName: z.string().optional(),
+  // 最寄駅
+  nearestStation1: z.string().optional(),
+  line1: z.string().optional(),
+  nearestStation2: z.string().optional(),
+  line2: z.string().optional(),
+  // 追加属性
+  birthplace: z.string().optional(),
+  medicalHistory: z.string().optional(),
+  financialIssues: z.boolean().optional(),
+  mbti: z.string().optional(),
+  dormitory: z.string().optional(),
+  guardClass: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+  nationality: z.string().optional(),
+  notes: z.string().optional(),
+  // NG設定
+  ngGuardIds: z.any().optional(),
+  ngCompanies: z.any().optional(),
+  ngConditions: z.string().optional(),
+  // 評価
+  overallRating: z.number().int().min(1).max(5).optional().nullable(),
+  ratingComment: z.string().optional(),
+  chartRatings: z.any().optional(),
+  // 勤務希望条件
+  workConditions: z.any().optional(),
+  // 給与体系
+  payType: z.string().optional(),
+  monthlyBase: z.number().int().optional().nullable(),
+  hourlyBase: z.number().int().optional().nullable(),
+  // 勤務単価
+  dayShiftRate: z.number().int().optional().nullable(),
+  nightShiftRate: z.number().int().optional().nullable(),
+  holidayDayRate: z.number().int().optional().nullable(),
+  holidayNightRate: z.number().int().optional().nullable(),
+  dayOvertimeRate: z.number().int().optional().nullable(),
+  nightOvertimeRate: z.number().int().optional().nullable(),
+  holidayDayOtRate: z.number().int().optional().nullable(),
+  holidayNightOtRate: z.number().int().optional().nullable(),
+  // 手当
+  positionAllowance: z.number().int().optional().nullable(),
+  qualificationAllowance: z.number().int().optional().nullable(),
+  leaderAllowance: z.number().int().optional().nullable(),
+  joiningAllowance: z.number().int().optional().nullable(),
+  otherAllowance1: z.number().int().optional().nullable(),
+  otherAllowance2: z.number().int().optional().nullable(),
+  otherAllowanceName1: z.string().optional(),
+  otherAllowanceName2: z.string().optional(),
+  // 社会保険
+  employmentInsurance: z.boolean().optional(),
+  healthInsurance: z.boolean().optional(),
+  healthInsuranceGrade: z.number().int().optional().nullable(),
+  pensionInsurance: z.boolean().optional(),
+  pensionInsuranceGrade: z.number().int().optional().nullable(),
+  nursingInsurance: z.boolean().optional(),
+  // 家族構成
+  spouse: z.boolean().optional(),
+  spouseDeduction: z.boolean().optional(),
+  dependents: z.number().int().optional(),
+  // 緊急連絡先
+  emergencyName: z.string().optional(),
+  emergencyKana: z.string().optional(),
+  emergencyRelation: z.string().optional(),
+  emergencyPostal: z.string().optional(),
+  emergencyPrefecture: z.string().optional(),
+  emergencyCity: z.string().optional(),
+  emergencyAddressDetail: z.string().optional(),
+  // 書類
+  docMyNumber: z.boolean().optional(),
+  docIdCard: z.boolean().optional(),
+  docIdentityCert: z.boolean().optional(),
+  docResidenceCard: z.boolean().optional(),
+  docResume: z.boolean().optional(),
+  docPledge: z.boolean().optional(),
+  docPhoto: z.boolean().optional(),
+  docOther: z.boolean().optional(),
+  // 銀行口座
+  bankAccount: z.any().optional(),
 })
 
 app.post('/api/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
@@ -772,11 +856,21 @@ app.get('/api/sites', authenticate, async (req, res) => {
 
 app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { name, address, lat, lng, clientId, clientName, clientPhone, notes } = req.body
+  const { name, address, lat, lng, clientId, clientName, clientPhone, notes,
+    siteCode, requiredCount, requiredQualifiedA, requiredQualifiedB,
+    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions } = req.body
   if (!name || !address) { res.status(400).json({ error: '現場名と住所は必須です' }); return }
 
   const site = await prisma.site.create({
-    data: { companyId, name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes },
+    data: {
+      companyId, name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes,
+      siteCode: siteCode || null,
+      requiredCount: requiredCount != null ? Number(requiredCount) : 1,
+      requiredQualifiedA: requiredQualifiedA != null ? Number(requiredQualifiedA) : 0,
+      requiredQualifiedB: requiredQualifiedB != null ? Number(requiredQualifiedB) : 0,
+      assemblyTime: assemblyTime || null, defaultStartTime: defaultStartTime || null,
+      defaultEndTime: defaultEndTime || null, assemblyPlace: assemblyPlace || null, cautions: cautions || null,
+    },
     include: { client: true },
   })
   res.status(201).json(site)
@@ -787,11 +881,24 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
   const existing = await prisma.site.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '現場が見つかりません' }); return }
 
-  const { name, address, lat, lng, clientId, clientName, clientPhone, notes, isActive } = req.body
+  const { name, address, lat, lng, clientId, clientName, clientPhone, notes, isActive,
+    siteCode, requiredCount, requiredQualifiedA, requiredQualifiedB,
+    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions } = req.body
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   await prisma.site.updateMany({
     where: { id: req.params.id, companyId },
-    data: { name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes, isActive },
+    data: {
+      name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes, isActive,
+      siteCode: siteCode !== undefined ? (siteCode || null) : undefined,
+      requiredCount: requiredCount != null ? Number(requiredCount) : undefined,
+      requiredQualifiedA: requiredQualifiedA != null ? Number(requiredQualifiedA) : undefined,
+      requiredQualifiedB: requiredQualifiedB != null ? Number(requiredQualifiedB) : undefined,
+      assemblyTime: assemblyTime !== undefined ? (assemblyTime || null) : undefined,
+      defaultStartTime: defaultStartTime !== undefined ? (defaultStartTime || null) : undefined,
+      defaultEndTime: defaultEndTime !== undefined ? (defaultEndTime || null) : undefined,
+      assemblyPlace: assemblyPlace !== undefined ? (assemblyPlace || null) : undefined,
+      cautions: cautions !== undefined ? (cautions || null) : undefined,
+    },
   })
   const site = await prisma.site.findFirst({ where: { id: req.params.id, companyId }, include: { client: true } })
   res.json(site)
@@ -2039,6 +2146,246 @@ app.post('/api/settings/line-works/test', authenticate, requireRole('ADMIN'), as
   } catch (err: any) {
     res.status(400).json({ error: `接続失敗: ${err.message}` })
   }
+})
+
+// ─────────────────────────────────────────────
+// シフトアンケート API
+// ─────────────────────────────────────────────
+
+app.get('/api/shift-surveys', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const surveys = await prisma.shiftSurvey.findMany({
+    where: { companyId },
+    include: { responses: true },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(surveys)
+})
+
+app.post('/api/shift-surveys', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { title, shiftTypes, startDate, endDate, answerStartAt, answerEndAt } = req.body
+  if (!title || !startDate || !endDate) { res.status(400).json({ error: '必須項目が不足しています' }); return }
+
+  const survey = await prisma.shiftSurvey.create({
+    data: {
+      companyId, title, shiftTypes: shiftTypes || [],
+      startDate: new Date(startDate), endDate: new Date(endDate),
+      answerStartAt: new Date(answerStartAt || Date.now()),
+      answerEndAt: new Date(answerEndAt || endDate),
+    },
+  })
+  res.status(201).json(survey)
+})
+
+app.get('/api/shift-surveys/:id', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const survey = await prisma.shiftSurvey.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { responses: { include: { guard: { select: { id: true, name: true, nameKana: true } } } } },
+  })
+  if (!survey) { res.status(404).json({ error: 'アンケートが見つかりません' }); return }
+  res.json(survey)
+})
+
+app.put('/api/shift-surveys/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.shiftSurvey.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: 'アンケートが見つかりません' }); return }
+
+  const { title, shiftTypes, startDate, endDate, answerStartAt, answerEndAt, isExported } = req.body
+  await prisma.shiftSurvey.updateMany({
+    where: { id: req.params.id, companyId },
+    data: {
+      ...(title !== undefined ? { title } : {}),
+      ...(shiftTypes !== undefined ? { shiftTypes } : {}),
+      ...(startDate ? { startDate: new Date(startDate) } : {}),
+      ...(endDate ? { endDate: new Date(endDate) } : {}),
+      ...(answerStartAt ? { answerStartAt: new Date(answerStartAt) } : {}),
+      ...(answerEndAt ? { answerEndAt: new Date(answerEndAt) } : {}),
+      ...(isExported !== undefined ? { isExported } : {}),
+    },
+  })
+  const survey = await prisma.shiftSurvey.findFirst({ where: { id: req.params.id, companyId } })
+  res.json(survey)
+})
+
+// ─────────────────────────────────────────────
+// 給与管理 API
+// ─────────────────────────────────────────────
+
+app.get('/api/payroll', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const year = Number(req.query.year) || new Date().getFullYear()
+  const month = Number(req.query.month) || new Date().getMonth() + 1
+
+  const payrolls = await prisma.payroll.findMany({
+    where: { companyId, year, month },
+    include: { guard: { select: { id: true, name: true, nameKana: true, employeeNumber: true } } },
+    orderBy: { guard: { employeeNumber: 'asc' } },
+  })
+  res.json(payrolls)
+})
+
+app.post('/api/payroll/:guardId/generate', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId } = req.params
+  const year = Number(req.query.year) || new Date().getFullYear()
+  const month = Number(req.query.month) || new Date().getMonth() + 1
+
+  const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  // 対象月の勤怠を集計
+  const startDate = new Date(year, month - 1, 1)
+  const endDate = new Date(year, month, 0)
+  const attendances = await prisma.attendance.findMany({
+    where: {
+      companyId, guardId,
+      schedule: { date: { gte: startDate, lte: endDate } },
+      status: { in: ['COMPLETED', 'CLOCKED_IN'] },
+    },
+    include: { schedule: true },
+  })
+
+  let workDays = 0; let holidayWorkDays = 0; let totalWorkMinutes = 0
+  let earlyOtMinutes = 0; let lateOtMinutes = 0; let travelExpense = 0; let otherAmount = 0
+  for (const a of attendances) {
+    if (a.clockInAt && a.clockOutAt) {
+      const mins = Math.round((a.clockOutAt.getTime() - a.clockInAt.getTime()) / 60000) - a.breakMinutes
+      totalWorkMinutes += Math.max(0, mins)
+    }
+    if (a.isHoliday) holidayWorkDays++; else workDays++
+    earlyOtMinutes += a.earlyOvertimeMin
+    lateOtMinutes += a.lateOvertimeMin
+    travelExpense += a.transportAmount
+    otherAmount += a.otherAmount
+  }
+
+  const basicPay = guard.payType === 'MONTH' ? (guard.monthlyBase || 0)
+    : guard.payType === 'HOUR' ? (guard.hourlyBase || 0) * Math.round(totalWorkMinutes / 60)
+    : (guard.dayShiftRate || 0) * workDays + (guard.holidayDayRate || 0) * holidayWorkDays
+
+  const posAllowance = guard.positionAllowance || 0
+  const qualAllowance = guard.qualificationAllowance || 0
+  const leadAllowance = guard.leaderAllowance || 0
+  const grossPay = basicPay + posAllowance + qualAllowance + leadAllowance + travelExpense + otherAmount
+
+  const payroll = await prisma.payroll.upsert({
+    where: { companyId_guardId_year_month: { companyId, guardId, year, month } },
+    create: {
+      companyId, guardId, year, month,
+      workDays, holidayWorkDays, totalWorkMinutes,
+      earlyOtMinutes, lateOtMinutes,
+      basicPay, positionAllowance: posAllowance, qualificationAllowance: qualAllowance,
+      leaderAllowance: leadAllowance, travelExpense, otherAllowance: otherAmount,
+      grossPay, netPay: grossPay,
+    },
+    update: {
+      workDays, holidayWorkDays, totalWorkMinutes,
+      earlyOtMinutes, lateOtMinutes,
+      basicPay, positionAllowance: posAllowance, qualificationAllowance: qualAllowance,
+      leaderAllowance: leadAllowance, travelExpense, otherAllowance: otherAmount,
+      grossPay, netPay: grossPay,
+    },
+  })
+  res.json(payroll)
+})
+
+app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.payroll.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '給与データが見つかりません' }); return }
+
+  const allowedFields = [
+    'status', 'workDays', 'holidayWorkDays', 'totalWorkMinutes', 'regularMinutes', 'overtimeMinutes',
+    'earlyOtMinutes', 'lateOtMinutes', 'paidLeaveDays', 'absentDays',
+    'basicPay', 'overtimePay', 'holidayPay', 'positionAllowance', 'qualificationAllowance',
+    'leaderAllowance', 'commuteAllowance', 'travelExpense', 'otherAllowance',
+    'taxableTotal', 'nonTaxableTotal', 'grossPay',
+    'healthInsurance', 'pension', 'employmentIns', 'incomeTax', 'residentTax', 'otherDeduction', 'totalDeduction',
+    'yearEndAdj', 'netPay', 'notes', 'issueDate', 'sentAt', 'confirmedAt', 'payDate',
+  ]
+  const data: Record<string, unknown> = {}
+  for (const key of allowedFields) {
+    if (req.body[key] !== undefined) {
+      if (['issueDate', 'sentAt', 'confirmedAt', 'payDate'].includes(key) && req.body[key]) {
+        data[key] = new Date(req.body[key] as string)
+      } else {
+        data[key] = req.body[key]
+      }
+    }
+  }
+
+  await prisma.payroll.updateMany({ where: { id: req.params.id, companyId }, data })
+  const payroll = await prisma.payroll.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { guard: { select: { id: true, name: true, nameKana: true, employeeNumber: true } } },
+  })
+  res.json(payroll)
+})
+
+// ─────────────────────────────────────────────
+// 支払管理 API
+// ─────────────────────────────────────────────
+
+app.get('/api/subcontractor-payments', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const year = Number(req.query.year) || new Date().getFullYear()
+  const month = Number(req.query.month) || new Date().getMonth() + 1
+
+  const payments = await prisma.subcontractorPayment.findMany({
+    where: { companyId, year, month },
+    include: { partner: { select: { id: true, name: true } } },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(payments)
+})
+
+app.post('/api/subcontractor-payments', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { partnerId, partnerName, invoiceNumber, year, month, clientName, siteNames,
+    periodStart, periodEnd, amount, taxRate, notes, items } = req.body
+  if (!partnerName || !periodStart || !periodEnd || amount == null) {
+    res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  const payment = await prisma.subcontractorPayment.create({
+    data: {
+      companyId, partnerId: partnerId || null, partnerName, invoiceNumber,
+      year: year || new Date().getFullYear(), month: month || new Date().getMonth() + 1,
+      clientName, siteNames,
+      periodStart: new Date(periodStart), periodEnd: new Date(periodEnd),
+      amount: Number(amount), taxRate: taxRate != null ? Number(taxRate) : 0.1,
+      notes, items,
+    },
+  })
+  res.status(201).json(payment)
+})
+
+app.put('/api/subcontractor-payments/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.subcontractorPayment.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '支払データが見つかりません' }); return }
+
+  const { status, partnerName, invoiceNumber, clientName, siteNames, amount, taxRate, notes, items,
+    receivedAt, paidAt } = req.body
+  const data: Record<string, unknown> = {}
+  if (status !== undefined) data.status = status
+  if (partnerName !== undefined) data.partnerName = partnerName
+  if (invoiceNumber !== undefined) data.invoiceNumber = invoiceNumber
+  if (clientName !== undefined) data.clientName = clientName
+  if (siteNames !== undefined) data.siteNames = siteNames
+  if (amount !== undefined) data.amount = Number(amount)
+  if (taxRate !== undefined) data.taxRate = Number(taxRate)
+  if (notes !== undefined) data.notes = notes
+  if (items !== undefined) data.items = items
+  if (receivedAt !== undefined) data.receivedAt = receivedAt ? new Date(receivedAt as string) : null
+  if (paidAt !== undefined) data.paidAt = paidAt ? new Date(paidAt as string) : null
+
+  await prisma.subcontractorPayment.updateMany({ where: { id: req.params.id, companyId }, data })
+  const payment = await prisma.subcontractorPayment.findFirst({ where: { id: req.params.id, companyId } })
+  res.json(payment)
 })
 
 // ─────────────────────────────────────────────
