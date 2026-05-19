@@ -19,12 +19,13 @@ async function main() {
   })
 
   // スーパー管理者ユーザー
+  const adminHash = await bcrypt.hash('GuardSync2026!', 12)
   await prisma.user.upsert({
     where: { email: 'admin@guardsync.jp' },
-    update: {},
+    update: { password: adminHash },
     create: {
       email: 'admin@guardsync.jp',
-      password: await bcrypt.hash('GuardSync2026!', 12),
+      password: adminHash,
       name: 'システム管理者',
       role: 'SUPER_ADMIN',
       companyId: superCompany.id,
@@ -44,12 +45,13 @@ async function main() {
   })
 
   // デモ管理者
+  const demoHash = await bcrypt.hash('demo1234', 12)
   const demoAdmin = await prisma.user.upsert({
     where: { email: 'demo@demo-security.co.jp' },
-    update: {},
+    update: { password: demoHash },
     create: {
       email: 'demo@demo-security.co.jp',
-      password: await bcrypt.hash('demo1234', 12),
+      password: demoHash,
       name: '田中 管理者',
       role: 'ADMIN',
       companyId: demoCompany.id,
