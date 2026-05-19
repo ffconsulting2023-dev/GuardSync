@@ -10,8 +10,80 @@ import cron from 'node-cron'
 import dotenv from 'dotenv'
 import { z } from 'zod'
 import nodemailer from 'nodemailer'
+import crypto from 'crypto'
 
 dotenv.config()
+
+// ─────────────────────────────────────────────
+// 起動時セキュリティバリデーション
+// ─────────────────────────────────────────────
+const JWT_SECRET_RAW = process.env.JWT_SECRET
+if (!JWT_SECRET_RAW || JWT_SECRET_RAW.length < 32) {
+  console.error('[FATAL] JWT_SECRET が未設定または短すぎます（32文字以上必要）。サーバーを起動できません。')
+  // 注意: .env の JWT_SECRET を32文字以上に変更してください（例: openssl rand -hex 32）
+  process.exit(1)
+}
+const JWT_SECRET: string = JWT_SECRET_RAW
+
+// ─────────────────────────────────────────────
+// 暗号化ヘルパー（LINE Works機密情報用）
+// ─────────────────────────────────────────────
+function encrypt(text: string): string {
+  const key = process.env.ENCRYPTION_KEY
+  if (!key || key.length < 32) return text // 未設定時はそのまま（開発環境）
+  const iv = crypto.randomBytes(16)
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(key.slice(0, 32)), iv)
+  const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()])
+  return `enc:${iv.toString('hex')}:${encrypted.toString('hex')}`
+}
+
+function decrypt(text: string): string {
+  if (!text?.startsWith('enc:')) return text // 未暗号化データはそのまま返す
+  const key = process.env.ENCRYPTION_KEY
+  if (!key || key.length < 32) return text
+  const [, ivHex, encHex] = text.split(':')
+  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key.slice(0, 32)), Buffer.from(ivHex, 'hex'))
+  return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString('utf8')
+}
+
+// ─────────────────────────────────────────────
+// HTMLエスケープヘルパー（メールテンプレート用）
+// ─────────────────────────────────────────────
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
+// ─────────────────────────────────────────────
+// CSVインジェクション対策ヘルパー
+// ─────────────────────────────────────────────
+function escapeCsvCell(value: unknown): string {
+  const str = value == null ? '' : String(value)
+  // CSV injection: セル先頭が危険な文字の場合はシングルクォートを前置
+  const sanitized = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str
+  // カンマ・ダブルクォート・改行を含む場合はダブルクォートで囲む
+  return sanitized.includes(',') || sanitized.includes('"') || sanitized.includes('\n')
+    ? `"${sanitized.replace(/"/g, '""')}"`
+    : sanitized
+}
+
+// ─────────────────────────────────────────────
+// Webhook認証ヘルパー
+// ─────────────────────────────────────────────
+function verifyWebhookSecret(req: express.Request, res: express.Response): boolean {
+  const secret = process.env.INBOUND_SECRET
+  if (!secret) return true // 未設定の場合はスキップ（開発環境考慮）
+  const provided = req.headers['x-webhook-secret'] || req.query.secret
+  if (provided !== secret) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return false
+  }
+  return true
+}
 
 // ─────────────────────────────────────────────
 // メール送信ヘルパー
@@ -99,24 +171,59 @@ async function sendLineWorksMessage(botId: string, userId: string, accessToken: 
 }
 
 const app = express()
-const prisma = new PrismaClient()
+const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'production' ? ['warn', 'error'] : ['warn', 'error'],
+})
 const PORT = process.env.PORT || 3000
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production'
 
 // ─────────────────────────────────────────────
 // ミドルウェア
 // ─────────────────────────────────────────────
 
-app.use(helmet({ contentSecurityPolicy: false }))
-app.use(cors({ origin: process.env.NODE_ENV === 'production' ? false : true, credentials: true }))
+// H-4: Content Security Policy を有効化
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],   // Viteのインラインスクリプト対応
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'", 'https://www.worksapis.com', 'https://auth.worksmobile.com'],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}))
+
+// H-3: CORS設定を明示的なオリジンリストに変更
+const ALLOWED_ORIGINS = process.env.NODE_ENV === 'production'
+  ? [process.env.APP_URL].filter(Boolean) as string[]
+  : ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173']
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) callback(null, true)
+    else callback(new Error('CORS policy violation'))
+  },
+  credentials: true,
+}))
+
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false })
+// M-1: レート制限を強化
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'リクエストが多すぎます。しばらくしてからお試しください。' } })
 app.use('/api/', limiter)
 
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 })
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'ログイン試行回数の上限に達しました。15分後にお試しください。' } })
 app.use('/api/auth/login', authLimiter)
+
+// Webhook専用レート制限: 緩めに設定
+const webhookLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 30 })
+app.use('/api/inbound/', webhookLimiter)
+app.use('/api/webhook/', webhookLimiter)
 
 // ─────────────────────────────────────────────
 // 認証ヘルパー
@@ -130,7 +237,7 @@ interface JwtPayload {
 }
 
 function signToken(payload: JwtPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' })
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '4h' })
 }
 
 function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -239,11 +346,23 @@ app.post('/api/auth/invite', authenticate, requireRole('ADMIN', 'SUPER_ADMIN'), 
 app.post('/api/auth/register', async (req, res) => {
   const { token, name, password } = req.body
   if (!token || !name || !password) { res.status(400).json({ error: '必須項目が不足しています' }); return }
-  if (password.length < 8) { res.status(400).json({ error: 'パスワードは8文字以上にしてください' }); return }
+
+  // H-6: パスワード強度要件（8文字以上、大文字・小文字・数字を含む）
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/
+  if (!passwordRegex.test(password)) {
+    res.status(400).json({ error: 'パスワードは8文字以上で、大文字・小文字・数字を含む必要があります' })
+    return
+  }
 
   const invitation = await prisma.invitation.findUnique({ where: { token } })
   if (!invitation || invitation.usedAt || invitation.expiresAt < new Date()) {
     res.status(400).json({ error: '招待リンクが無効または期限切れです' }); return
+  }
+
+  // M-2: companyId必須チェック（スーパー管理者招待でcompanyIdが無い場合の安全対策）
+  if (!invitation.companyId) {
+    res.status(400).json({ error: '招待リンクが無効です（会社情報が不足しています）' })
+    return
   }
 
   const existing = await prisma.user.findUnique({ where: { email: invitation.email } })
@@ -251,7 +370,7 @@ app.post('/api/auth/register', async (req, res) => {
 
   const hashed = await bcrypt.hash(password, 12)
   const user = await prisma.user.create({
-    data: { email: invitation.email, password: hashed, name, companyId: invitation.companyId!, role: 'OPERATOR' },
+    data: { email: invitation.email, password: hashed, name, companyId: invitation.companyId, role: 'OPERATOR' },
   })
 
   await prisma.invitation.update({ where: { id: invitation.id }, data: { usedAt: new Date() } })
@@ -265,7 +384,8 @@ app.post('/api/auth/register', async (req, res) => {
 // ─────────────────────────────────────────────
 
 app.get('/api/guards', authenticate, async (req, res) => {
-  const { companyId } = (req as any).user as JwtPayload
+  const { companyId, role } = (req as any).user as JwtPayload
+  const isPrivileged = ['ADMIN', 'MANAGER', 'SUPER_ADMIN'].includes(role) || (req as any).user.isSuperAdmin
   const { search, isActive } = req.query
 
   const guards = await prisma.guard.findMany({
@@ -276,13 +396,28 @@ app.get('/api/guards', authenticate, async (req, res) => {
     },
     orderBy: { employeeNumber: 'asc' },
   })
-  res.json(guards)
+
+  // H-1 & M-9: 権限が低いユーザーには機密フィールドを除外
+  const result = guards.map(g => {
+    if (isPrivileged) return g
+    const { bankAccount, lineWorksId, ...safe } = g as any
+    return safe
+  })
+  res.json(result)
 })
 
 app.get('/api/guards/:id', authenticate, async (req, res) => {
-  const { companyId } = (req as any).user as JwtPayload
+  const { companyId, role } = (req as any).user as JwtPayload
+  const isPrivileged = ['ADMIN', 'MANAGER', 'SUPER_ADMIN'].includes(role) || (req as any).user.isSuperAdmin
   const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
   if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  // H-1 & M-9: 権限が低いユーザーには機密フィールドを除外
+  if (!isPrivileged) {
+    const { bankAccount, lineWorksId, ...safe } = guard as any
+    res.json(safe)
+    return
+  }
   res.json(guard)
 })
 
@@ -319,10 +454,13 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   const parsed = guardSchema.partial().safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
 
-  const guard = await prisma.guard.update({
-    where: { id: req.params.id },
+  // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
+  const updated = await prisma.guard.updateMany({
+    where: { id: req.params.id, companyId },
     data: { ...parsed.data, birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined },
   })
+  if (updated.count === 0) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+  const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
   res.json(guard)
 })
 
@@ -338,6 +476,56 @@ app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, re
 // ─────────────────────────────────────────────
 // 取引先 API
 // ─────────────────────────────────────────────
+
+// H-2: 取引先バリデーションスキーマ
+const clientSchema = z.object({
+  name: z.string().min(1).max(200),
+  nameKana: z.string().max(200).optional(),
+  category: z.enum(['GOVERNMENT', 'PRIVATE', 'CONSTRUCTION', 'COMMERCIAL', 'INDIVIDUAL', 'OTHER']).optional(),
+  positionTitle: z.string().max(100).optional(),
+  contactName: z.string().max(100).optional(),
+  phone: z.string().max(20).optional(),
+  fax: z.string().max(20).optional(),
+  email: z.string().email().max(200).optional().or(z.literal('')),
+  website: z.string().url().max(500).optional().or(z.literal('')),
+  industry: z.string().max(100).optional(),
+  relationship: z.string().max(100).optional(),
+  accountingContactName: z.string().max(100).optional(),
+  accountingPhone: z.string().max(20).optional(),
+  accountingEmail: z.string().email().max(200).optional().or(z.literal('')),
+  notes: z.string().max(2000).optional(),
+  postalCode: z.string().max(10).optional(),
+  prefecture: z.string().max(20).optional(),
+  city: z.string().max(50).optional(),
+  addressDetail: z.string().max(200).optional(),
+  buildingName: z.string().max(200).optional(),
+  addressee: z.string().max(100).optional(),
+  billingSameAsCompany: z.boolean().optional(),
+  billingPostalCode: z.string().max(10).optional(),
+  billingPrefecture: z.string().max(20).optional(),
+  billingCity: z.string().max(50).optional(),
+  billingAddressDetail: z.string().max(200).optional(),
+  billingBuildingName: z.string().max(200).optional(),
+  billingAddressee: z.string().max(100).optional(),
+  bankName: z.string().max(50).optional(),
+  bankBranch: z.string().max(50).optional(),
+  bankAccountType: z.enum(['普通', '当座']).optional(),
+  bankAccountNumber: z.string().max(20).optional(),
+  bankAccountHolder: z.string().max(100).optional(),
+  invoiceRegistrationNumber: z.string().max(20).optional(),
+  unitPriceDay: z.number().int().min(0).max(9999999).optional().nullable(),
+  unitPriceNight: z.number().int().min(0).max(9999999).optional().nullable(),
+  unitPriceHolidayDay: z.number().int().min(0).max(9999999).optional().nullable(),
+  unitPriceHolidayNight: z.number().int().min(0).max(9999999).optional().nullable(),
+  overtimeDayRate: z.number().int().min(0).max(9999999).optional().nullable(),
+  overtimeNightRate: z.number().int().min(0).max(9999999).optional().nullable(),
+  overtimeHolidayDayRate: z.number().int().min(0).max(9999999).optional().nullable(),
+  overtimeHolidayNightRate: z.number().int().min(0).max(9999999).optional().nullable(),
+  qualificationAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  radioAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  otherAllowance1: z.number().int().min(0).max(9999999).optional().nullable(),
+  otherAllowance2: z.number().int().min(0).max(9999999).optional().nullable(),
+})
 
 app.get('/api/clients', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
@@ -374,7 +562,10 @@ app.get('/api/clients/:id', authenticate, async (req, res) => {
 
 app.post('/api/clients', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  if (!req.body.name) { res.status(400).json({ error: '取引先名は必須です' }); return }
+
+  // H-2: zodバリデーション
+  const parsed = clientSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
 
   // 取引先コード自動生成（C00001形式）
   const count = await prisma.client.count({ where: { companyId } })
@@ -382,13 +573,15 @@ app.post('/api/clients', authenticate, requireRole('ADMIN', 'MANAGER'), async (r
 
   const { name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
     accountingContactName, accountingPhone, accountingEmail, notes,
-    subContacts, postalCode, prefecture, city, addressDetail, buildingName, addressee,
+    postalCode, prefecture, city, addressDetail, buildingName, addressee,
     billingSameAsCompany, billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
-    documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
-    contractDate, unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
+    bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
+    unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
     overtimeDayRate, overtimeNightRate, overtimeHolidayDayRate, overtimeHolidayNightRate,
     qualificationAllowance, radioAllowance, otherAllowance1, otherAllowance2,
-    invoiceRegistrationNumber } = req.body
+    invoiceRegistrationNumber } = parsed.data
+  // zodスキーマ外のフィールドはreq.bodyから取得
+  const { subContacts, documents, contractDate } = req.body
 
   const client = await prisma.client.create({
     data: {
@@ -423,18 +616,24 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
   const existing = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '取引先が見つかりません' }); return }
 
+  // H-2: zodバリデーション（部分更新なのでpartial）
+  const parsed = clientSchema.partial().safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+
   const { name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
     accountingContactName, accountingPhone, accountingEmail, notes,
-    subContacts, postalCode, prefecture, city, addressDetail, buildingName, addressee,
+    postalCode, prefecture, city, addressDetail, buildingName, addressee,
     billingSameAsCompany, billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
-    documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
-    contractDate, unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
+    bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
+    unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
     overtimeDayRate, overtimeNightRate, overtimeHolidayDayRate, overtimeHolidayNightRate,
     qualificationAllowance, radioAllowance, otherAllowance1, otherAllowance2,
-    invoiceRegistrationNumber, isActive } = req.body
+    invoiceRegistrationNumber } = parsed.data
+  const { subContacts, documents, contractDate, isActive } = req.body
 
-  const client = await prisma.client.update({
-    where: { id: req.params.id },
+  // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
+  await prisma.client.updateMany({
+    where: { id: req.params.id, companyId },
     data: {
       name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
       accountingContactName, accountingPhone, accountingEmail, notes,
@@ -443,21 +642,22 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
       billingPostalCode, billingPrefecture, billingCity, billingAddressDetail, billingBuildingName, billingAddressee,
       documents, bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder,
       contractDate: contractDate ? new Date(contractDate) : null,
-      unitPriceDay: unitPriceDay ? Number(unitPriceDay) : null,
-      unitPriceNight: unitPriceNight ? Number(unitPriceNight) : null,
-      unitPriceHolidayDay: unitPriceHolidayDay ? Number(unitPriceHolidayDay) : null,
-      unitPriceHolidayNight: unitPriceHolidayNight ? Number(unitPriceHolidayNight) : null,
-      overtimeDayRate: overtimeDayRate ? Number(overtimeDayRate) : null,
-      overtimeNightRate: overtimeNightRate ? Number(overtimeNightRate) : null,
-      overtimeHolidayDayRate: overtimeHolidayDayRate ? Number(overtimeHolidayDayRate) : null,
-      overtimeHolidayNightRate: overtimeHolidayNightRate ? Number(overtimeHolidayNightRate) : null,
-      qualificationAllowance: qualificationAllowance ? Number(qualificationAllowance) : null,
-      radioAllowance: radioAllowance ? Number(radioAllowance) : null,
-      otherAllowance1: otherAllowance1 ? Number(otherAllowance1) : null,
-      otherAllowance2: otherAllowance2 ? Number(otherAllowance2) : null,
+      unitPriceDay: unitPriceDay != null ? Number(unitPriceDay) : null,
+      unitPriceNight: unitPriceNight != null ? Number(unitPriceNight) : null,
+      unitPriceHolidayDay: unitPriceHolidayDay != null ? Number(unitPriceHolidayDay) : null,
+      unitPriceHolidayNight: unitPriceHolidayNight != null ? Number(unitPriceHolidayNight) : null,
+      overtimeDayRate: overtimeDayRate != null ? Number(overtimeDayRate) : null,
+      overtimeNightRate: overtimeNightRate != null ? Number(overtimeNightRate) : null,
+      overtimeHolidayDayRate: overtimeHolidayDayRate != null ? Number(overtimeHolidayDayRate) : null,
+      overtimeHolidayNightRate: overtimeHolidayNightRate != null ? Number(overtimeHolidayNightRate) : null,
+      qualificationAllowance: qualificationAllowance != null ? Number(qualificationAllowance) : null,
+      radioAllowance: radioAllowance != null ? Number(radioAllowance) : null,
+      otherAllowance1: otherAllowance1 != null ? Number(otherAllowance1) : null,
+      otherAllowance2: otherAllowance2 != null ? Number(otherAllowance2) : null,
       invoiceRegistrationNumber, isActive,
     },
   })
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId } })
   res.json(client)
 })
 
@@ -524,11 +724,12 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
   if (!existing) { res.status(404).json({ error: '現場が見つかりません' }); return }
 
   const { name, address, lat, lng, clientId, clientName, clientPhone, notes, isActive } = req.body
-  const site = await prisma.site.update({
-    where: { id: req.params.id },
+  // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
+  await prisma.site.updateMany({
+    where: { id: req.params.id, companyId },
     data: { name, address, lat, lng, clientId: clientId || null, clientName, clientPhone, notes, isActive },
-    include: { client: true },
   })
+  const site = await prisma.site.findFirst({ where: { id: req.params.id, companyId }, include: { client: true } })
   res.json(site)
 })
 
@@ -601,11 +802,12 @@ app.put('/api/schedules/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPE
   if (!existing) { res.status(404).json({ error: 'シフトが見つかりません' }); return }
 
   const { guardId, siteId, date, startTime, endTime, status, notes } = req.body
-  const schedule = await prisma.schedule.update({
-    where: { id: req.params.id },
+  // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
+  await prisma.schedule.updateMany({
+    where: { id: req.params.id, companyId },
     data: { guardId, siteId, date: date ? new Date(date) : undefined, startTime, endTime, status, notes },
-    include: { guard: true, site: true },
   })
+  const schedule = await prisma.schedule.findFirst({ where: { id: req.params.id, companyId }, include: { guard: true, site: true } })
   res.json(schedule)
 })
 
@@ -696,9 +898,11 @@ app.put('/api/invoices/:id/send', authenticate, requireRole('ADMIN', 'MANAGER'),
   const existing = await prisma.invoice.findFirst({ where: { id: req.params.id, companyId }, include: { company: true } })
   if (!existing) { res.status(404).json({ error: '請求書が見つかりません' }); return }
 
-  const invoice = await prisma.invoice.update({ where: { id: req.params.id }, data: { status: 'SENT', sentAt: new Date() } })
+  // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
+  await prisma.invoice.updateMany({ where: { id: req.params.id, companyId }, data: { status: 'SENT', sentAt: new Date() } })
+  const invoice = await prisma.invoice.findFirst({ where: { id: req.params.id, companyId } })
 
-  // 請求書メール送信
+  // 請求書メール送信（L-6: HTMLエスケープ適用）
   if (existing.clientEmail) {
     const subject = `【請求書】${existing.invoiceNumber} - ${existing.company.name}`
     const html = `
@@ -707,14 +911,14 @@ app.put('/api/invoices/:id/send', authenticate, requireRole('ADMIN', 'MANAGER'),
     <h2 style="margin:0;font-size:18px">請求書のご送付</h2>
   </div>
   <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
-    <p>${existing.clientName} 御中</p>
+    <p>${escapeHtml(existing.clientName)} 御中</p>
     <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
-      <p><strong>請求番号:</strong> ${existing.invoiceNumber}</p>
+      <p><strong>請求番号:</strong> ${escapeHtml(existing.invoiceNumber)}</p>
       <p><strong>合計金額:</strong> ¥${existing.total.toLocaleString()}</p>
       <p><strong>支払期限:</strong> ${new Date(existing.dueDate).toLocaleDateString('ja-JP')}</p>
     </div>
     <p style="font-size:13px;color:#666">ご不明な点は担当者までお問い合わせください。</p>
-    <p style="font-size:12px;color:#999">${existing.company.name} | GuardSync</p>
+    <p style="font-size:12px;color:#999">${escapeHtml(existing.company.name)} | GuardSync</p>
   </div>
 </div>`
     await sendEmail(existing.clientEmail, subject, html)
@@ -822,10 +1026,10 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
     <h2 style="margin:0;font-size:18px">電子契約 署名依頼</h2>
   </div>
   <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
-    <p>${sig.signerName} 様</p>
+    <p>${escapeHtml(sig.signerName)} 様</p>
     <p>下記の契約書への電子署名をお願いします。</p>
     <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0">
-      <p style="margin:0;font-weight:bold">${title}</p>
+      <p style="margin:0;font-weight:bold">${escapeHtml(title)}</p>
       <p style="margin:8px 0 0;font-size:13px;color:#666">署名期限: ${expiry.toLocaleDateString('ja-JP')}</p>
     </div>
     <div style="text-align:center;margin:24px 0">
@@ -971,7 +1175,7 @@ cron.schedule('0 10 * * *', async () => {
       let token = lw.accessToken
       if (!token || (lw.tokenExpiresAt && lw.tokenExpiresAt < new Date())) {
         const botId = lw.botId || process.env.LINE_WORKS_BOT_ID || ''
-        const botSecret = lw.botSecret || process.env.LINE_WORKS_BOT_SECRET || ''
+        const botSecret = decrypt(lw.botSecret || '') || process.env.LINE_WORKS_BOT_SECRET || ''
         if (botId && botSecret) {
           token = await getLineWorksToken(botId, botSecret)
           if (token) {
@@ -997,15 +1201,15 @@ cron.schedule('0 10 * * *', async () => {
     <h2 style="margin:0;font-size:18px">明日の出動確認</h2>
   </div>
   <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
-    <p>${schedule.guard.name} 様</p>
+    <p>${escapeHtml(schedule.guard.name)} 様</p>
     <p>明日の出動についてご確認ください。</p>
     <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
-      <p><strong>日時:</strong> ${dateStr} ${schedule.startTime}〜${schedule.endTime}</p>
-      <p><strong>現場:</strong> ${schedule.site.name}</p>
-      <p><strong>住所:</strong> ${schedule.site.address}</p>
+      <p><strong>日時:</strong> ${escapeHtml(dateStr)} ${escapeHtml(schedule.startTime)}〜${escapeHtml(schedule.endTime)}</p>
+      <p><strong>現場:</strong> ${escapeHtml(schedule.site.name)}</p>
+      <p><strong>住所:</strong> ${escapeHtml(schedule.site.address)}</p>
     </div>
     <p style="font-size:13px;color:#666">不明点・変更がある場合は管理者にご連絡ください。</p>
-    <p style="font-size:12px;color:#999">${schedule.company.name} | GuardSync</p>
+    <p style="font-size:12px;color:#999">${escapeHtml(schedule.company.name)} | GuardSync</p>
   </div>
 </div>`
       await sendEmail(schedule.guard.email, subject, html)
@@ -1058,10 +1262,12 @@ app.put('/api/vehicles/:id', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
   if (!existing) { res.status(404).json({ error: '車両が見つかりません' }); return }
 
   const { plateNumber, model, year, isActive } = req.body
-  const vehicle = await prisma.vehicle.update({
-    where: { id: req.params.id },
+  // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
+  await prisma.vehicle.updateMany({
+    where: { id: req.params.id, companyId },
     data: { plateNumber, model, year: year ? Number(year) : undefined, isActive },
   })
+  const vehicle = await prisma.vehicle.findFirst({ where: { id: req.params.id, companyId } })
   res.json(vehicle)
 })
 
@@ -1079,7 +1285,8 @@ app.delete('/api/vehicles/:id', authenticate, requireRole('ADMIN'), async (req, 
 // ─────────────────────────────────────────────
 
 app.post('/api/webhook/line-works', async (req, res) => {
-  // LINE Works はBotが登録されているChanne IDを識別
+  // TODO: LINE Works Bot Secretによる署名検証を実装（Bot Secret必須のため後日対応）
+  console.log('[webhook/line-works] リクエスト受信 - 署名検証未実装のため注意')
   const { type, content, source } = req.body
 
   if (type !== 'message') { res.json({ ok: true }); return }
@@ -1125,10 +1332,12 @@ app.post('/api/settings/line-works', authenticate, requireRole('ADMIN'), async (
   const { botId, botSecret, channelId } = req.body
   if (!botId) { res.status(400).json({ error: 'Bot IDは必須です' }); return }
 
+  // H-7: LINE Works機密情報を暗号化して保存
+  const encryptedBotSecret = botSecret ? encrypt(botSecret) : null
   const settings = await prisma.lineWorksSettings.upsert({
     where: { companyId },
-    create: { companyId, botId, botSecret: botSecret || null, channelId: channelId || '' },
-    update: { botId, botSecret: botSecret || undefined, channelId: channelId || undefined, accessToken: null, tokenExpiresAt: null },
+    create: { companyId, botId, botSecret: encryptedBotSecret, channelId: channelId || '' },
+    update: { botId, botSecret: encryptedBotSecret || undefined, channelId: channelId || undefined, accessToken: null, tokenExpiresAt: null },
   })
   res.json(settings)
 })
@@ -1185,22 +1394,23 @@ app.get('/api/schedules/monthly', authenticate, async (req, res) => {
   })
 
   if (req.headers.accept === 'text/csv') {
+    // M-3: CSVインジェクション対策適用
     const rows = [
-      ['日付', '曜日', '隊員番号', '隊員名', '現場', '開始', '終了', '出勤時刻', '退勤時刻', 'ステータス'],
+      ['日付', '曜日', '隊員番号', '隊員名', '現場', '開始', '終了', '出勤時刻', '退勤時刻', 'ステータス'].map(escapeCsvCell).join(','),
       ...schedules.map(s => {
         const d = new Date(s.date)
         const weekdays = ['日', '月', '火', '水', '木', '金', '土']
         return [
-          `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`,
-          weekdays[d.getDay()],
-          s.guard.employeeNumber,
-          s.guard.name,
-          s.site.name,
-          s.startTime,
-          s.endTime,
-          s.attendance?.clockInAt ? new Date(s.attendance.clockInAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '',
-          s.attendance?.clockOutAt ? new Date(s.attendance.clockOutAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '',
-          s.status,
+          escapeCsvCell(`${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`),
+          escapeCsvCell(weekdays[d.getDay()]),
+          escapeCsvCell(s.guard.employeeNumber),
+          escapeCsvCell(s.guard.name),
+          escapeCsvCell(s.site.name),
+          escapeCsvCell(s.startTime),
+          escapeCsvCell(s.endTime),
+          escapeCsvCell(s.attendance?.clockInAt ? new Date(s.attendance.clockInAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : ''),
+          escapeCsvCell(s.attendance?.clockOutAt ? new Date(s.attendance.clockOutAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : ''),
+          escapeCsvCell(s.status),
         ].join(',')
       }),
     ]
@@ -1282,9 +1492,9 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
     <p>担当者様</p>
     <p>下記の警備報告書のご確認・承認をお願いします。</p>
     <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
-      <p><strong>報告日:</strong> ${dateStr}</p>
-      <p><strong>現場:</strong> ${(report as any).site.name}</p>
-      <p><strong>担当隊員:</strong> ${(report as any).guard.name}</p>
+      <p><strong>報告日:</strong> ${escapeHtml(dateStr)}</p>
+      <p><strong>現場:</strong> ${escapeHtml((report as any).site.name)}</p>
+      <p><strong>担当隊員:</strong> ${escapeHtml((report as any).guard.name)}</p>
     </div>
     <div style="text-align:center;margin:24px 0">
       <a href="${approvalUrl}" style="background:#27ae60;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">報告書を承認する</a>
@@ -1321,17 +1531,18 @@ app.get('/api/export/guards', authenticate, requireRole('ADMIN', 'MANAGER'), asy
   const { companyId } = (req as any).user as JwtPayload
   const guards = await prisma.guard.findMany({ where: { companyId }, orderBy: { employeeNumber: 'asc' } })
 
+  // M-3: CSVインジェクション対策適用
   const rows = [
-    ['社員番号', '氏名', 'フリガナ', '生年月日', '性別', '電話番号', 'メール', '雇用形態', '日払い対象', '入社日', '資格'],
+    ['社員番号', '氏名', 'フリガナ', '生年月日', '性別', '電話番号', 'メール', '雇用形態', '日払い対象', '入社日', '資格'].map(escapeCsvCell).join(','),
     ...guards.map(g => [
-      g.employeeNumber, g.name, g.nameKana,
-      g.birthDate ? new Date(g.birthDate).toLocaleDateString('ja-JP') : '',
-      g.gender || '',
-      g.phone || '', g.email || '',
-      g.employmentType,
-      g.dailyPayEnabled ? '○' : '×',
-      g.joinedAt ? new Date(g.joinedAt).toLocaleDateString('ja-JP') : '',
-      (g.certifications || []).join('・'),
+      escapeCsvCell(g.employeeNumber), escapeCsvCell(g.name), escapeCsvCell(g.nameKana),
+      escapeCsvCell(g.birthDate ? new Date(g.birthDate).toLocaleDateString('ja-JP') : ''),
+      escapeCsvCell(g.gender || ''),
+      escapeCsvCell(g.phone || ''), escapeCsvCell(g.email || ''),
+      escapeCsvCell(g.employmentType),
+      escapeCsvCell(g.dailyPayEnabled ? '○' : '×'),
+      escapeCsvCell(g.joinedAt ? new Date(g.joinedAt).toLocaleDateString('ja-JP') : ''),
+      escapeCsvCell((g.certifications || []).join('・')),
     ].join(',')),
   ]
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -1353,23 +1564,23 @@ app.get('/api/export/invoices', authenticate, requireRole('ADMIN', 'MANAGER'), a
     orderBy: { issueDate: 'asc' },
   })
 
-  // マネーフォワード・弥生・freee共通フォーマット（仕訳形式）
+  // M-3: CSVインジェクション対策適用
   const rows = [
-    ['請求番号', '発行日', '支払期限', '発注元', '品目', '数量', '単価', '金額', '税率', '税額', '合計', 'ステータス'],
+    ['請求番号', '発行日', '支払期限', '発注元', '品目', '数量', '単価', '金額', '税率', '税額', '合計', 'ステータス'].map(escapeCsvCell).join(','),
     ...invoices.flatMap(inv =>
       inv.items.map(item => [
-        inv.invoiceNumber,
-        new Date(inv.issueDate).toLocaleDateString('ja-JP'),
-        new Date(inv.dueDate).toLocaleDateString('ja-JP'),
-        inv.clientName,
-        item.description,
-        item.quantity,
-        item.unitPrice,
-        item.amount,
-        `${inv.taxRate * 100}%`,
-        inv.taxAmount,
-        inv.total,
-        inv.status,
+        escapeCsvCell(inv.invoiceNumber),
+        escapeCsvCell(new Date(inv.issueDate).toLocaleDateString('ja-JP')),
+        escapeCsvCell(new Date(inv.dueDate).toLocaleDateString('ja-JP')),
+        escapeCsvCell(inv.clientName),
+        escapeCsvCell(item.description),
+        escapeCsvCell(item.quantity),
+        escapeCsvCell(item.unitPrice),
+        escapeCsvCell(item.amount),
+        escapeCsvCell(`${inv.taxRate * 100}%`),
+        escapeCsvCell(inv.taxAmount),
+        escapeCsvCell(inv.total),
+        escapeCsvCell(inv.status),
       ].join(','))
     ),
   ]
@@ -1406,12 +1617,13 @@ app.get('/api/export/daily-pay', authenticate, requireRole('ADMIN', 'MANAGER'), 
     s.count += 1
   }
 
+  // M-3: CSVインジェクション対策適用
   const rows = [
-    [`${y}年${m}月 日払い集計`],
-    ['社員番号', '氏名', '申請回数', '申請合計額', '手数料合計', '差引額（月末給与から控除）'],
+    escapeCsvCell(`${y}年${m}月 日払い集計`),
+    ['社員番号', '氏名', '申請回数', '申請合計額', '手数料合計', '差引額（月末給与から控除）'].map(escapeCsvCell).join(','),
     ...[...summary.values()].map(s => [
-      s.guard.employeeNumber, s.guard.name, s.count,
-      s.totalAmount, s.totalFee, s.totalFee,
+      escapeCsvCell(s.guard.employeeNumber), escapeCsvCell(s.guard.name), escapeCsvCell(s.count),
+      escapeCsvCell(s.totalAmount), escapeCsvCell(s.totalFee), escapeCsvCell(s.totalFee),
     ].join(',')),
   ]
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -1433,8 +1645,9 @@ app.get('/api/export/attendance', authenticate, requireRole('ADMIN', 'MANAGER'),
     orderBy: { clockInAt: 'asc' },
   })
 
+  // M-3: CSVインジェクション対策適用
   const rows = [
-    ['社員番号', '氏名', '現場', '日付', '出勤時刻', '退勤時刻', '勤務時間（分）', '休憩時間（分）'],
+    ['社員番号', '氏名', '現場', '日付', '出勤時刻', '退勤時刻', '勤務時間（分）', '休憩時間（分）'].map(escapeCsvCell).join(','),
     ...records.map(a => {
       const s = a.schedule as any
       const clockIn = new Date(a.clockInAt as Date)
@@ -1443,14 +1656,14 @@ app.get('/api/export/attendance', authenticate, requireRole('ADMIN', 'MANAGER'),
         ? Math.floor((clockOut.getTime() - clockIn.getTime()) / 60000) - (a.breakMinutes || 0)
         : ''
       return [
-        s?.guard?.employeeNumber || '',
-        s?.guard?.name || '',
-        s?.site?.name || '',
-        clockIn.toLocaleDateString('ja-JP'),
-        clockIn.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
-        clockOut ? clockOut.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '未退勤',
-        workMin,
-        a.breakMinutes || 0,
+        escapeCsvCell(s?.guard?.employeeNumber || ''),
+        escapeCsvCell(s?.guard?.name || ''),
+        escapeCsvCell(s?.site?.name || ''),
+        escapeCsvCell(clockIn.toLocaleDateString('ja-JP')),
+        escapeCsvCell(clockIn.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })),
+        escapeCsvCell(clockOut ? clockOut.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '未退勤'),
+        escapeCsvCell(workMin),
+        escapeCsvCell(a.breakMinutes || 0),
       ].join(',')
     }),
   ]
@@ -1636,7 +1849,8 @@ app.post('/api/schedules/:id/send-reminder', authenticate, requireRole('ADMIN', 
   const lw = company.lineWorksSettings
   if (lw && guard.lineWorksId) {
     const botId = lw.botId || process.env.LINE_WORKS_BOT_ID || ''
-    const botSecret = lw.botSecret || process.env.LINE_WORKS_BOT_SECRET || ''
+    // H-7: 暗号化されたbotSecretを復号して使用
+    const botSecret = decrypt(lw.botSecret || '') || process.env.LINE_WORKS_BOT_SECRET || ''
     if (botId && botSecret) {
       const token = await getLineWorksToken(botId, botSecret)
       if (token) lineWorksSent = await sendLineWorksMessage(botId, guard.lineWorksId, token, text)
@@ -1651,21 +1865,30 @@ app.post('/api/schedules/:id/send-reminder', authenticate, requireRole('ADMIN', 
 // ─────────────────────────────────────────────
 // SendGrid → Settings > Inbound Parse > POST /api/inbound/email
 app.post('/api/inbound/email', express.urlencoded({ extended: true }), async (req, res) => {
+  // C-3: Webhookシークレット認証
+  if (!verifyWebhookSecret(req, res)) return
+
   try {
     const from: string = req.body.from || req.body.sender || ''
     const subject: string = req.body.subject || ''
     const text: string = req.body.text || req.body.html || ''
     const rawContent = `差出人: ${from}\n件名: ${subject}\n\n${text}`.slice(0, 2000)
 
-    // メールアドレスドメインからテナント特定（例: receive@{company_code}.guardsync.jp）
-    // シンプルに全会社共通受信 → 会社コードが件名またはToに含まれる場合に振り分け
-    // ここでは最初に見つかった有効会社に登録（本番は会社コード解析を追加）
-    const firstCompany = await prisma.company.findFirst({ where: { isActive: true } })
-    if (!firstCompany) { res.status(200).send('ok'); return }
+    // C-4: テナント分離 - 環境変数から受信先会社コードを取得
+    const companyCode = process.env.INBOUND_COMPANY_CODE
+    const targetCompany = companyCode
+      ? await prisma.company.findFirst({ where: { code: companyCode, isActive: true } })
+      : await prisma.company.findFirst({ where: { isActive: true } }) // フォールバック
+
+    if (!targetCompany) {
+      console.warn('[inbound] 受信先会社が見つかりません。INBOUND_COMPANY_CODEを設定してください。')
+      res.status(200).send('ok')
+      return
+    }
 
     await prisma.autoReceipt.create({
       data: {
-        companyId: firstCompany.id,
+        companyId: targetCompany.id,
         source: 'EMAIL',
         rawContent,
         status: 'PENDING',
@@ -1685,18 +1908,30 @@ app.post('/api/inbound/email', express.urlencoded({ extended: true }), async (re
 // FAX受信サービス（eFax, RingCentral等）からPDFをPOSTで受け取り、
 // Google Vision API でOCRしてAutoReceiptに登録する
 app.post('/api/inbound/fax', async (req, res) => {
+  // C-3: Webhookシークレット認証
+  if (!verifyWebhookSecret(req, res)) return
+
   try {
     // req.body.pdfBase64 または req.body.imageBase64 を想定
     const rawText: string = req.body.text || req.body.ocrText || 'FAX受信（OCR未処理）'
     const from: string = req.body.from || req.body.callerNumber || '不明'
     const rawContent = `FAX送信元: ${from}\n\n${rawText}`.slice(0, 2000)
 
-    const firstCompany = await prisma.company.findFirst({ where: { isActive: true } })
-    if (!firstCompany) { res.status(200).send('ok'); return }
+    // C-4: テナント分離 - 環境変数から受信先会社コードを取得
+    const companyCode = process.env.INBOUND_COMPANY_CODE
+    const targetCompany = companyCode
+      ? await prisma.company.findFirst({ where: { code: companyCode, isActive: true } })
+      : await prisma.company.findFirst({ where: { isActive: true } }) // フォールバック
+
+    if (!targetCompany) {
+      console.warn('[inbound] 受信先会社が見つかりません。INBOUND_COMPANY_CODEを設定してください。')
+      res.status(200).send('ok')
+      return
+    }
 
     await prisma.autoReceipt.create({
       data: {
-        companyId: firstCompany.id,
+        companyId: targetCompany.id,
         source: 'FAX',
         rawContent,
         status: 'PENDING',
@@ -1721,7 +1956,8 @@ app.post('/api/settings/line-works/test', authenticate, requireRole('ADMIN'), as
 
   try {
     const botId = settings.botId || process.env.LINE_WORKS_BOT_ID || ''
-    const botSecret = settings.botSecret || process.env.LINE_WORKS_BOT_SECRET || ''
+    // H-7: 暗号化されたbotSecretを復号して使用
+    const botSecret = decrypt(settings.botSecret || '') || process.env.LINE_WORKS_BOT_SECRET || ''
     if (!botId || !botSecret) {
       res.status(400).json({ error: 'Bot IDまたはBot Secretが未設定です。設定画面で入力してください。' })
       return
@@ -1751,6 +1987,23 @@ if (process.env.NODE_ENV === 'production') {
     res.sendFile(path.join(__dirname, 'dist/public/index.html'))
   })
 }
+
+// ─────────────────────────────────────────────
+// M-4: グローバルエラーハンドラー
+// ─────────────────────────────────────────────
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[ERROR]', err.message, err.stack)
+  if (process.env.NODE_ENV === 'production') {
+    res.status(500).json({ error: '内部サーバーエラーが発生しました' })
+  } else {
+    res.status(500).json({ error: err.message, stack: err.stack })
+  }
+})
+
+// 404ハンドラー（APIルート）
+app.use('/api/', (req: express.Request, res: express.Response) => {
+  res.status(404).json({ error: 'エンドポイントが見つかりません' })
+})
 
 // ─────────────────────────────────────────────
 // 起動

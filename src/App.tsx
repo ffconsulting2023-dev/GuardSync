@@ -84,7 +84,11 @@ export default function App() {
                     <Route path="auto-receipts/*" element={<AutoReceiptPage />} />
                     <Route path="notifications/*" element={<NotificationsPage />} />
                     <Route path="settings/*" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
-                    <Route path="super-admin/*" element={<SuperAdminPage />} />
+                    <Route path="super-admin/*" element={
+                      auth.user?.isSuperAdmin
+                        ? <SuperAdminPage />
+                        : <Navigate to="/" replace />
+                    } />
                   </Routes>
                 </Layout>
               ) : (

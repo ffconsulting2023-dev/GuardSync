@@ -26,11 +26,17 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
         runtimeCaching: [
+          // M-8: APIレスポンスはキャッシュしない（機密データ保護）
           {
-            urlPattern: /^\/api\//,
-            handler: 'NetworkFirst',
-            options: { cacheName: 'api-cache', expiration: { maxEntries: 100, maxAgeSeconds: 300 } }
-          }
+            urlPattern: /\/api\//,
+            handler: 'NetworkOnly' as const,
+          },
+          // 静的アセットのみキャッシュ
+          {
+            urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp|ico)$/,
+            handler: 'CacheFirst' as const,
+            options: { cacheName: 'images', expiration: { maxEntries: 50, maxAgeSeconds: 30 * 24 * 60 * 60 } },
+          },
         ]
       }
     })
