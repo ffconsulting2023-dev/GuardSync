@@ -4,7 +4,9 @@ import { useAuth } from '../hooks/useAuth'
 
 const NAV_ITEMS = [
   { path: '/',            label: 'ダッシュボード', icon: '🏠' },
+  { path: '/dispatch',     label: '管制',           icon: '📡' },
   { path: '/schedule',    label: '管制・配員',     icon: '📋' },
+  { path: '/shift-surveys', label: 'シフト調査',   icon: '📋' },
   { path: '/attendance',  label: '出退勤',         icon: '⏰' },
   { path: '/guards',      label: '隊員管理',       icon: '👷' },
   { path: '/sites',       label: '現場管理',       icon: '📍' },

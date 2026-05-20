@@ -2210,6 +2210,113 @@ app.put('/api/shift-surveys/:id', authenticate, requireRole('ADMIN', 'MANAGER'),
   res.json(survey)
 })
 
+// 個別レスポンス保存 or 更新
+app.put('/api/shift-surveys/:id/responses/:guardId', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { answers } = req.body
+  const survey = await prisma.shiftSurvey.findFirst({ where: { id: req.params.id, companyId } })
+  if (!survey) { res.status(404).json({ error: '不明' }); return }
+  const guard = await prisma.guard.findFirst({ where: { id: req.params.guardId, companyId } })
+  if (!guard) { res.status(404).json({ error: '不明' }); return }
+  const response = await prisma.shiftSurveyResponse.upsert({
+    where: { surveyId_guardId: { surveyId: req.params.id, guardId: req.params.guardId } },
+    create: { surveyId: req.params.id, guardId: req.params.guardId, companyId, answers, submittedAt: new Date() },
+    update: { answers, submittedAt: new Date() },
+  })
+  res.json(response)
+})
+
+// アンケート削除
+app.delete('/api/shift-surveys/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.shiftSurvey.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: 'アンケートが見つかりません' }); return }
+  await prisma.shiftSurveyResponse.deleteMany({ where: { surveyId: req.params.id } })
+  await prisma.shiftSurvey.deleteMany({ where: { id: req.params.id, companyId } })
+  res.json({ ok: true })
+})
+
+// ─────────────────────────────────────────────
+// 管制 API
+// ─────────────────────────────────────────────
+
+// 管制用: 日付ごとの現場別集計取得
+app.get('/api/dispatch/:date', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const date = req.params.date // 'yyyy-MM-dd'
+
+  // その日のスケジュールを現場ごとにグループ化して返す
+  const schedules = await prisma.schedule.findMany({
+    where: { companyId, date: new Date(date) },
+    include: {
+      guard: { select: { id: true, name: true, nameKana: true, guardClass: true, certifications: true, lineWorksId: true } },
+      site: { select: { id: true, name: true, address: true, clientName: true, requiredCount: true, requiredQualifiedA: true, requiredQualifiedB: true, assemblyTime: true, defaultStartTime: true, defaultEndTime: true, assemblyPlace: true } },
+      attendance: true,
+    },
+    orderBy: { startTime: 'asc' },
+  })
+
+  // 現場ごとにグループ化
+  const sitesMap = new Map<string, { site: unknown; schedules: unknown[]; confirmedCount: number; sentCount: number }>()
+  for (const s of schedules) {
+    if (!sitesMap.has(s.siteId)) {
+      sitesMap.set(s.siteId, {
+        site: s.site,
+        schedules: [],
+        confirmedCount: 0,
+        sentCount: 0,
+      })
+    }
+    const group = sitesMap.get(s.siteId)!
+    group.schedules.push(s)
+    if (s.status === 'CONFIRMED') group.confirmedCount++
+    if (s.sentAt) group.sentCount++
+  }
+
+  res.json({
+    date,
+    groups: Array.from(sitesMap.values()),
+    totalSchedules: schedules.length,
+  })
+})
+
+// 勤怠実績の一括更新（管制画面から）
+app.post('/api/dispatch/attendance', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { scheduleId, clockIn, clockOut, earlyOvertimeMin, lateOvertimeMin } = req.body
+
+  const schedule = await prisma.schedule.findFirst({ where: { id: scheduleId, companyId } })
+  if (!schedule) { res.status(404).json({ error: '不明' }); return }
+
+  const existing = await prisma.attendance.findFirst({ where: { scheduleId } })
+  if (existing) {
+    await prisma.attendance.update({
+      where: { id: existing.id },
+      data: {
+        clockInAt: clockIn ? new Date(`${schedule.date.toISOString().split('T')[0]}T${clockIn}`) : undefined,
+        clockOutAt: clockOut ? new Date(`${schedule.date.toISOString().split('T')[0]}T${clockOut}`) : undefined,
+        earlyOvertimeMin: earlyOvertimeMin ?? existing.earlyOvertimeMin,
+        lateOvertimeMin: lateOvertimeMin ?? existing.lateOvertimeMin,
+        status: clockOut ? 'COMPLETED' : clockIn ? 'CLOCKED_IN' : existing.status,
+      }
+    })
+  } else {
+    await prisma.attendance.create({
+      data: {
+        companyId,
+        guardId: schedule.guardId,
+        scheduleId,
+        clockInAt: clockIn ? new Date(`${schedule.date.toISOString().split('T')[0]}T${clockIn}`) : undefined,
+        clockOutAt: clockOut ? new Date(`${schedule.date.toISOString().split('T')[0]}T${clockOut}`) : undefined,
+        earlyOvertimeMin: earlyOvertimeMin ?? 0,
+        lateOvertimeMin: lateOvertimeMin ?? 0,
+        status: clockOut ? 'COMPLETED' : clockIn ? 'CLOCKED_IN' : 'PENDING',
+      }
+    })
+  }
+  res.json({ ok: true })
+})
+
 // ─────────────────────────────────────────────
 // 給与管理 API
 // ─────────────────────────────────────────────
