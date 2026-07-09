@@ -306,6 +306,30 @@ function requireRole(...roles: string[]) {
   }
 }
 
+function requireModule(module: string, permission: 'view' | 'edit' | 'admin') {
+  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const user = (req as any).user as JwtPayload
+    if (!user) { res.status(401).json({ error: '認証が必要です' }); return }
+    if (user.isSuperAdmin) { next(); return }
+
+    // ADMIN ロールは全モジュールに全権限
+    if (user.role === 'ADMIN') { next(); return }
+
+    // ModulePermission テーブルを確認
+    const perm = await prisma.modulePermission.findUnique({
+      where: { userId_module: { userId: user.userId, module } }
+    })
+
+    if (!perm) { res.status(403).json({ error: `${module}モジュールへのアクセス権限がありません` }); return }
+
+    if (permission === 'view' && !perm.canView) { res.status(403).json({ error: '閲覧権限がありません' }); return }
+    if (permission === 'edit' && !perm.canEdit) { res.status(403).json({ error: '編集権限がありません' }); return }
+    if (permission === 'admin' && !perm.canAdmin) { res.status(403).json({ error: '管理権限がありません' }); return }
+
+    next()
+  }
+}
+
 function requireSuperAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
   const user = (req as any).user as JwtPayload
   if (!user?.isSuperAdmin) { res.status(403).json({ error: 'スーパー管理者のみアクセス可能です' }); return }
@@ -1479,6 +1503,190 @@ async function checkForeignWorkerHours(guardId: string, companyId: string): Prom
 
   return { violations, warnings, isVacation, limitHours }
 }
+
+// ─────────────────────────────────────────────
+// CSVインポートAPI（マスタデータ一括登録）
+// ─────────────────────────────────────────────
+
+// 健康保険等級表インポート
+app.post('/api/admin/import/health-insurance', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { fiscalYear, data } = req.body as {
+    fiscalYear: number
+    data: Array<{
+      prefecture: string; grade: number; standardMonthly: number
+      employeeShare: number; employerShare: number
+      nursingEmployee?: number; nursingEmployer?: number
+    }>
+  }
+
+  let imported = 0
+  for (const row of data) {
+    await prisma.healthInsGradeTable.upsert({
+      where: {
+        fiscalYear_prefecture_grade: {
+          fiscalYear,
+          prefecture: row.prefecture,
+          grade: row.grade,
+        },
+      },
+      update: {
+        standardMonthly: row.standardMonthly,
+        employeeShare: row.employeeShare,
+        employerShare: row.employerShare,
+        nursingEmployee: row.nursingEmployee ?? 0,
+        nursingEmployer: row.nursingEmployer ?? 0,
+      },
+      create: {
+        fiscalYear,
+        prefecture: row.prefecture,
+        grade: row.grade,
+        standardMonthly: row.standardMonthly,
+        employeeShare: row.employeeShare,
+        employerShare: row.employerShare,
+        nursingEmployee: row.nursingEmployee ?? 0,
+        nursingEmployer: row.nursingEmployer ?? 0,
+      },
+    })
+    imported++
+  }
+
+  res.json({ imported, fiscalYear })
+})
+
+// 厚生年金等級表インポート
+app.post('/api/admin/import/pension', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { fiscalYear, data } = req.body as {
+    fiscalYear: number
+    data: Array<{
+      grade: number; standardMonthly: number
+      employeeShare: number; employerShare: number
+    }>
+  }
+
+  let imported = 0
+  for (const row of data) {
+    await prisma.pensionGradeTable.upsert({
+      where: {
+        fiscalYear_grade: {
+          fiscalYear,
+          grade: row.grade,
+        },
+      },
+      update: {
+        standardMonthly: row.standardMonthly,
+        employeeShare: row.employeeShare,
+        employerShare: row.employerShare,
+      },
+      create: {
+        fiscalYear,
+        grade: row.grade,
+        standardMonthly: row.standardMonthly,
+        employeeShare: row.employeeShare,
+        employerShare: row.employerShare,
+      },
+    })
+    imported++
+  }
+
+  res.json({ imported, fiscalYear })
+})
+
+// 源泉徴収税額表インポート（同年度の既存データは先に削除）
+app.post('/api/admin/import/income-tax', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { fiscalYear, data } = req.body as {
+    fiscalYear: number
+    data: Array<{
+      salaryFrom: number; salaryTo: number
+      dep0: number; dep1: number; dep2: number; dep3: number
+      dep4: number; dep5: number; dep6: number; dep7: number
+    }>
+  }
+
+  // 同年度の既存データを削除
+  await prisma.incomeTaxTable.deleteMany({ where: { fiscalYear } })
+
+  // 新データを一括作成
+  await prisma.incomeTaxTable.createMany({
+    data: data.map((row) => ({
+      fiscalYear,
+      salaryFrom: row.salaryFrom,
+      salaryTo: row.salaryTo,
+      dep0: row.dep0,
+      dep1: row.dep1,
+      dep2: row.dep2,
+      dep3: row.dep3,
+      dep4: row.dep4,
+      dep5: row.dep5,
+      dep6: row.dep6,
+      dep7: row.dep7,
+    })),
+  })
+
+  res.json({ imported: data.length, fiscalYear })
+})
+
+// マスタデータ件数サマリー取得
+app.get('/api/admin/master-data/:fiscalYear', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const fiscalYear = parseInt(req.params.fiscalYear, 10)
+
+  const [healthCount, healthPrefectures, pensionCount, employmentInsCount, incomeTaxCount] = await Promise.all([
+    prisma.healthInsGradeTable.count({ where: { fiscalYear } }),
+    prisma.healthInsGradeTable.groupBy({ by: ['prefecture'], where: { fiscalYear } }),
+    prisma.pensionGradeTable.count({ where: { fiscalYear } }),
+    prisma.employmentInsRate.count({ where: { fiscalYear } }),
+    prisma.incomeTaxTable.count({ where: { fiscalYear } }),
+  ])
+
+  res.json({
+    healthInsurance: { count: healthCount, prefectures: healthPrefectures.map((p) => p.prefecture) },
+    pension: { count: pensionCount },
+    employmentIns: { count: employmentInsCount },
+    incomeTax: { count: incomeTaxCount },
+  })
+})
+
+// ─────────────────────────────────────────────
+// ModulePermission CRUD API
+// ─────────────────────────────────────────────
+
+// ユーザーのモジュール権限一覧取得
+app.get('/api/admin/permissions/:userId', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const permissions = await prisma.modulePermission.findMany({
+    where: { userId: req.params.userId },
+    orderBy: { module: 'asc' },
+  })
+  res.json({ permissions })
+})
+
+// ユーザーのモジュール権限を一括更新
+app.put('/api/admin/permissions/:userId', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { userId } = req.params
+  const { permissions } = req.body as {
+    permissions: Array<{ module: string; canView: boolean; canEdit: boolean; canAdmin: boolean }>
+  }
+
+  const results = []
+  for (const perm of permissions) {
+    const result = await prisma.modulePermission.upsert({
+      where: { userId_module: { userId, module: perm.module } },
+      update: {
+        canView: perm.canView,
+        canEdit: perm.canEdit,
+        canAdmin: perm.canAdmin,
+      },
+      create: {
+        userId,
+        module: perm.module,
+        canView: perm.canView,
+        canEdit: perm.canEdit,
+        canAdmin: perm.canAdmin,
+      },
+    })
+    results.push(result)
+  }
+
+  res.json({ permissions: results })
+})
 
 // 外国人就労時間チェック API（個別隊員）
 app.get('/api/guards/:id/work-hours-check', authenticate, async (req, res) => {
