@@ -50,6 +50,13 @@ export default defineConfig({
     }
   },
   build: {
-    outDir: 'dist/public'
+    outDir: 'dist/public',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          recharts: ['recharts'],
+        },
+      },
+    },
   }
 })

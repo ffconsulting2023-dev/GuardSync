@@ -21,6 +21,15 @@ model Company {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // ─── SaaS課金関連 ───
+  stripeCustomerId    String?            @unique
+  subscriptionStatus  SubscriptionStatus @default(TRIAL)
+  planType            PlanType           @default(STARTER)
+  trialEndsAt         DateTime?
+  suspendedAt         DateTime?
+  billingEmail        String?
+  lastPaymentAt       DateTime?
+
   users         User[]
   guards        Guard[]
   clients       Client[]
@@ -41,6 +50,8 @@ model Company {
   shiftSurveys    ShiftSurvey[]
   payrolls        Payroll[]
   subcontractorPayments SubcontractorPayment[]
+  billingSubscriptions  BillingSubscription[]
+  billingLogs           BillingLog[]
 }
 
 enum Plan {
@@ -57,6 +68,8 @@ model Invitation {
   expiresAt   DateTime
   usedAt      DateTime?
   createdAt   DateTime @default(now())
+
+  @@index([companyId])
 }
 
 // ─────────────────────────────────────────────
@@ -82,6 +95,8 @@ model User {
   createdInvoices      Invoice[]
   approvedDailyPays    DailyPayRequest[] @relation("ApprovedBy")
   eContractSignatures  EContractSignature[]
+
+  @@index([companyId])
 }
 
 enum UserRole {
@@ -221,6 +236,7 @@ model Guard {
   payrolls        Payroll[]
 
   @@unique([companyId, employeeNumber])
+  @@index([companyId])
 }
 
 enum Gender {
@@ -249,7 +265,7 @@ model Client {
   clientCode    String?  // C00001
   name          String
   nameKana      String?
-  category      String   @default("OTHER")
+  category      ClientCategory @default(OTHER)
   positionTitle String?  // 代表役職
   contactName   String?  // 代表者名
   phone         String?  // 代表電話
@@ -321,6 +337,8 @@ model Client {
 
   sites       Site[]
   logs        ClientLog[]
+
+  @@index([companyId])
 }
 
 model ClientLog {
@@ -332,6 +350,9 @@ model ClientLog {
   content       String
   createdByName String?
   createdAt     DateTime @default(now())
+
+  @@index([clientId])
+  @@index([companyId])
 }
 
 // ─────────────────────────────────────────────
@@ -368,6 +389,9 @@ model Site {
   contracts   Contract[]
   schedules   Schedule[]
   securityReports SecurityReport[]
+
+  @@index([companyId])
+  @@index([clientId])
 }
 
 // ─────────────────────────────────────────────
@@ -396,6 +420,9 @@ model Contract {
 
   invoiceItems  InvoiceItem[]
   eContracts    ElectronicContract[]
+
+  @@index([companyId])
+  @@index([siteId])
 }
 
 enum ContractStatus {
@@ -425,6 +452,8 @@ model Partner {
   updatedAt   DateTime    @updatedAt
 
   payments    SubcontractorPayment[]
+
+  @@index([companyId])
 }
 
 enum PartnerType {
@@ -447,6 +476,8 @@ model Vehicle {
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@index([companyId])
 }
 
 // ─────────────────────────────────────────────
@@ -512,6 +543,9 @@ model Attendance {
   lateOvertimeMin    Int     @default(0)      // 遅出残業（分）
   transportAmount    Int     @default(0)      // 旅費
   otherAmount        Int     @default(0)      // その他手当
+
+  @@index([companyId])
+  @@index([guardId])
 }
 
 enum AttendanceStatus {
@@ -549,6 +583,9 @@ model Invoice {
   updatedAt     DateTime      @updatedAt
 
   items         InvoiceItem[]
+
+  @@index([companyId])
+  @@index([status])
 }
 
 enum InvoiceStatus {
@@ -570,6 +607,8 @@ model InvoiceItem {
   unitPrice   Int
   amount      Int
   date        DateTime? @db.Date
+
+  @@index([invoiceId])
 }
 
 // ─────────────────────────────────────────────
@@ -596,6 +635,10 @@ model DailyPayRequest {
   notes        String?
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
+
+  @@index([companyId])
+  @@index([guardId])
+  @@index([status])
 }
 
 enum DailyPayStatus {
@@ -628,6 +671,9 @@ model ElectronicContract {
   updatedAt       DateTime        @updatedAt
 
   signatures      EContractSignature[]
+
+  @@index([companyId])
+  @@index([contractId])
 }
 
 enum EContractStatus {
@@ -652,6 +698,8 @@ model EContractSignature {
   ipAddress       String?
   userAgent       String?
   createdAt       DateTime   @default(now())
+
+  @@index([eContractId])
 }
 
 // ─────────────────────────────────────────────
@@ -709,6 +757,9 @@ model Notification {
   sentAt      DateTime?
   status      String           @default("PENDING")
   createdAt   DateTime         @default(now())
+
+  @@index([companyId])
+  @@index([status])
 }
 
 enum NotificationType {
@@ -734,6 +785,9 @@ model AutoReceipt {
   status      ReceiptStatus     @default(PENDING)
   processedAt DateTime?
   createdAt   DateTime          @default(now())
+
+  @@index([companyId])
+  @@index([status])
 }
 
 enum ReceiptSource {
@@ -889,12 +943,89 @@ model SubcontractorPayment {
 
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
+
+  @@index([companyId])
+  @@index([partnerId])
 }
 
 enum SubPaymentStatus {
   PENDING   // 未受領
   RECEIVED  // 受領済
   PAID      // 支払済
+}
+
+enum ClientCategory {
+  GOVERNMENT    // 官公庁
+  PRIVATE       // 民間企業
+  CONSTRUCTION  // 建設・工事
+  COMMERCIAL    // 商業施設
+  INDIVIDUAL    // 個人
+  OTHER         // その他
+}
+
+// ─────────────────────────────────────────────
+// SaaS課金・サブスクリプション管理
+// ─────────────────────────────────────────────
+
+enum SubscriptionStatus {
+  TRIAL      // 無料トライアル中
+  ACTIVE     // 支払い済み・有効
+  PAST_DUE   // 支払い遅延中（猶予期間内）
+  SUSPENDED  // 利用停止
+  CANCELLED  // 解約済み
+}
+
+enum PlanType {
+  STARTER    // スターター（月額9,800円）
+  STANDARD   // スタンダード（月額29,800円）
+  ENTERPRISE // エンタープライズ（月額49,800円）
+}
+
+enum BillingLogType {
+  PAYMENT_LINK_SENT       // Payment Link送付
+  PAYMENT_SUCCEEDED       // 支払い成功
+  PAYMENT_FAILED          // 支払い失敗
+  SUBSCRIPTION_CREATED    // サブスクリプション作成
+  SUBSCRIPTION_UPDATED    // サブスクリプション更新
+  SUBSCRIPTION_CANCELLED  // サブスクリプション解約
+  MANUAL_SUSPEND          // 手動停止
+  MANUAL_REACTIVATE       // 手動再開
+  AUTO_SUSPEND            // 自動停止
+  REMINDER_SENT           // リマインドメール送付
+}
+
+model BillingSubscription {
+  id                   String   @id @default(uuid())
+  companyId            String
+  company              Company  @relation(fields: [companyId], references: [id])
+  stripeSubscriptionId String?  @unique
+  stripePriceId        String?
+  status               String
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelledAt          DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([companyId])
+}
+
+model BillingLog {
+  id                    String         @id @default(uuid())
+  companyId             String
+  company               Company        @relation(fields: [companyId], references: [id])
+  stripeInvoiceId       String?        @unique
+  stripePaymentIntentId String?
+  type                  BillingLogType
+  amount                Int            @default(0)
+  currency              String         @default("jpy")
+  description           String?
+  metadata              Json?
+  occurredAt            DateTime
+  createdAt             DateTime       @default(now())
+
+  @@index([companyId])
+  @@index([occurredAt])
 }
 
 // ─────────────────────────────────────────────

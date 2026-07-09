@@ -1,3 +1,4 @@
+import 'express-async-errors'
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
@@ -11,15 +12,53 @@ import dotenv from 'dotenv'
 import { z } from 'zod'
 import nodemailer from 'nodemailer'
 import crypto from 'crypto'
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const Stripe = require('stripe')
 
 dotenv.config()
+
+const isProduction = process.env.NODE_ENV === 'production'
+
+// ─────────────────────────────────────────────
+// 構造化ログ
+// ─────────────────────────────────────────────
+const logger = {
+  info: (message: string, meta?: Record<string, unknown>) => {
+    console.log(JSON.stringify({ level: 'info', timestamp: new Date().toISOString(), message, ...meta }))
+  },
+  warn: (message: string, meta?: Record<string, unknown>) => {
+    console.warn(JSON.stringify({ level: 'warn', timestamp: new Date().toISOString(), message, ...meta }))
+  },
+  error: (message: string, error?: unknown, meta?: Record<string, unknown>) => {
+    const errorInfo = error instanceof Error
+      ? { errorMessage: error.message, stack: isProduction ? undefined : error.stack }
+      : { errorMessage: String(error) }
+    console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), message, ...errorInfo, ...meta }))
+  },
+}
+
+// ─────────────────────────────────────────────
+// Stripe初期化（APIキー未設定時はnull → 使用時にチェック）
+// ─────────────────────────────────────────────
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null
+
+function getPriceIdForPlan(planType: string): string {
+  const map: Record<string, string> = {
+    STARTER:    process.env.STRIPE_PRICE_STARTER    || '',
+    STANDARD:   process.env.STRIPE_PRICE_STANDARD   || '',
+    ENTERPRISE: process.env.STRIPE_PRICE_ENTERPRISE || '',
+  }
+  return map[planType] || map['STARTER']
+}
 
 // ─────────────────────────────────────────────
 // 起動時セキュリティバリデーション
 // ─────────────────────────────────────────────
 const JWT_SECRET_RAW = process.env.JWT_SECRET
 if (!JWT_SECRET_RAW || JWT_SECRET_RAW.length < 32) {
-  console.error('[FATAL] JWT_SECRET が未設定または短すぎます（32文字以上必要）。サーバーを起動できません。')
+  logger.error('JWT_SECRET が未設定または短すぎます（32文字以上必要）。サーバーを起動できません。')
   // 注意: .env の JWT_SECRET を32文字以上に変更してください（例: openssl rand -hex 32）
   process.exit(1)
 }
@@ -102,7 +141,7 @@ function createMailTransport() {
 
 async function sendEmail(to: string, subject: string, html: string, text?: string): Promise<boolean> {
   if (!process.env.SMTP_PASS && !process.env.SENDGRID_API_KEY) {
-    console.log(`[email] SMTP未設定 - メール送信スキップ: ${subject} → ${to}`)
+    logger.info(`SMTP未設定 - メール送信スキップ: ${subject} → ${to}`, { context: 'email' })
     return false
   }
   try {
@@ -116,7 +155,7 @@ async function sendEmail(to: string, subject: string, html: string, text?: strin
     })
     return true
   } catch (e) {
-    console.error('[email] 送信エラー:', e)
+    logger.error('送信エラー', e, { context: 'email' })
     return false
   }
 }
@@ -140,13 +179,13 @@ async function getLineWorksToken(botId: string, botSecret: string): Promise<stri
     })
     if (!res.ok) {
       const errText = await res.text()
-      console.error('[LINE Works] token error:', res.status, errText)
+      logger.error('token error', errText, { context: 'LINE Works', status: res.status })
       return null
     }
     const data = await res.json() as { access_token: string }
     return data.access_token
   } catch (e) {
-    console.error('[LINE Works] token fetch error:', e)
+    logger.error('token fetch error', e, { context: 'LINE Works' })
     return null
   }
 }
@@ -161,11 +200,11 @@ async function sendLineWorksMessage(botId: string, userId: string, accessToken: 
     })
     if (!res.ok) {
       const errText = await res.text()
-      console.error('[LINE Works] send error:', res.status, errText)
+      logger.error('send error', errText, { context: 'LINE Works', status: res.status })
     }
     return res.ok
   } catch (e) {
-    console.error('[LINE Works] send error:', e)
+    logger.error('send error', e, { context: 'LINE Works' })
     return false
   }
 }
@@ -210,6 +249,8 @@ app.use(cors({
   credentials: true,
 }))
 
+// Stripe Webhookはraw bodyが必要なため、express.json()より前に登録
+app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -269,6 +310,47 @@ function requireSuperAdmin(req: express.Request, res: express.Response, next: ex
   const user = (req as any).user as JwtPayload
   if (!user?.isSuperAdmin) { res.status(403).json({ error: 'スーパー管理者のみアクセス可能です' }); return }
   next()
+}
+
+// ─────────────────────────────────────────────
+// テナント利用停止チェック（1分キャッシュ付き）
+// ─────────────────────────────────────────────
+const companyStatusCache = new Map<string, { isActive: boolean; status: string; expiresAt: number }>()
+
+async function checkCompanyActive(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const user = (req as any).user as JwtPayload
+  if (!user) { next(); return }
+  if (user.isSuperAdmin) { next(); return }
+
+  const cached = companyStatusCache.get(user.companyId)
+  if (cached && cached.expiresAt > Date.now()) {
+    if (!cached.isActive || cached.status === 'SUSPENDED') {
+      res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+      return
+    }
+    next(); return
+  }
+
+  const company = await prisma.company.findUnique({
+    where: { id: user.companyId },
+    select: { isActive: true, subscriptionStatus: true },
+  })
+  companyStatusCache.set(user.companyId, {
+    isActive: company?.isActive ?? false,
+    status: company?.subscriptionStatus ?? 'TRIAL',
+    expiresAt: Date.now() + 60_000,
+  })
+
+  if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
+    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+    return
+  }
+  next()
+}
+
+// authenticateとテナントチェックを合成したミドルウェア
+function authenticateAndCheck(req: express.Request, res: express.Response, next: express.NextFunction) {
+  authenticate(req, res, () => checkCompanyActive(req, res, next))
 }
 
 // ─────────────────────────────────────────────
@@ -520,15 +602,15 @@ const guardSchema = z.object({
   nationality: z.string().optional(),
   notes: z.string().optional(),
   // NG設定
-  ngGuardIds: z.any().optional(),
-  ngCompanies: z.any().optional(),
+  ngGuardIds: z.array(z.string()).optional(),
+  ngCompanies: z.array(z.string()).optional(),
   ngConditions: z.string().optional(),
   // 評価
   overallRating: z.number().int().min(1).max(5).optional().nullable(),
   ratingComment: z.string().optional(),
-  chartRatings: z.any().optional(),
+  chartRatings: z.record(z.string(), z.number()).optional(),
   // 勤務希望条件
-  workConditions: z.any().optional(),
+  workConditions: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
   // 給与体系
   payType: z.string().optional(),
   monthlyBase: z.number().int().optional().nullable(),
@@ -1327,7 +1409,7 @@ app.post('/api/super-admin/invite', authenticate, requireSuperAdmin, async (req,
 // ─────────────────────────────────────────────
 
 cron.schedule('0 10 * * *', async () => {
-  console.log('[cron] 前日確認通知 開始')
+  logger.info('前日確認通知 開始', { context: 'cron' })
   const tomorrow = new Date()
   tomorrow.setDate(tomorrow.getDate() + 1)
   const tomorrowDate = tomorrow.toISOString().split('T')[0]
@@ -1398,9 +1480,9 @@ cron.schedule('0 10 * * *', async () => {
         sentAt: new Date(),
       },
     })
-    console.log(`[cron] 前日確認: ${schedule.guard.name} → ${schedule.site.name}`)
+    logger.info(`前日確認: ${schedule.guard.name} → ${schedule.site.name}`, { context: 'cron' })
   }
-  console.log(`[cron] 前日確認通知 完了: ${schedules.length}件`)
+  logger.info(`前日確認通知 完了: ${schedules.length}件`, { context: 'cron' })
 })
 
 // ─────────────────────────────────────────────
@@ -1456,8 +1538,33 @@ app.delete('/api/vehicles/:id', authenticate, requireRole('ADMIN'), async (req, 
 // ─────────────────────────────────────────────
 
 app.post('/api/webhook/line-works', async (req, res) => {
-  // TODO: LINE Works Bot Secretによる署名検証を実装（Bot Secret必須のため後日対応）
-  console.log('[webhook/line-works] リクエスト受信 - 署名検証未実装のため注意')
+  // LINE Works Bot Secret による HMAC-SHA256 署名検証
+  const signature = req.headers['x-works-signature'] as string | undefined
+  if (signature) {
+    // 署名ヘッダーがある場合は検証（LINE Works からの正規リクエスト）
+    const settings = await prisma.lineWorksSettings.findFirst({
+      where: { botSecret: { not: null } },
+      select: { botSecret: true },
+    })
+    if (settings?.botSecret) {
+      const secret = decrypt(settings.botSecret)
+      const body = JSON.stringify(req.body)
+      const expected = crypto.createHmac('sha256', secret).update(body).digest('base64')
+      if (signature !== expected) {
+        logger.warn('LINE Works webhook 署名検証失敗', { context: 'webhook/line-works' })
+        res.status(401).json({ error: '署名が無効です' })
+        return
+      }
+    }
+  } else {
+    // 署名ヘッダーなし → 本番環境では拒否
+    if (isProduction) {
+      logger.warn('LINE Works webhook 署名ヘッダーなし', { context: 'webhook/line-works' })
+      res.status(401).json({ error: '署名が必要です' })
+      return
+    }
+    logger.warn('LINE Works webhook 署名なし（開発環境のためスキップ）', { context: 'webhook/line-works' })
+  }
   const { type, content, source } = req.body
 
   if (type !== 'message') { res.json({ ok: true }); return }
@@ -1483,7 +1590,7 @@ app.post('/api/webhook/line-works', async (req, res) => {
     },
   })
 
-  console.log(`[webhook] LINE Works自動受付: ${text.slice(0, 50)} (companyId: ${lwSettings.companyId})`)
+  logger.info(`LINE Works自動受付: ${text.slice(0, 50)}`, { context: 'webhook', companyId: lwSettings.companyId })
   res.json({ ok: true })
 })
 
@@ -1965,7 +2072,7 @@ cron.schedule('55 23 28-31 * *', async () => {
   // 今日が月末日のときのみ実行
   if (tomorrow.getMonth() === now.getMonth()) return
 
-  console.log('[cron] 月末日払い差引処理 開始')
+  logger.info('月末日払い差引処理 開始', { context: 'cron' })
 
   const approvedRequests = await prisma.dailyPayRequest.findMany({
     where: {
@@ -1984,10 +2091,10 @@ cron.schedule('55 23 28-31 * *', async () => {
       where: { id: req.id },
       data: { status: 'DEDUCTED', deductedAt: new Date() },
     })
-    console.log(`[cron] 日払い差引: ${req.guard.name} 手数料¥${req.feeAmount}`)
+    logger.info(`日払い差引: ${req.guard.name} 手数料¥${req.feeAmount}`, { context: 'cron' })
   }
 
-  console.log(`[cron] 月末日払い差引処理 完了: ${approvedRequests.length}件`)
+  logger.info(`月末日払い差引処理 完了: ${approvedRequests.length}件`, { context: 'cron' })
 })
 
 // ─────────────────────────────────────────────
@@ -2052,7 +2159,7 @@ app.post('/api/inbound/email', express.urlencoded({ extended: true }), async (re
       : await prisma.company.findFirst({ where: { isActive: true } }) // フォールバック
 
     if (!targetCompany) {
-      console.warn('[inbound] 受信先会社が見つかりません。INBOUND_COMPANY_CODEを設定してください。')
+      logger.warn('受信先会社が見つかりません。INBOUND_COMPANY_CODEを設定してください。', { context: 'inbound' })
       res.status(200).send('ok')
       return
     }
@@ -2065,10 +2172,10 @@ app.post('/api/inbound/email', express.urlencoded({ extended: true }), async (re
         status: 'PENDING',
       },
     })
-    console.log('[inbound/email] AutoReceipt created')
+    logger.info('AutoReceipt created', { context: 'inbound/email' })
     res.status(200).send('ok')
   } catch (err) {
-    console.error('[inbound/email] error:', err)
+    logger.error('error', err, { context: 'inbound/email' })
     res.status(200).send('ok') // SendGridは200以外でリトライするため必ず200を返す
   }
 })
@@ -2095,7 +2202,7 @@ app.post('/api/inbound/fax', async (req, res) => {
       : await prisma.company.findFirst({ where: { isActive: true } }) // フォールバック
 
     if (!targetCompany) {
-      console.warn('[inbound] 受信先会社が見つかりません。INBOUND_COMPANY_CODEを設定してください。')
+      logger.warn('受信先会社が見つかりません。INBOUND_COMPANY_CODEを設定してください。', { context: 'inbound' })
       res.status(200).send('ok')
       return
     }
@@ -2108,10 +2215,10 @@ app.post('/api/inbound/fax', async (req, res) => {
         status: 'PENDING',
       },
     })
-    console.log('[inbound/fax] AutoReceipt created from FAX')
+    logger.info('AutoReceipt created from FAX', { context: 'inbound/fax' })
     res.status(200).json({ success: true })
   } catch (err) {
-    console.error('[inbound/fax] error:', err)
+    logger.error('error', err, { context: 'inbound/fax' })
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -2409,9 +2516,8 @@ app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
     'earlyOtMinutes', 'lateOtMinutes', 'paidLeaveDays', 'absentDays',
     'basicPay', 'overtimePay', 'holidayPay', 'positionAllowance', 'qualificationAllowance',
     'leaderAllowance', 'commuteAllowance', 'travelExpense', 'otherAllowance',
-    'taxableTotal', 'nonTaxableTotal', 'grossPay',
-    'healthInsurance', 'pension', 'employmentIns', 'incomeTax', 'residentTax', 'otherDeduction', 'totalDeduction',
-    'yearEndAdj', 'netPay', 'notes', 'issueDate', 'sentAt', 'confirmedAt', 'payDate',
+    'healthInsurance', 'pension', 'employmentIns', 'incomeTax', 'residentTax', 'otherDeduction',
+    'yearEndAdj', 'notes', 'issueDate', 'sentAt', 'confirmedAt', 'payDate',
   ]
   const data: Record<string, unknown> = {}
   for (const key of allowedFields) {
@@ -2423,6 +2529,21 @@ app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
       }
     }
   }
+
+  // 支給合計・控除合計・差引支給額はサーバー側で計算（クライアントからの値は使用しない）
+  const n = (k: string) => Number((data[k] ?? existing[k as keyof typeof existing]) || 0)
+  const taxableTotal = n('basicPay') + n('overtimePay') + n('holidayPay') +
+    n('positionAllowance') + n('qualificationAllowance') + n('leaderAllowance') + n('otherAllowance')
+  const nonTaxableTotal = n('commuteAllowance') + n('travelExpense')
+  const grossPay = taxableTotal + nonTaxableTotal
+  const totalDeduction = n('healthInsurance') + n('pension') + n('employmentIns') +
+    n('incomeTax') + n('residentTax') + n('otherDeduction')
+  const netPay = grossPay - totalDeduction + n('yearEndAdj')
+  data.taxableTotal = taxableTotal
+  data.nonTaxableTotal = nonTaxableTotal
+  data.grossPay = grossPay
+  data.totalDeduction = totalDeduction
+  data.netPay = netPay
 
   await prisma.payroll.updateMany({ where: { id: req.params.id, companyId }, data })
   const payroll = await prisma.payroll.findFirst({
@@ -2496,6 +2617,407 @@ app.put('/api/subcontractor-payments/:id', authenticate, requireRole('ADMIN', 'M
 })
 
 // ─────────────────────────────────────────────
+// Stripe Webhook
+// ─────────────────────────────────────────────
+
+app.post('/api/stripe/webhook', async (req, res) => {
+  if (!stripe) { res.status(503).json({ error: 'Stripe未設定' }); return }
+  const sig = req.headers['stripe-signature'] as string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let event: any
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || '')
+  } catch (err) {
+    logger.error('署名検証失敗', err, { context: 'Stripe Webhook' })
+    res.status(400).json({ error: 'Webhook signature verification failed' }); return
+  }
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        await handleCheckoutCompleted(event.data.object); break
+      case 'invoice.payment_succeeded':
+        await handlePaymentSucceeded(event.data.object); break
+      case 'invoice.payment_failed':
+        await handlePaymentFailed(event.data.object); break
+      case 'customer.subscription.updated':
+        await handleSubscriptionUpdated(event.data.object); break
+      case 'customer.subscription.deleted':
+        await handleSubscriptionDeleted(event.data.object); break
+    }
+  } catch (err) {
+    logger.error('処理エラー', err, { context: 'Stripe Webhook', eventType: event.type })
+  }
+
+  res.json({ received: true })
+})
+
+async function handleCheckoutCompleted(session: any) {
+  const companyId = session.metadata?.companyId
+  if (!companyId) return
+  await prisma.company.update({
+    where: { id: companyId },
+    data: {
+      subscriptionStatus: 'ACTIVE',
+      stripeCustomerId: session.customer as string,
+      lastPaymentAt: new Date(),
+      isActive: true,
+      suspendedAt: null,
+    },
+  })
+  if (session.subscription && stripe) {
+    const sub = await stripe.subscriptions.retrieve(session.subscription as string)
+    await prisma.billingSubscription.upsert({
+      where: { stripeSubscriptionId: sub.id },
+      create: {
+        companyId, stripeSubscriptionId: sub.id,
+        stripePriceId: sub.items.data[0]?.price?.id,
+        status: sub.status,
+        currentPeriodStart: new Date(sub.current_period_start * 1000),
+        currentPeriodEnd: new Date(sub.current_period_end * 1000),
+      },
+      update: { status: sub.status, currentPeriodEnd: new Date(sub.current_period_end * 1000) },
+    })
+  }
+  await prisma.billingLog.create({ data: {
+    companyId, type: 'PAYMENT_SUCCEEDED', amount: session.amount_total || 0,
+    stripePaymentIntentId: session.payment_intent as string,
+    description: '初回支払い完了（Payment Link経由）', occurredAt: new Date(),
+  }})
+  companyStatusCache.delete(companyId)
+  logger.info('初回決済完了', { context: 'Stripe', companyId })
+}
+
+async function handlePaymentSucceeded(invoice: any) {
+  const customerId = invoice.customer as string
+  const company = await prisma.company.findFirst({ where: { stripeCustomerId: customerId } })
+  if (!company) return
+  await prisma.company.update({
+    where: { id: company.id },
+    data: { subscriptionStatus: 'ACTIVE', lastPaymentAt: new Date(), isActive: true, suspendedAt: null },
+  })
+  await prisma.billingLog.upsert({
+    where: { stripeInvoiceId: invoice.id },
+    create: {
+      companyId: company.id, type: 'PAYMENT_SUCCEEDED', amount: invoice.amount_paid,
+      stripeInvoiceId: invoice.id, description: '月次支払い成功', occurredAt: new Date(),
+    },
+    update: {},
+  })
+  companyStatusCache.delete(company.id)
+}
+
+async function handlePaymentFailed(invoice: any) {
+  const customerId = invoice.customer as string
+  const company = await prisma.company.findFirst({ where: { stripeCustomerId: customerId } })
+  if (!company) return
+  await prisma.company.update({ where: { id: company.id }, data: { subscriptionStatus: 'PAST_DUE' } })
+  await prisma.billingLog.upsert({
+    where: { stripeInvoiceId: invoice.id },
+    create: {
+      companyId: company.id, type: 'PAYMENT_FAILED', amount: invoice.amount_due,
+      stripeInvoiceId: invoice.id, description: '支払い失敗', occurredAt: new Date(),
+    },
+    update: {},
+  })
+  companyStatusCache.delete(company.id)
+  logger.warn('支払い失敗', { context: 'Stripe', companyId: company.id })
+}
+
+async function handleSubscriptionUpdated(sub: any) {
+  await prisma.billingSubscription.updateMany({
+    where: { stripeSubscriptionId: sub.id },
+    data: {
+      status: sub.status,
+      currentPeriodStart: new Date(sub.current_period_start * 1000),
+      currentPeriodEnd: new Date(sub.current_period_end * 1000),
+    },
+  })
+}
+
+async function handleSubscriptionDeleted(sub: any) {
+  const bSub = await prisma.billingSubscription.findUnique({ where: { stripeSubscriptionId: sub.id } })
+  if (!bSub) return
+  await prisma.billingSubscription.update({
+    where: { stripeSubscriptionId: sub.id },
+    data: { status: 'canceled', cancelledAt: new Date() },
+  })
+  await prisma.company.update({
+    where: { id: bSub.companyId },
+    data: { subscriptionStatus: 'CANCELLED' },
+  })
+  await prisma.billingLog.create({ data: {
+    companyId: bSub.companyId, type: 'SUBSCRIPTION_CANCELLED',
+    amount: 0, description: 'サブスクリプション解約', occurredAt: new Date(),
+  }})
+  companyStatusCache.delete(bSub.companyId)
+}
+
+// ─────────────────────────────────────────────
+// スーパー管理者 請求管理 API
+// ─────────────────────────────────────────────
+
+app.get('/api/super-admin/billing', authenticate, requireSuperAdmin, async (_req, res) => {
+  const companies = await prisma.company.findMany({
+    where: { isSuperAdmin: false },
+    select: {
+      id: true, name: true, code: true, plan: true, planType: true,
+      subscriptionStatus: true, billingEmail: true,
+      trialEndsAt: true, suspendedAt: true, lastPaymentAt: true,
+      stripeCustomerId: true, isActive: true, createdAt: true,
+      billingLogs: { orderBy: { occurredAt: 'desc' }, take: 5 },
+      _count: { select: { users: true, guards: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(companies)
+})
+
+app.post('/api/super-admin/companies/:id/send-payment-link', authenticate, requireSuperAdmin, async (req, res) => {
+  const { id } = req.params
+  const { email, planType = 'STARTER' } = req.body
+  if (!email) { res.status(400).json({ error: 'メールアドレスは必須です' }); return }
+
+  const company = await prisma.company.findUnique({ where: { id } })
+  if (!company) { res.status(404).json({ error: '会社が見つかりません' }); return }
+
+  if (!stripe) { res.status(503).json({ error: 'Stripe未設定です。STRIPE_SECRET_KEY環境変数を確認してください。' }); return }
+
+  const priceId = getPriceIdForPlan(planType)
+  if (!priceId) { res.status(400).json({ error: 'Stripe PriceIDが未設定です。環境変数を確認してください。' }); return }
+
+  // Stripe Customer作成（未作成の場合）
+  let customerId = company.stripeCustomerId
+  if (!customerId) {
+    const customer = await stripe.customers.create({
+      name: company.name, email,
+      metadata: { companyId: company.id, companyCode: company.code },
+    })
+    customerId = customer.id
+    await prisma.company.update({ where: { id }, data: { stripeCustomerId: customerId, billingEmail: email } })
+  }
+
+  // Payment Link生成
+  const paymentLink = await stripe.paymentLinks.create({
+    line_items: [{ price: priceId, quantity: 1 }],
+    metadata: { companyId: company.id },
+    subscription_data: { metadata: { companyId: company.id } },
+    restrictions: { completed_sessions: { limit: 1 } },
+    after_completion: { type: 'redirect', redirect: { url: `${process.env.APP_URL || 'https://guardsync-production.up.railway.app'}/payment-complete` } },
+  })
+
+  // メール送付
+  await sendEmail(
+    email,
+    `【GuardSync】お支払いのご案内 - ${company.name}様`,
+    `<p>${escapeHtml(company.name)} ご担当者様</p>
+    <p>いつもGuardSyncをご利用いただきありがとうございます。</p>
+    <p>下記URLよりお支払いのお手続きをお願いいたします。</p>
+    <p><a href="${paymentLink.url}" style="background:#2563eb;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;">
+    お支払いはこちら
+    </a></p>
+    <p>ご不明な点がございましたら、サポートまでお問い合わせください。</p>`
+  )
+
+  // BillingLog記録
+  await prisma.billingLog.create({ data: {
+    companyId: id, type: 'PAYMENT_LINK_SENT', amount: 0,
+    description: `Payment Link送付: ${email} (プラン: ${planType})`, occurredAt: new Date(),
+  }})
+
+  res.json({ paymentLinkUrl: paymentLink.url, message: 'Payment Linkをメールで送付しました' })
+})
+
+app.post('/api/super-admin/companies/:id/suspend', authenticate, requireSuperAdmin, async (req, res) => {
+  const { id } = req.params
+  const { reason } = req.body
+  const company = await prisma.company.findUnique({ where: { id } })
+  if (!company || company.isSuperAdmin) { res.status(404).json({ error: '会社が見つかりません' }); return }
+
+  await prisma.company.update({
+    where: { id },
+    data: { subscriptionStatus: 'SUSPENDED', isActive: false, suspendedAt: new Date() },
+  })
+  await prisma.billingLog.create({ data: {
+    companyId: id, type: 'MANUAL_SUSPEND', amount: 0,
+    description: reason || '手動停止', occurredAt: new Date(),
+  }})
+  companyStatusCache.delete(id)
+  res.json({ success: true })
+})
+
+app.post('/api/super-admin/companies/:id/reactivate', authenticate, requireSuperAdmin, async (req, res) => {
+  const { id } = req.params
+  const company = await prisma.company.findUnique({ where: { id } })
+  if (!company || company.isSuperAdmin) { res.status(404).json({ error: '会社が見つかりません' }); return }
+
+  await prisma.company.update({
+    where: { id },
+    data: { subscriptionStatus: 'ACTIVE', isActive: true, suspendedAt: null },
+  })
+  await prisma.billingLog.create({ data: {
+    companyId: id, type: 'MANUAL_REACTIVATE', amount: 0,
+    description: '手動再開', occurredAt: new Date(),
+  }})
+  companyStatusCache.delete(id)
+  res.json({ success: true })
+})
+
+app.patch('/api/super-admin/companies/:id/plan', authenticate, requireSuperAdmin, async (req, res) => {
+  const { id } = req.params
+  const { planType, plan, trialEndsAt, billingEmail } = req.body
+  const company = await prisma.company.findUnique({ where: { id } })
+  if (!company || company.isSuperAdmin) { res.status(404).json({ error: '会社が見つかりません' }); return }
+
+  const data: Record<string, unknown> = {}
+  if (planType) data.planType = planType
+  if (plan) data.plan = plan
+  if (trialEndsAt) data.trialEndsAt = new Date(trialEndsAt)
+  if (billingEmail) data.billingEmail = billingEmail
+
+  await prisma.company.update({ where: { id }, data })
+
+  // Stripeサブスクリプションのプラン変更
+  if (planType) {
+    const sub = await prisma.billingSubscription.findFirst({
+      where: { companyId: id, status: { in: ['active', 'trialing'] } },
+    })
+    if (sub?.stripeSubscriptionId && stripe) {
+      const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId)
+      const newPriceId = getPriceIdForPlan(planType)
+      if (newPriceId) {
+        await stripe.subscriptions.update(sub.stripeSubscriptionId, {
+          items: [{ id: stripeSub.items.data[0].id, price: newPriceId }],
+          proration_behavior: 'create_prorations',
+        })
+      }
+    }
+  }
+
+  await prisma.billingLog.create({ data: {
+    companyId: id, type: 'SUBSCRIPTION_UPDATED', amount: 0,
+    description: `プラン変更: ${planType || plan || ''}`, occurredAt: new Date(),
+  }})
+  res.json({ success: true })
+})
+
+app.get('/api/super-admin/companies/:id/billing-logs', authenticate, requireSuperAdmin, async (req, res) => {
+  const { id } = req.params
+  const logs = await prisma.billingLog.findMany({
+    where: { companyId: id },
+    orderBy: { occurredAt: 'desc' },
+    take: 50,
+  })
+  res.json(logs)
+})
+
+// ─────────────────────────────────────────────
+// Cron: 支払い状況チェック・自動停止（毎日 AM1:00）
+// ─────────────────────────────────────────────
+
+cron.schedule('0 1 * * *', async () => {
+  logger.info('支払い状況チェック 開始', { context: 'cron' })
+  const now = new Date()
+  const gracePeriodDays = 3
+
+  // PAST_DUE で猶予期間超過 → 自動停止
+  const pastDueCompanies = await prisma.company.findMany({
+    where: { subscriptionStatus: 'PAST_DUE', isActive: true },
+    include: {
+      billingLogs: {
+        where: { type: 'PAYMENT_FAILED' },
+        orderBy: { occurredAt: 'desc' },
+        take: 1,
+      },
+    },
+  })
+  for (const company of pastDueCompanies) {
+    const lastFailure = company.billingLogs[0]?.occurredAt
+    if (!lastFailure) continue
+    const daysSince = Math.floor((now.getTime() - lastFailure.getTime()) / 86400000)
+    if (daysSince >= gracePeriodDays) {
+      await prisma.company.update({
+        where: { id: company.id },
+        data: { subscriptionStatus: 'SUSPENDED', isActive: false, suspendedAt: now },
+      })
+      await prisma.billingLog.create({ data: {
+        companyId: company.id, type: 'AUTO_SUSPEND', amount: 0,
+        description: `支払い遅延${daysSince}日 - 自動停止`, occurredAt: now,
+      }})
+      companyStatusCache.delete(company.id)
+      logger.info(`自動停止: ${company.name} (遅延${daysSince}日)`, { context: 'cron' })
+    }
+  }
+
+  // トライアル期限切れ → 自動停止
+  const expiredTrials = await prisma.company.findMany({
+    where: { subscriptionStatus: 'TRIAL', trialEndsAt: { lte: now }, isActive: true },
+  })
+  for (const company of expiredTrials) {
+    await prisma.company.update({
+      where: { id: company.id },
+      data: { subscriptionStatus: 'SUSPENDED', isActive: false, suspendedAt: now },
+    })
+    await prisma.billingLog.create({ data: {
+      companyId: company.id, type: 'AUTO_SUSPEND', amount: 0,
+      description: 'トライアル期限切れ - 自動停止', occurredAt: now,
+    }})
+    companyStatusCache.delete(company.id)
+    logger.info(`トライアル終了 自動停止: ${company.name}`, { context: 'cron' })
+  }
+
+  logger.info('支払い状況チェック 完了', { context: 'cron' })
+}, { timezone: 'Asia/Tokyo' })
+
+// ─────────────────────────────────────────────
+// Cron: 請求リマインドメール（毎日 AM9:00）
+// ─────────────────────────────────────────────
+
+cron.schedule('0 9 * * *', async () => {
+  logger.info('請求リマインド 開始', { context: 'cron' })
+  const now = new Date()
+
+  // トライアル終了3日前
+  const d3 = new Date(now.getTime() + 3 * 86400000)
+  const d3Start = new Date(d3.toISOString().split('T')[0])
+  const d3End   = new Date(d3Start.getTime() + 86400000)
+  const trialEnding = await prisma.company.findMany({
+    where: { subscriptionStatus: 'TRIAL', trialEndsAt: { gte: d3Start, lt: d3End } },
+  })
+  for (const company of trialEnding) {
+    if (!company.billingEmail) continue
+    await sendEmail(
+      company.billingEmail,
+      '【GuardSync】トライアル終了のお知らせ（3日前）',
+      `<p>${escapeHtml(company.name)} ご担当者様</p><p>トライアル期間が3日後に終了します。継続利用にはお支払い手続きが必要です。担当者よりお支払いリンクをお送りします。</p>`
+    )
+    await prisma.billingLog.create({ data: {
+      companyId: company.id, type: 'REMINDER_SENT', amount: 0,
+      description: 'トライアル終了3日前リマインド', occurredAt: now,
+    }})
+  }
+
+  // PAST_DUE リマインド
+  const pastDue = await prisma.company.findMany({
+    where: { subscriptionStatus: 'PAST_DUE', isActive: true },
+  })
+  for (const company of pastDue) {
+    if (!company.billingEmail) continue
+    await sendEmail(
+      company.billingEmail,
+      '【GuardSync】お支払いのお願い',
+      `<p>${escapeHtml(company.name)} ご担当者様</p><p>お支払いが確認できておりません。このまま未払いが続くと3日後にサービスが停止されます。担当者へお問い合わせいただくか、送付済みのPayment Linkよりお手続きください。</p>`
+    )
+    await prisma.billingLog.create({ data: {
+      companyId: company.id, type: 'REMINDER_SENT', amount: 0,
+      description: '支払い遅延リマインド', occurredAt: now,
+    }})
+  }
+
+  logger.info('請求リマインド 完了', { context: 'cron' })
+}, { timezone: 'Asia/Tokyo' })
+
+// ─────────────────────────────────────────────
 // 静的ファイル配信（本番）
 // ─────────────────────────────────────────────
 
@@ -2510,8 +3032,8 @@ if (process.env.NODE_ENV === 'production') {
 // M-4: グローバルエラーハンドラー
 // ─────────────────────────────────────────────
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error('[ERROR]', err.message, err.stack)
-  if (process.env.NODE_ENV === 'production') {
+  logger.error('未処理エラー', err, { method: req.method, path: req.path })
+  if (isProduction) {
     res.status(500).json({ error: '内部サーバーエラーが発生しました' })
   } else {
     res.status(500).json({ error: err.message, stack: err.stack })
@@ -2527,8 +3049,21 @@ app.use('/api/', (req: express.Request, res: express.Response) => {
 // 起動
 // ─────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`GuardSync server running on port ${PORT}`)
+const server = app.listen(PORT, () => {
+  logger.info('サーバー起動', { port: PORT, env: process.env.NODE_ENV || 'development' })
 })
+
+// グレースフルシャットダウン
+const shutdown = async (signal: string) => {
+  logger.info(`${signal} 受信、シャットダウン開始`)
+  server.close(() => {
+    prisma.$disconnect().then(() => {
+      logger.info('シャットダウン完了')
+      process.exit(0)
+    })
+  })
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 export default app
