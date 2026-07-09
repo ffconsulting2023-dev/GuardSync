@@ -30,6 +30,9 @@ import PayrollPage from './pages/PayrollPage'
 import SubcontractorPaymentPage from './pages/SubcontractorPaymentPage'
 import ShiftSurveyPage from './pages/ShiftSurveyPage'
 import DispatchPage from './pages/DispatchPage'
+import InsuranceRatesPage from './pages/InsuranceRatesPage'
+import ResidentTaxPage from './pages/ResidentTaxPage'
+import SuspendedPage from './pages/SuspendedPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
@@ -63,6 +66,8 @@ export default function App() {
         <LoadingSpinner />
       ) : (
         <Routes>
+          <Route path="/suspended" element={<SuspendedPage />} />
+          <Route path="/payment-complete" element={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><p className="text-2xl mb-2">お支払いありがとうございます</p><p className="text-gray-500">サービスが有効化されました。<a href="/" className="text-blue-600 underline">ダッシュボードへ</a></p></div></div>} />
           <Route path="/login" element={auth.user ? <Navigate to="/" replace /> : <LoginPage />} />
           <Route path="/forgot-password" element={auth.user ? <Navigate to="/" replace /> : <ForgotPasswordPage />} />
           <Route path="/reset-password" element={auth.user ? <Navigate to="/" replace /> : <ResetPasswordPage />} />
@@ -95,6 +100,8 @@ export default function App() {
                     <Route path="subcontractor-payments/*" element={<SubcontractorPaymentPage />} />
                     <Route path="shift-surveys/*" element={<ShiftSurveyPage />} />
                     <Route path="dispatch/*" element={<DispatchPage />} />
+                    <Route path="insurance-rates/*" element={<InsuranceRatesPage />} />
+                    <Route path="resident-tax/*" element={<ResidentTaxPage />} />
                     <Route path="settings/*" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
                     <Route path="super-admin/*" element={
                       auth.user?.isSuperAdmin

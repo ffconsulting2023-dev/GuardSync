@@ -22,6 +22,8 @@ const NAV_ITEMS = [
   { path: '/notifications',  label: '通知管理',       icon: '🔔' },
   { path: '/payroll',        label: '給与管理',       icon: '💰' },
   { path: '/subcontractor-payments', label: '支払管理', icon: '📑' },
+  { path: '/insurance-rates',       label: '社保マスタ',   icon: '🏥' },
+  { path: '/resident-tax',          label: '住民税',       icon: '🏛️' },
   { path: '/settings',       label: '設定',           icon: '⚙️' },
 ]
 
