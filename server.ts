@@ -2648,6 +2648,160 @@ app.post('/api/dispatch/attendance', authenticate, requireRole('ADMIN', 'MANAGER
 })
 
 // ─────────────────────────────────────────────
+// 給与計算ヘルパー：控除・手当自動計算
+// ─────────────────────────────────────────────
+
+interface PayrollCalcInput {
+  basicPay: number
+  overtimePay: number
+  holidayPay: number
+  positionAllowance: number
+  qualificationAllowance: number
+  leaderAllowance: number
+  commuteAllowance: number
+  travelExpense: number
+  otherAllowance: number
+  earlyOtMinutes: number
+  lateOtMinutes: number
+  holidayWorkDays: number
+  grossPay: number
+}
+
+interface PayrollCalcResult {
+  healthInsurance: number
+  pension: number
+  employmentIns: number
+  incomeTax: number
+  residentTax: number
+  overtimePay: number
+  holidayPay: number
+}
+
+async function calculatePayrollDeductions(
+  payrollData: PayrollCalcInput,
+  guard: Record<string, unknown>,
+  companyId: string,
+  fiscalYear: number,
+  month: number,
+): Promise<PayrollCalcResult> {
+  const result: PayrollCalcResult = {
+    healthInsurance: 0,
+    pension: 0,
+    employmentIns: 0,
+    incomeTax: 0,
+    residentTax: 0,
+    overtimePay: payrollData.overtimePay,
+    holidayPay: payrollData.holidayPay,
+  }
+
+  // --- 7. 残業手当自動計算 ---
+  if (payrollData.earlyOtMinutes > 0 || payrollData.lateOtMinutes > 0) {
+    const hourlyBase = Number(guard.hourlyBase || 0)
+    const earlyRate = Number(guard.dayOvertimeRate || 0) || (hourlyBase > 0 ? Math.round(hourlyBase * 1.25) : 0)
+    const lateRate = Number(guard.nightOvertimeRate || 0) || (hourlyBase > 0 ? Math.round(hourlyBase * 1.5) : 0)
+    result.overtimePay = Math.round((payrollData.earlyOtMinutes / 60) * earlyRate)
+                       + Math.round((payrollData.lateOtMinutes / 60) * lateRate)
+  }
+
+  // --- 8. 休日手当自動計算 ---
+  if (payrollData.holidayWorkDays > 0) {
+    const dayShiftRate = Number(guard.dayShiftRate || 0)
+    const holidayRate = Number(guard.holidayDayRate || 0) || (dayShiftRate > 0 ? Math.round(dayShiftRate * 1.35) : 0)
+    result.holidayPay = payrollData.holidayWorkDays * holidayRate
+  }
+
+  // --- 1. 健康保険料 ---
+  if (guard.healthInsurance && guard.healthInsuranceGrade) {
+    const prefecture = String(guard.prefecture || '')
+    if (prefecture) {
+      try {
+        const row = await prisma.healthInsGradeTable.findUnique({
+          where: { fiscalYear_prefecture_grade: { fiscalYear, prefecture, grade: Number(guard.healthInsuranceGrade) } },
+        })
+        if (row) {
+          result.healthInsurance = row.employeeShare
+
+          // --- 3. 介護保険（40歳以上）---
+          if (guard.nursingInsurance && guard.birthDate) {
+            const birth = new Date(guard.birthDate as string)
+            const targetDate = new Date(fiscalYear, month - 1, 1) // 対象月初日
+            const age = targetDate.getFullYear() - birth.getFullYear()
+              - (targetDate < new Date(targetDate.getFullYear(), birth.getMonth(), birth.getDate()) ? 1 : 0)
+            if (age >= 40) {
+              result.healthInsurance += row.nursingEmployee
+            }
+          }
+        }
+      } catch { /* マスタデータなし: 0 を維持 */ }
+    }
+  }
+
+  // --- 2. 厚生年金 ---
+  if (guard.pensionInsurance && guard.pensionInsuranceGrade) {
+    try {
+      const row = await prisma.pensionGradeTable.findUnique({
+        where: { fiscalYear_grade: { fiscalYear, grade: Number(guard.pensionInsuranceGrade) } },
+      })
+      if (row) {
+        result.pension = row.employeeShare
+      }
+    } catch { /* マスタデータなし: 0 を維持 */ }
+  }
+
+  // --- 4. 雇用保険 ---
+  if (guard.employmentInsurance) {
+    try {
+      const row = await prisma.employmentInsRate.findUnique({
+        where: { fiscalYear_businessType: { fiscalYear, businessType: '一般' } },
+      })
+      if (row) {
+        result.employmentIns = Math.round(payrollData.grossPay * row.employeeRate)
+      }
+    } catch { /* マスタデータなし: 0 を維持 */ }
+  }
+
+  // --- 5. 所得税（甲欄） ---
+  {
+    // 課税対象額 = 課税支給項目合計（通勤手当・旅費は除外）
+    const taxableTotal = payrollData.basicPay + result.overtimePay + result.holidayPay
+      + payrollData.positionAllowance + payrollData.qualificationAllowance
+      + payrollData.leaderAllowance + payrollData.otherAllowance
+    // 社会保険料控除後の課税対象額
+    const socialIns = result.healthInsurance + result.pension + result.employmentIns
+    const taxBase = taxableTotal - socialIns
+    if (taxBase > 0) {
+      try {
+        const row = await prisma.incomeTaxTable.findFirst({
+          where: { fiscalYear, salaryFrom: { lte: taxBase }, salaryTo: { gt: taxBase } },
+        })
+        if (row) {
+          const deps = Math.min(Number(guard.dependents || 0), 7)
+          const depField = `dep${deps}` as keyof typeof row
+          result.incomeTax = Number(row[depField] || 0)
+        }
+      } catch { /* マスタデータなし: 0 を維持 */ }
+    }
+  }
+
+  // --- 6. 住民税 ---
+  {
+    const guardId = String(guard.id || '')
+    if (guardId) {
+      try {
+        const row = await prisma.residentTax.findUnique({
+          where: { guardId_fiscalYear_month: { guardId, fiscalYear, month } },
+        })
+        if (row) {
+          result.residentTax = row.amount
+        }
+      } catch { /* マスタデータなし: 0 を維持 */ }
+    }
+  }
+
+  return result
+}
+
+// ─────────────────────────────────────────────
 // 給与管理 API
 // ─────────────────────────────────────────────
 
@@ -2706,25 +2860,46 @@ app.post('/api/payroll/:guardId/generate', authenticate, requireRole('ADMIN', 'M
   const posAllowance = guard.positionAllowance || 0
   const qualAllowance = guard.qualificationAllowance || 0
   const leadAllowance = guard.leaderAllowance || 0
-  const grossPay = basicPay + posAllowance + qualAllowance + leadAllowance + travelExpense + otherAmount
+  const grossPayBase = basicPay + posAllowance + qualAllowance + leadAllowance + travelExpense + otherAmount
+
+  // 控除・手当の自動計算
+  const deductions = await calculatePayrollDeductions(
+    {
+      basicPay, overtimePay: 0, holidayPay: 0,
+      positionAllowance: posAllowance, qualificationAllowance: qualAllowance,
+      leaderAllowance: leadAllowance, commuteAllowance: 0,
+      travelExpense, otherAllowance: otherAmount,
+      earlyOtMinutes, lateOtMinutes, holidayWorkDays,
+      grossPay: grossPayBase,
+    },
+    guard as unknown as Record<string, unknown>,
+    companyId, year, month,
+  )
+
+  const taxableTotal = basicPay + deductions.overtimePay + deductions.holidayPay
+    + posAllowance + qualAllowance + leadAllowance + otherAmount
+  const nonTaxableTotal = travelExpense
+  const grossPay = taxableTotal + nonTaxableTotal
+  const totalDeduction = deductions.healthInsurance + deductions.pension + deductions.employmentIns
+    + deductions.incomeTax + deductions.residentTax
+  const netPay = grossPay - totalDeduction
+
+  const payrollFields = {
+    workDays, holidayWorkDays, totalWorkMinutes,
+    earlyOtMinutes, lateOtMinutes,
+    basicPay, overtimePay: deductions.overtimePay, holidayPay: deductions.holidayPay,
+    positionAllowance: posAllowance, qualificationAllowance: qualAllowance,
+    leaderAllowance: leadAllowance, travelExpense, otherAllowance: otherAmount,
+    taxableTotal, nonTaxableTotal, grossPay,
+    healthInsurance: deductions.healthInsurance, pension: deductions.pension,
+    employmentIns: deductions.employmentIns, incomeTax: deductions.incomeTax,
+    residentTax: deductions.residentTax, totalDeduction, netPay,
+  }
 
   const payroll = await prisma.payroll.upsert({
     where: { companyId_guardId_year_month: { companyId, guardId, year, month } },
-    create: {
-      companyId, guardId, year, month,
-      workDays, holidayWorkDays, totalWorkMinutes,
-      earlyOtMinutes, lateOtMinutes,
-      basicPay, positionAllowance: posAllowance, qualificationAllowance: qualAllowance,
-      leaderAllowance: leadAllowance, travelExpense, otherAllowance: otherAmount,
-      grossPay, netPay: grossPay,
-    },
-    update: {
-      workDays, holidayWorkDays, totalWorkMinutes,
-      earlyOtMinutes, lateOtMinutes,
-      basicPay, positionAllowance: posAllowance, qualificationAllowance: qualAllowance,
-      leaderAllowance: leadAllowance, travelExpense, otherAllowance: otherAmount,
-      grossPay, netPay: grossPay,
-    },
+    create: { companyId, guardId, year, month, ...payrollFields },
+    update: payrollFields,
   })
   res.json(payroll)
 })
@@ -2733,6 +2908,10 @@ app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
   const { companyId } = (req as any).user as JwtPayload
   const existing = await prisma.payroll.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '給与データが見つかりません' }); return }
+
+  // 隊員情報を取得（控除自動計算に必要）
+  const guard = await prisma.guard.findFirst({ where: { id: existing.guardId, companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
   const allowedFields = [
     'status', 'workDays', 'holidayWorkDays', 'totalWorkMinutes', 'regularMinutes', 'overtimeMinutes',
@@ -2755,13 +2934,53 @@ app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
 
   // 支給合計・控除合計・差引支給額はサーバー側で計算（クライアントからの値は使用しない）
   const n = (k: string) => Number((data[k] ?? existing[k as keyof typeof existing]) || 0)
-  const taxableTotal = n('basicPay') + n('overtimePay') + n('holidayPay') +
-    n('positionAllowance') + n('qualificationAllowance') + n('leaderAllowance') + n('otherAllowance')
-  const nonTaxableTotal = n('commuteAllowance') + n('travelExpense')
+
+  // 控除・手当の自動計算を実行
+  const calcInput: PayrollCalcInput = {
+    basicPay: n('basicPay'),
+    overtimePay: n('overtimePay'),
+    holidayPay: n('holidayPay'),
+    positionAllowance: n('positionAllowance'),
+    qualificationAllowance: n('qualificationAllowance'),
+    leaderAllowance: n('leaderAllowance'),
+    commuteAllowance: n('commuteAllowance'),
+    travelExpense: n('travelExpense'),
+    otherAllowance: n('otherAllowance'),
+    earlyOtMinutes: n('earlyOtMinutes'),
+    lateOtMinutes: n('lateOtMinutes'),
+    holidayWorkDays: n('holidayWorkDays'),
+    grossPay: 0, // 仮値: 下で再計算
+  }
+  // grossPay の暫定計算（雇用保険料の算出基盤に使用）
+  calcInput.grossPay = calcInput.basicPay + calcInput.overtimePay + calcInput.holidayPay
+    + calcInput.positionAllowance + calcInput.qualificationAllowance
+    + calcInput.leaderAllowance + calcInput.otherAllowance
+    + calcInput.commuteAllowance + calcInput.travelExpense
+
+  const deductions = await calculatePayrollDeductions(
+    calcInput,
+    guard as unknown as Record<string, unknown>,
+    companyId, existing.year, existing.month,
+  )
+
+  // 自動計算結果を data に反映（クライアントが明示的に送信した値より自動計算を優先）
+  data.overtimePay = deductions.overtimePay
+  data.holidayPay = deductions.holidayPay
+  data.healthInsurance = deductions.healthInsurance
+  data.pension = deductions.pension
+  data.employmentIns = deductions.employmentIns
+  data.incomeTax = deductions.incomeTax
+  data.residentTax = deductions.residentTax
+
+  // 最終的な支給合計・控除合計・差引支給額を再計算
+  const n2 = (k: string) => Number((data[k] ?? existing[k as keyof typeof existing]) || 0)
+  const taxableTotal = n2('basicPay') + n2('overtimePay') + n2('holidayPay') +
+    n2('positionAllowance') + n2('qualificationAllowance') + n2('leaderAllowance') + n2('otherAllowance')
+  const nonTaxableTotal = n2('commuteAllowance') + n2('travelExpense')
   const grossPay = taxableTotal + nonTaxableTotal
-  const totalDeduction = n('healthInsurance') + n('pension') + n('employmentIns') +
-    n('incomeTax') + n('residentTax') + n('otherDeduction')
-  const netPay = grossPay - totalDeduction + n('yearEndAdj')
+  const totalDeduction = n2('healthInsurance') + n2('pension') + n2('employmentIns') +
+    n2('incomeTax') + n2('residentTax') + n2('otherDeduction')
+  const netPay = grossPay - totalDeduction + n2('yearEndAdj')
   data.taxableTotal = taxableTotal
   data.nonTaxableTotal = nonTaxableTotal
   data.grossPay = grossPay
