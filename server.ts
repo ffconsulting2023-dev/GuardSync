@@ -13,6 +13,8 @@ import { z } from 'zod'
 import nodemailer from 'nodemailer'
 import crypto from 'crypto'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const PDFDocument = require('pdfkit')
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const Stripe = require('stripe')
 
 dotenv.config()
@@ -3201,6 +3203,696 @@ app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
     include: { guard: { select: { id: true, name: true, nameKana: true, employeeNumber: true } } },
   })
   res.json(payroll)
+})
+
+// ─────────────────────────────────────────────
+// 全銀フォーマットCSV出力 / 給与明細PDF
+// ─────────────────────────────────────────────
+
+function padRight(str: string, len: number): string {
+  const s = str || ''
+  return (s + ' '.repeat(len)).slice(0, len)
+}
+function padLeft(num: number, len: number): string {
+  return String(num).padStart(len, '0')
+}
+function toKana(str: string): string {
+  // 簡易変換: そのまま返す（本格的なカナ変換は将来対応）
+  return str.toUpperCase()
+}
+
+app.post('/api/payroll/bank-transfer', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { year, month, transferDate, bankCode, branchCode, accountType, accountNumber, depositorName, depositorCode } = req.body
+  if (!year || !month || !transferDate || !bankCode || !branchCode || !accountNumber || !depositorName) {
+    res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  const payrolls = await prisma.payroll.findMany({
+    where: {
+      companyId, year: Number(year), month: Number(month),
+      status: { in: ['CONFIRMED', 'PAID'] },
+    },
+    include: { guard: true },
+  })
+
+  // ヘッダーレコード（120バイト固定長）
+  const mmdd = transferDate.replace(/-/g, '').slice(4, 8)
+  const header = '1'                                       // データ区分(1)
+    + '21'                                                  // 種別コード(2)
+    + '0'                                                   // コード区分(1)
+    + padRight(depositorCode || '', 10)                     // 振込依頼人コード(10)
+    + padRight(toKana(depositorName), 40)                   // 振込依頼人名(40)
+    + mmdd                                                  // 振込日(4)
+    + padRight(bankCode, 4)                                 // 仕向銀行番号(4)
+    + padRight('', 15)                                      // 仕向銀行名(15)
+    + padRight(branchCode, 3)                               // 仕向支店番号(3)
+    + padRight('', 15)                                      // 仕向支店名(15)
+    + (accountType || '1')                                  // 預金種目(1)
+    + padRight(accountNumber, 7)                            // 口座番号(7)
+    + padRight('', 17)                                      // ダミー(17)
+
+  // データレコード生成
+  const dataRecords: string[] = []
+  let totalAmount = 0
+  for (const p of payrolls) {
+    if (p.netPay <= 0) continue
+    const ba = p.guard.bankAccount as Record<string, string> | null
+    if (!ba) continue
+
+    const record = '2'                                      // データ区分(1)
+      + padRight(ba.bank || '', 4)                          // 被仕向銀行番号(4)
+      + padRight('', 15)                                    // 被仕向銀行名(15)
+      + padRight(ba.branch || '', 3)                        // 被仕向支店番号(3)
+      + padRight('', 15)                                    // 被仕向支店名(15)
+      + '0000'                                              // 手形交換所番号(4)
+      + (ba.type === '当座' ? '2' : '1')                     // 預金種目(1)
+      + padRight(ba.number || '', 7)                        // 口座番号(7)
+      + padRight(toKana(ba.holder || p.guard.name || ''), 30) // 受取人名(30)
+      + padLeft(p.netPay, 10)                               // 振込金額(10)
+      + '0'                                                 // 新規コード(1)
+      + padRight(p.guard.employeeNumber || '', 10)          // 顧客コード1(10)
+      + padRight('', 10)                                    // 顧客コード2(10)
+      + '0'                                                 // 振込区分(1)
+      + padRight('', 8)                                     // ダミー(8)
+
+    dataRecords.push(record)
+    totalAmount += p.netPay
+  }
+
+  // トレーラーレコード
+  const trailer = '8'
+    + padLeft(dataRecords.length, 6)
+    + padLeft(totalAmount, 12)
+    + padRight('', 101)
+
+  // エンドレコード
+  const endRecord = '9' + padRight('', 119)
+
+  const content = [header, ...dataRecords, trailer, endRecord].join('\r\n')
+  const filename = `zengin_${String(year)}${padLeft(Number(month), 2)}.txt`
+
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename=${filename}`)
+  res.send(content)
+})
+
+function formatCurrency(amount: number): string {
+  return '\\' + amount.toLocaleString('en-US')
+}
+
+app.get('/api/payroll/:id/pdf', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const payroll = await prisma.payroll.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { guard: true },
+  })
+  if (!payroll) { res.status(404).json({ error: '給与データが見つかりません' }); return }
+
+  const doc = new PDFDocument({ size: 'A4', margin: 50 })
+  const buffers: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => buffers.push(chunk))
+
+  await new Promise<void>((resolve, reject) => {
+    doc.on('end', resolve)
+    doc.on('error', reject)
+
+    const g = payroll.guard
+    const leftCol = 50
+    const rightCol = 320
+    let y = 50
+
+    // ヘッダー
+    doc.fontSize(20).text('Pay Slip', leftCol, y, { align: 'center' })
+    y += 30
+    doc.fontSize(12).text(`${payroll.year}/${padLeft(payroll.month, 2)}`, leftCol, y, { align: 'center' })
+    y += 30
+
+    // 罫線
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke()
+    y += 15
+
+    // 隊員情報
+    doc.fontSize(10)
+    doc.text(`Name: ${g.name || ''}`, leftCol, y)
+    doc.text(`Employee No: ${g.employeeNumber || ''}`, rightCol, y)
+    y += 20
+    doc.text(`Department: -`, leftCol, y)
+    y += 20
+
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke()
+    y += 15
+
+    // 勤怠
+    doc.fontSize(11).text('[ Attendance ]', leftCol, y)
+    y += 18
+    doc.fontSize(9)
+    doc.text(`Work Days: ${payroll.workDays}`, leftCol, y)
+    doc.text(`Holiday Work Days: ${payroll.holidayWorkDays}`, rightCol, y)
+    y += 15
+    const totalHours = Math.floor(payroll.totalWorkMinutes / 60)
+    const totalMins = payroll.totalWorkMinutes % 60
+    doc.text(`Total Work Hours: ${totalHours}h ${totalMins}m`, leftCol, y)
+    const otHours = Math.floor((payroll.earlyOtMinutes + payroll.lateOtMinutes) / 60)
+    const otMins = (payroll.earlyOtMinutes + payroll.lateOtMinutes) % 60
+    doc.text(`Overtime: ${otHours}h ${otMins}m`, rightCol, y)
+    y += 20
+
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke()
+    y += 15
+
+    // 支給
+    doc.fontSize(11).text('[ Earnings ]', leftCol, y)
+    y += 18
+    doc.fontSize(9)
+    const earnings: [string, number][] = [
+      ['Basic Pay', payroll.basicPay],
+      ['Overtime Pay', payroll.overtimePay],
+      ['Holiday Pay', payroll.holidayPay],
+      ['Position Allowance', payroll.positionAllowance],
+      ['Qualification Allowance', payroll.qualificationAllowance],
+      ['Leader Allowance', payroll.leaderAllowance],
+      ['Travel Expense', payroll.travelExpense],
+      ['Other Allowance', payroll.otherAllowance],
+    ]
+    for (const [label, val] of earnings) {
+      doc.text(label, leftCol, y)
+      doc.text(formatCurrency(val), rightCol, y, { width: 180, align: 'right' })
+      y += 14
+    }
+    doc.fontSize(10).text('Gross Pay', leftCol, y)
+    doc.text(formatCurrency(payroll.grossPay), rightCol, y, { width: 180, align: 'right' })
+    y += 20
+
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke()
+    y += 15
+
+    // 控除
+    doc.fontSize(11).text('[ Deductions ]', leftCol, y)
+    y += 18
+    doc.fontSize(9)
+    const deductions: [string, number][] = [
+      ['Health Insurance', payroll.healthInsurance],
+      ['Pension', payroll.pension],
+      ['Employment Insurance', payroll.employmentIns],
+      ['Income Tax', payroll.incomeTax],
+      ['Resident Tax', payroll.residentTax],
+    ]
+    for (const [label, val] of deductions) {
+      doc.text(label, leftCol, y)
+      doc.text(formatCurrency(val), rightCol, y, { width: 180, align: 'right' })
+      y += 14
+    }
+    doc.fontSize(10).text('Total Deduction', leftCol, y)
+    doc.text(formatCurrency(payroll.totalDeduction), rightCol, y, { width: 180, align: 'right' })
+    y += 25
+
+    // 差引支給額
+    doc.moveTo(leftCol, y).lineTo(545, y).lineWidth(2).stroke()
+    doc.lineWidth(1)
+    y += 15
+    doc.fontSize(14).text('Net Pay', leftCol, y)
+    doc.text(formatCurrency(payroll.netPay), rightCol, y, { width: 180, align: 'right' })
+
+    doc.end()
+  })
+
+  const pdfBuffer = Buffer.concat(buffers)
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `inline; filename=payslip_${payroll.year}${padLeft(payroll.month, 2)}_${payroll.guard.employeeNumber || payroll.guardId}.pdf`)
+  res.send(pdfBuffer)
+})
+
+app.get('/api/payroll/:id/send-email', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const payroll = await prisma.payroll.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { guard: true },
+  })
+  if (!payroll) { res.status(404).json({ error: '給与データが見つかりません' }); return }
+  if (!payroll.guard.email) { res.status(400).json({ error: '隊員のメールアドレスが未設定です' }); return }
+
+  // PDF生成
+  const doc = new PDFDocument({ size: 'A4', margin: 50 })
+  const buffers: Buffer[] = []
+  doc.on('data', (chunk: Buffer) => buffers.push(chunk))
+
+  await new Promise<void>((resolve, reject) => {
+    doc.on('end', resolve)
+    doc.on('error', reject)
+
+    const g = payroll.guard
+    const leftCol = 50; const rightCol = 320; let y = 50
+
+    doc.fontSize(20).text('Pay Slip', leftCol, y, { align: 'center' })
+    y += 30
+    doc.fontSize(12).text(`${payroll.year}/${padLeft(payroll.month, 2)}`, leftCol, y, { align: 'center' })
+    y += 30
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke(); y += 15
+    doc.fontSize(10)
+    doc.text(`Name: ${g.name || ''}`, leftCol, y)
+    doc.text(`Employee No: ${g.employeeNumber || ''}`, rightCol, y); y += 20
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke(); y += 15
+
+    doc.fontSize(11).text('[ Earnings ]', leftCol, y); y += 18
+    doc.fontSize(9)
+    const earnings: [string, number][] = [
+      ['Basic Pay', payroll.basicPay], ['Overtime Pay', payroll.overtimePay],
+      ['Holiday Pay', payroll.holidayPay], ['Position Allowance', payroll.positionAllowance],
+      ['Qualification Allowance', payroll.qualificationAllowance], ['Leader Allowance', payroll.leaderAllowance],
+      ['Travel Expense', payroll.travelExpense], ['Other Allowance', payroll.otherAllowance],
+    ]
+    for (const [label, val] of earnings) {
+      doc.text(label, leftCol, y); doc.text(formatCurrency(val), rightCol, y, { width: 180, align: 'right' }); y += 14
+    }
+    doc.fontSize(10).text('Gross Pay', leftCol, y)
+    doc.text(formatCurrency(payroll.grossPay), rightCol, y, { width: 180, align: 'right' }); y += 20
+
+    doc.moveTo(leftCol, y).lineTo(545, y).stroke(); y += 15
+    doc.fontSize(11).text('[ Deductions ]', leftCol, y); y += 18
+    doc.fontSize(9)
+    const deds: [string, number][] = [
+      ['Health Insurance', payroll.healthInsurance], ['Pension', payroll.pension],
+      ['Employment Insurance', payroll.employmentIns], ['Income Tax', payroll.incomeTax],
+      ['Resident Tax', payroll.residentTax],
+    ]
+    for (const [label, val] of deds) {
+      doc.text(label, leftCol, y); doc.text(formatCurrency(val), rightCol, y, { width: 180, align: 'right' }); y += 14
+    }
+    doc.fontSize(10).text('Total Deduction', leftCol, y)
+    doc.text(formatCurrency(payroll.totalDeduction), rightCol, y, { width: 180, align: 'right' }); y += 25
+
+    doc.moveTo(leftCol, y).lineTo(545, y).lineWidth(2).stroke(); doc.lineWidth(1); y += 15
+    doc.fontSize(14).text('Net Pay', leftCol, y)
+    doc.text(formatCurrency(payroll.netPay), rightCol, y, { width: 180, align: 'right' })
+
+    doc.end()
+  })
+
+  const pdfBuffer = Buffer.concat(buffers)
+
+  // メール送信（添付付き）
+  if (!process.env.SMTP_PASS && !process.env.SENDGRID_API_KEY) {
+    logger.info(`SMTP未設定 - 給与明細メール送信スキップ`, { context: 'email' })
+    res.json({ success: false, message: 'SMTP未設定のため送信スキップ' }); return
+  }
+  try {
+    const transport = createMailTransport()
+    await transport.sendMail({
+      from: process.env.SMTP_FROM || 'noreply@guardsync.jp',
+      to: payroll.guard.email,
+      subject: `給与明細書 ${payroll.year}年${payroll.month}月分`,
+      html: `<p>${payroll.guard.name} 様</p><p>${payroll.year}年${payroll.month}月分の給与明細書をお送りします。</p><p>添付ファイルをご確認ください。</p>`,
+      attachments: [
+        {
+          filename: `payslip_${payroll.year}${padLeft(payroll.month, 2)}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf',
+        },
+      ],
+    })
+    res.json({ success: true, message: '給与明細を送信しました' })
+  } catch (e) {
+    logger.error('給与明細メール送信エラー', e, { context: 'email' })
+    res.status(500).json({ error: '送信に失敗しました' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// 有給休暇管理 API
+// ─────────────────────────────────────────────
+
+app.get('/api/paid-leave/:guardId', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId } = req.params
+
+  const records = await prisma.paidLeave.findMany({
+    where: { companyId, guardId },
+    orderBy: { grantDate: 'asc' },
+  })
+  res.json(records)
+})
+
+app.post('/api/paid-leave/grant', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId, grantDays, grantDate: grantDateInput } = req.body
+
+  if (!guardId || grantDays == null || grantDays <= 0) {
+    res.status(400).json({ error: 'guardId と grantDays（正の数）は必須です' }); return
+  }
+
+  const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  const grantDate = grantDateInput ? new Date(grantDateInput) : new Date()
+  const expiryDate = new Date(grantDate)
+  expiryDate.setFullYear(expiryDate.getFullYear() + 2)
+
+  const record = await prisma.paidLeave.create({
+    data: {
+      companyId,
+      guardId,
+      grantDate,
+      grantDays: Number(grantDays),
+      usedDays: 0,
+      expiryDate,
+    },
+  })
+  res.status(201).json(record)
+})
+
+app.post('/api/paid-leave/use', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId, useDays } = req.body
+
+  if (!guardId || useDays == null || useDays <= 0) {
+    res.status(400).json({ error: 'guardId と useDays（正の数）は必須です' }); return
+  }
+
+  const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  // 有効期限が近い順に取得（期限切れは除外）
+  const now = new Date()
+  const records = await prisma.paidLeave.findMany({
+    where: {
+      companyId, guardId,
+      expiryDate: { gt: now },
+    },
+    orderBy: { expiryDate: 'asc' },
+  })
+
+  // 残日数合計チェック
+  const totalRemaining = records.reduce((sum, r) => sum + (r.grantDays - r.usedDays), 0)
+  if (totalRemaining < Number(useDays)) {
+    res.status(400).json({ error: `有給残日数が不足しています（残: ${totalRemaining}日, 申請: ${useDays}日）` }); return
+  }
+
+  let remaining = Number(useDays)
+  for (const record of records) {
+    if (remaining <= 0) break
+    const available = record.grantDays - record.usedDays
+    if (available <= 0) continue
+
+    const consume = Math.min(available, remaining)
+    await prisma.paidLeave.update({
+      where: { id: record.id },
+      data: { usedDays: record.usedDays + consume },
+    })
+    remaining -= consume
+  }
+
+  res.json({ ok: true, usedDays: Number(useDays) })
+})
+
+app.get('/api/paid-leave/alerts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const now = new Date()
+
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: true },
+    select: { id: true, name: true },
+  })
+
+  const alerts: Array<{
+    guardId: string; guardName: string; alertType: string; message: string;
+    usedDaysInYear?: number; remainingDays?: number; expiryDate?: Date;
+  }> = []
+
+  for (const guard of guards) {
+    const records = await prisma.paidLeave.findMany({
+      where: { companyId, guardId: guard.id },
+      orderBy: { grantDate: 'asc' },
+    })
+
+    // 年5日取得義務チェック: 各付与レコードについて付与日から1年以内に5日取得しているか
+    for (const record of records) {
+      if (record.grantDays < 10) continue // 10日以上付与された場合のみ義務対象
+      const oneYearLater = new Date(record.grantDate)
+      oneYearLater.setFullYear(oneYearLater.getFullYear() + 1)
+      if (now > oneYearLater) continue // 既に1年経過済み
+      if (record.usedDays < 5) {
+        const daysUntilDeadline = Math.ceil((oneYearLater.getTime() - now.getTime()) / 86400000)
+        alerts.push({
+          guardId: guard.id,
+          guardName: guard.name,
+          alertType: daysUntilDeadline <= 30 ? 'critical' : 'warning',
+          message: `年5日取得義務未達（取得済: ${record.usedDays}日, 期限まで${daysUntilDeadline}日）`,
+          usedDaysInYear: record.usedDays,
+        })
+      }
+    }
+
+    // 期限切れ間近チェック（残日数があり、60日以内に期限切れ）
+    for (const record of records) {
+      const remainingDays = record.grantDays - record.usedDays
+      if (remainingDays <= 0) continue
+      const daysUntilExpiry = Math.ceil((record.expiryDate.getTime() - now.getTime()) / 86400000)
+      if (daysUntilExpiry > 0 && daysUntilExpiry <= 60) {
+        alerts.push({
+          guardId: guard.id,
+          guardName: guard.name,
+          alertType: daysUntilExpiry <= 30 ? 'critical' : 'warning',
+          message: `有給休暇の期限切れ間近（残: ${remainingDays}日, 期限まで${daysUntilExpiry}日）`,
+          remainingDays,
+          expiryDate: record.expiryDate,
+        })
+      }
+    }
+  }
+
+  res.json({ alerts })
+})
+
+// ─────────────────────────────────────────────
+// 36協定・残業上限管理 API
+// ─────────────────────────────────────────────
+
+app.get('/api/overtime-alerts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const now = new Date()
+  const currentYear = now.getFullYear()
+  const currentMonth = now.getMonth() + 1
+
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: true },
+    select: { id: true, name: true },
+  })
+
+  const alerts: Array<{
+    guardId: string; guardName: string; monthlyHours: number; yearlyHours: number;
+    alertType: string; message: string;
+  }> = []
+
+  // 今月の開始日・終了日
+  const monthStart = new Date(currentYear, currentMonth - 1, 1)
+  const monthEnd = new Date(currentYear, currentMonth, 1)
+
+  // 今年の開始日
+  const yearStart = new Date(currentYear, 0, 1)
+
+  for (const guard of guards) {
+    // 今月の残業時間（Attendance から集計）
+    const monthlyAttendances = await prisma.attendance.findMany({
+      where: {
+        companyId, guardId: guard.id,
+        clockInAt: { gte: monthStart, lt: monthEnd },
+      },
+      select: { earlyOvertimeMin: true, lateOvertimeMin: true },
+    })
+
+    const monthlyMinutes = monthlyAttendances.reduce(
+      (sum, a) => sum + a.earlyOvertimeMin + a.lateOvertimeMin, 0
+    )
+    const monthlyHours = Math.round((monthlyMinutes / 60) * 100) / 100
+
+    // 年間の残業時間（1月〜今月）
+    const yearlyAttendances = await prisma.attendance.findMany({
+      where: {
+        companyId, guardId: guard.id,
+        clockInAt: { gte: yearStart, lt: monthEnd },
+      },
+      select: { earlyOvertimeMin: true, lateOvertimeMin: true },
+    })
+
+    const yearlyMinutes = yearlyAttendances.reduce(
+      (sum, a) => sum + a.earlyOvertimeMin + a.lateOvertimeMin, 0
+    )
+    const yearlyHours = Math.round((yearlyMinutes / 60) * 100) / 100
+
+    // アラート生成
+    if (monthlyHours > 45) {
+      alerts.push({
+        guardId: guard.id, guardName: guard.name, monthlyHours, yearlyHours,
+        alertType: 'critical',
+        message: `月間残業${monthlyHours}時間 — 36協定上限（45時間）超過`,
+      })
+    } else if (monthlyHours > 36) {
+      alerts.push({
+        guardId: guard.id, guardName: guard.name, monthlyHours, yearlyHours,
+        alertType: 'warning',
+        message: `月間残業${monthlyHours}時間 — 36協定上限に接近中（警告ライン: 36時間）`,
+      })
+    }
+
+    if (yearlyHours > 360) {
+      alerts.push({
+        guardId: guard.id, guardName: guard.name, monthlyHours, yearlyHours,
+        alertType: 'critical',
+        message: `年間残業${yearlyHours}時間 — 36協定年間上限（360時間）超過`,
+      })
+    } else if (yearlyHours > 300) {
+      alerts.push({
+        guardId: guard.id, guardName: guard.name, monthlyHours, yearlyHours,
+        alertType: 'warning',
+        message: `年間残業${yearlyHours}時間 — 36協定年間上限に接近中（警告ライン: 300時間）`,
+      })
+    }
+  }
+
+  res.json({ alerts })
+})
+
+// ─────────────────────────────────────────────
+// 源泉徴収票 API（簡易版）
+// ─────────────────────────────────────────────
+
+app.get('/api/payroll/withholding-slip/:guardId/:year', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId } = req.params
+  const year = Number(req.params.year)
+
+  if (!year || year < 2000 || year > 2100) {
+    res.status(400).json({ error: '年度が不正です' }); return
+  }
+
+  const guard = await prisma.guard.findFirst({
+    where: { id: guardId, companyId },
+    select: { id: true, name: true, nameKana: true, address: true, prefecture: true, city: true, addressDetail: true },
+  })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { name: true } })
+
+  const payrolls = await prisma.payroll.findMany({
+    where: { companyId, guardId, year },
+    orderBy: { month: 'asc' },
+  })
+
+  if (payrolls.length === 0) {
+    res.status(404).json({ error: `${year}年の給与データがありません` }); return
+  }
+
+  // 年間集計
+  const paymentAmount = payrolls.reduce((sum, p) => sum + p.grossPay, 0)
+  const socialInsurance = payrolls.reduce((sum, p) => sum + p.healthInsurance + p.pension + p.employmentIns, 0)
+  const incomeTaxTotal = payrolls.reduce((sum, p) => sum + p.incomeTax, 0)
+
+  // 給与所得控除後の金額（概算）
+  let incomeAfterDeduction: number
+  if (paymentAmount <= 5_500_000) {
+    incomeAfterDeduction = paymentAmount - (paymentAmount * 0.3 + 80_000)
+  } else if (paymentAmount <= 6_600_000) {
+    incomeAfterDeduction = paymentAmount - (paymentAmount * 0.2 + 440_000)
+  } else {
+    incomeAfterDeduction = paymentAmount - (paymentAmount * 0.1 + 1_100_000)
+  }
+  incomeAfterDeduction = Math.max(0, Math.round(incomeAfterDeduction))
+
+  // 所得控除の額の合計（社会保険料 + 基礎控除48万円の概算）
+  const totalIncomeDeductions = socialInsurance + 480_000
+
+  // 受給者住所
+  const guardAddress = [guard.prefecture, guard.city, guard.addressDetail].filter(Boolean).join('') || guard.address || ''
+
+  // PDF生成（A4横向き）
+  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 40 })
+
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `inline; filename="withholding_${year}_${guardId}.pdf"`)
+  doc.pipe(res)
+
+  // フォント設定（日本語対応）
+  const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+  let fontRegistered = false
+  try {
+    const fs = require('fs')
+    if (fs.existsSync(fontPath)) {
+      doc.registerFont('JP', fontPath)
+      doc.font('JP')
+      fontRegistered = true
+    }
+  } catch { /* フォールバック */ }
+
+  if (!fontRegistered) {
+    doc.font('Helvetica')
+  }
+
+  const fmt = (n: number) => n.toLocaleString('ja-JP')
+
+  // タイトル
+  doc.fontSize(16).text('WITHHOLDING TAX SLIP', 40, 40, { align: 'center' })
+  if (fontRegistered) {
+    doc.fontSize(14).text('給与所得の源泉徴収票', 40, 62, { align: 'center' })
+  }
+  doc.moveDown(0.5)
+
+  // 年度
+  doc.fontSize(12).text(`${year}`, 40, 90, { align: 'center' })
+
+  // 区切り線
+  doc.moveTo(40, 115).lineTo(800, 115).stroke()
+
+  // テーブルレイアウト
+  const col1 = 50
+  const col2 = 250
+  const col3 = 450
+  const col4 = 650
+  let y = 130
+
+  const labelFontSize = 10
+  const valueFontSize = 12
+
+  // 行1: 支払金額 / 給与所得控除後の金額
+  doc.fontSize(labelFontSize).text(fontRegistered ? '支払金額' : 'Payment Amount', col1, y)
+  doc.fontSize(valueFontSize).text(fmt(paymentAmount), col2, y)
+  doc.fontSize(labelFontSize).text(fontRegistered ? '給与所得控除後の金額' : 'Income After Deduction', col3, y)
+  doc.fontSize(valueFontSize).text(fmt(incomeAfterDeduction), col4, y)
+
+  y += 35
+  // 行2: 所得控除の額の合計 / 源泉徴収税額
+  doc.fontSize(labelFontSize).text(fontRegistered ? '所得控除の額の合計額' : 'Total Deductions', col1, y)
+  doc.fontSize(valueFontSize).text(fmt(totalIncomeDeductions), col2, y)
+  doc.fontSize(labelFontSize).text(fontRegistered ? '源泉徴収税額' : 'Withholding Tax', col3, y)
+  doc.fontSize(valueFontSize).text(fmt(incomeTaxTotal), col4, y)
+
+  y += 35
+  // 行3: 社会保険料等の金額
+  doc.fontSize(labelFontSize).text(fontRegistered ? '社会保険料等の金額' : 'Social Insurance', col1, y)
+  doc.fontSize(valueFontSize).text(fmt(socialInsurance), col2, y)
+
+  // 区切り線
+  y += 35
+  doc.moveTo(40, y).lineTo(800, y).stroke()
+  y += 15
+
+  // 受給者情報
+  doc.fontSize(labelFontSize).text(fontRegistered ? '受給者 氏名' : 'Recipient Name', col1, y)
+  doc.fontSize(valueFontSize).text(guard.name, col2, y)
+
+  y += 25
+  doc.fontSize(labelFontSize).text(fontRegistered ? '受給者 住所' : 'Recipient Address', col1, y)
+  doc.fontSize(valueFontSize).text(guardAddress || '-', col2, y)
+
+  y += 35
+  doc.moveTo(40, y).lineTo(800, y).stroke()
+  y += 15
+
+  // 支払者情報
+  doc.fontSize(labelFontSize).text(fontRegistered ? '支払者 会社名' : 'Payer Company', col1, y)
+  doc.fontSize(valueFontSize).text(company?.name || '-', col2, y)
+
+  doc.end()
 })
 
 // ─────────────────────────────────────────────
