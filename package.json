@@ -10,7 +10,7 @@
     "dev:server": "ts-node-dev --respawn --transpile-only server.ts",
     "dev:client": "vite",
     "build": "tsc -p tsconfig.server.json && vite build && npm run obfuscate",
-    "obfuscate": "javascript-obfuscator dist/server.js --output dist/server.js --compact true --string-array true --rotate-string-array true --string-array-threshold 0.75 --identifier-names-generator hexadecimal --self-defending true",
+    "obfuscate": "javascript-obfuscator dist/server.js --output dist/server.js --compact true --string-array true --string-array-threshold 0.75 --identifier-names-generator hexadecimal --self-defending true",
     "start": "node dist/server.js",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate deploy",
