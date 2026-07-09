@@ -1405,6 +1405,229 @@ app.post('/api/super-admin/invite', authenticate, requireSuperAdmin, async (req,
 })
 
 // ─────────────────────────────────────────────
+// 外国人留学生 就労時間チェック（スライディングウィンドウ方式）
+// ─────────────────────────────────────────────
+
+// 任意の連続7日間で就労時間を計算（どの曜日から起算しても週28h以内）
+async function checkForeignWorkerHours(guardId: string, companyId: string): Promise<{
+  violations: { windowStart: Date; windowEnd: Date; totalHours: number; limitHours: number }[];
+  warnings: { windowStart: Date; windowEnd: Date; totalHours: number; limitHours: number }[];
+  isVacation: boolean;
+  limitHours: number;
+}> {
+  const guard = await prisma.guard.findUnique({
+    where: { id: guardId },
+    select: {
+      residenceStatus: true, weeklyHoursLimit: true,
+      schoolVacationStart: true, schoolVacationEnd: true,
+    },
+  })
+  if (!guard || guard.residenceStatus !== '留学') {
+    return { violations: [], warnings: [], isVacation: false, limitHours: 0 }
+  }
+
+  const now = new Date()
+  const isVacation = guard.schoolVacationStart && guard.schoolVacationEnd
+    ? now >= guard.schoolVacationStart && now <= guard.schoolVacationEnd
+    : false
+  const limitHours = isVacation ? 40 : (guard.weeklyHoursLimit ?? 28)
+
+  // 過去14日分の出退勤データを取得（スライディングウィンドウに必要）
+  const fourteenDaysAgo = new Date()
+  fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14)
+
+  const attendances = await prisma.attendance.findMany({
+    where: {
+      guardId,
+      companyId,
+      clockInAt: { gte: fourteenDaysAgo },
+      status: { in: ['COMPLETED', 'CLOCKED_IN'] },
+    },
+    select: { clockInAt: true, clockOutAt: true, breakMinutes: true },
+    orderBy: { clockInAt: 'asc' },
+  })
+
+  const violations: { windowStart: Date; windowEnd: Date; totalHours: number; limitHours: number }[] = []
+  const warnings: typeof violations = []
+
+  // 過去14日間の各日を起点として、7日間のウィンドウをチェック
+  for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
+    const windowStart = new Date(fourteenDaysAgo)
+    windowStart.setDate(windowStart.getDate() + dayOffset)
+    windowStart.setHours(0, 0, 0, 0)
+
+    const windowEnd = new Date(windowStart)
+    windowEnd.setDate(windowEnd.getDate() + 7)
+
+    let totalMinutes = 0
+    for (const att of attendances) {
+      if (!att.clockInAt || !att.clockOutAt) continue
+      if (att.clockInAt >= windowStart && att.clockInAt < windowEnd) {
+        const workMinutes = (att.clockOutAt.getTime() - att.clockInAt.getTime()) / 60000 - (att.breakMinutes || 0)
+        totalMinutes += Math.max(0, workMinutes)
+      }
+    }
+
+    const totalHours = totalMinutes / 60
+    if (totalHours > limitHours) {
+      violations.push({ windowStart, windowEnd, totalHours: Math.round(totalHours * 10) / 10, limitHours })
+    } else if (totalHours >= limitHours * 0.9) {
+      // 90%超で警告
+      warnings.push({ windowStart, windowEnd, totalHours: Math.round(totalHours * 10) / 10, limitHours })
+    }
+  }
+
+  return { violations, warnings, isVacation, limitHours }
+}
+
+// 外国人就労時間チェック API（個別隊員）
+app.get('/api/guards/:id/work-hours-check', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const result = await checkForeignWorkerHours(req.params.id, companyId)
+  res.json(result)
+})
+
+// 外国人就労時間チェック API（全留学生一括）
+app.get('/api/foreign-worker-alerts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const foreignGuards = await prisma.guard.findMany({
+    where: { companyId, residenceStatus: '留学', isActive: true },
+    select: { id: true, name: true, residenceExpiry: true, workPermitExpiry: true },
+  })
+
+  const alerts = []
+  const now = new Date()
+
+  for (const guard of foreignGuards) {
+    const hoursCheck = await checkForeignWorkerHours(guard.id, companyId)
+
+    // 就労時間違反
+    for (const v of hoursCheck.violations) {
+      alerts.push({
+        guardId: guard.id, guardName: guard.name, alertType: 'VIOLATION',
+        message: `週${v.limitHours}h上限超過: ${v.totalHours}h (${v.windowStart.toISOString().slice(0,10)}〜${v.windowEnd.toISOString().slice(0,10)})`,
+        severity: 'critical',
+      })
+    }
+    // 就労時間警告（90%超）
+    for (const w of hoursCheck.warnings) {
+      alerts.push({
+        guardId: guard.id, guardName: guard.name, alertType: 'WARNING',
+        message: `週${w.limitHours}h上限間近: ${w.totalHours}h (${w.windowStart.toISOString().slice(0,10)}〜${w.windowEnd.toISOString().slice(0,10)})`,
+        severity: 'warning',
+      })
+    }
+    // 在留期限チェック
+    if (guard.residenceExpiry) {
+      const daysUntilExpiry = Math.ceil((guard.residenceExpiry.getTime() - now.getTime()) / 86400000)
+      if (daysUntilExpiry < 0) {
+        alerts.push({ guardId: guard.id, guardName: guard.name, alertType: 'EXPIRY', message: `在留期限が切れています（${guard.residenceExpiry.toISOString().slice(0,10)}）`, severity: 'critical' })
+      } else if (daysUntilExpiry <= 30) {
+        alerts.push({ guardId: guard.id, guardName: guard.name, alertType: 'EXPIRY', message: `在留期限まで残り${daysUntilExpiry}日（${guard.residenceExpiry.toISOString().slice(0,10)}）`, severity: 'warning' })
+      }
+    }
+    // 資格外活動許可期限チェック
+    if (guard.workPermitExpiry) {
+      const daysUntilExpiry = Math.ceil((guard.workPermitExpiry.getTime() - now.getTime()) / 86400000)
+      if (daysUntilExpiry < 0) {
+        alerts.push({ guardId: guard.id, guardName: guard.name, alertType: 'EXPIRY', message: `資格外活動許可が切れています（${guard.workPermitExpiry.toISOString().slice(0,10)}）`, severity: 'critical' })
+      } else if (daysUntilExpiry <= 30) {
+        alerts.push({ guardId: guard.id, guardName: guard.name, alertType: 'EXPIRY', message: `資格外活動許可まで残り${daysUntilExpiry}日`, severity: 'warning' })
+      }
+    }
+  }
+
+  res.json({ alerts, checkedAt: now.toISOString() })
+})
+
+// シフト作成時の就労時間事前チェック API
+app.post('/api/schedules/check-foreign-worker', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { guardId, date, startTime, endTime } = req.body
+  if (!guardId || !date || !startTime || !endTime) {
+    res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  const guard = await prisma.guard.findUnique({
+    where: { id: guardId },
+    select: { residenceStatus: true, weeklyHoursLimit: true, schoolVacationStart: true, schoolVacationEnd: true },
+  })
+  if (!guard || guard.residenceStatus !== '留学') {
+    res.json({ ok: true, isForeignStudent: false }); return
+  }
+
+  // 新しいシフトの時間を計算
+  const newHours = (new Date(`${date}T${endTime}`).getTime() - new Date(`${date}T${startTime}`).getTime()) / 3600000
+  const shiftDate = new Date(date)
+  const isVacation = guard.schoolVacationStart && guard.schoolVacationEnd
+    ? shiftDate >= guard.schoolVacationStart && shiftDate <= guard.schoolVacationEnd
+    : false
+  const limitHours = isVacation ? 40 : (guard.weeklyHoursLimit ?? 28)
+
+  // このシフトを含む全ての7日間ウィンドウをチェック
+  const worstCase = { totalHours: 0, windowStart: '', windowEnd: '' }
+  for (let offset = -6; offset <= 0; offset++) {
+    const windowStart = new Date(shiftDate)
+    windowStart.setDate(windowStart.getDate() + offset)
+    windowStart.setHours(0, 0, 0, 0)
+    const windowEnd = new Date(windowStart)
+    windowEnd.setDate(windowEnd.getDate() + 7)
+
+    const existingAttendances = await prisma.attendance.findMany({
+      where: {
+        guardId, companyId,
+        clockInAt: { gte: windowStart, lt: windowEnd },
+        status: { in: ['COMPLETED', 'CLOCKED_IN'] },
+      },
+      select: { clockInAt: true, clockOutAt: true, breakMinutes: true },
+    })
+
+    const existingSchedules = await prisma.schedule.findMany({
+      where: {
+        guardId, companyId,
+        date: { gte: windowStart, lt: windowEnd },
+        status: { in: ['DRAFT', 'ASSIGNED', 'CONFIRMED'] },
+      },
+      select: { startTime: true, endTime: true },
+    })
+
+    let totalMinutes = 0
+    for (const att of existingAttendances) {
+      if (!att.clockInAt || !att.clockOutAt) continue
+      totalMinutes += Math.max(0, (att.clockOutAt.getTime() - att.clockInAt.getTime()) / 60000 - (att.breakMinutes || 0))
+    }
+    for (const sch of existingSchedules) {
+      if (!sch.startTime || !sch.endTime) continue
+      totalMinutes += Math.max(0, (new Date(sch.endTime).getTime() - new Date(sch.startTime).getTime()) / 60000)
+    }
+    totalMinutes += newHours * 60
+
+    const totalHours = totalMinutes / 60
+    if (totalHours > worstCase.totalHours) {
+      worstCase.totalHours = Math.round(totalHours * 10) / 10
+      worstCase.windowStart = windowStart.toISOString().slice(0, 10)
+      worstCase.windowEnd = windowEnd.toISOString().slice(0, 10)
+    }
+  }
+
+  const isViolation = worstCase.totalHours > limitHours
+  const isWarning = worstCase.totalHours >= limitHours * 0.9
+
+  res.json({
+    ok: !isViolation,
+    isForeignStudent: true,
+    isVacation,
+    limitHours,
+    worstCase,
+    alert: isViolation
+      ? `このシフトを追加すると週${limitHours}h上限を超過します（${worstCase.totalHours}h / ${worstCase.windowStart}〜${worstCase.windowEnd}）`
+      : isWarning
+        ? `週${limitHours}h上限に近づいています（${worstCase.totalHours}h / ${worstCase.windowStart}〜${worstCase.windowEnd}）`
+        : null,
+  })
+})
+
+// ─────────────────────────────────────────────
 // cron: 前日確認通知（毎日10:00）
 // ─────────────────────────────────────────────
 

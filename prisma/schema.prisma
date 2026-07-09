@@ -218,6 +218,17 @@ model Guard {
   emergencyCity       String?
   emergencyAddressDetail String?
 
+  // 外国人就労管理
+  residenceStatus       String?   // 在留資格（留学/技能実習/特定技能/永住者 等）
+  residenceCardNumber   String?   // 在留カード番号
+  residenceExpiry       DateTime? // 在留期限
+  workPermitType        String?   // 資格外活動許可の種類（包括許可/個別許可）
+  workPermitExpiry      DateTime? // 資格外活動許可期限
+  weeklyHoursLimit      Int?      @default(28) // 就労時間上限（通常28h、長期休暇中40h）
+  schoolName            String?   // 学校名（留学生の場合）
+  schoolVacationStart   DateTime? // 長期休暇開始日
+  schoolVacationEnd     DateTime? // 長期休暇終了日
+
   // 書類（構造化：true=提出済）
   docMyNumber         Boolean @default(false)
   docIdCard           Boolean @default(false)
@@ -227,6 +238,7 @@ model Guard {
   docPledge           Boolean @default(false)
   docPhoto            Boolean @default(false)
   docOther            Boolean @default(false)
+  docWorkPermit       Boolean @default(false)  // 資格外活動許可書
 
   schedules       Schedule[]
   attendances     Attendance[]
@@ -1040,4 +1052,148 @@ model PasswordResetToken {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime  @default(now())
+}
+
+// ─────────────────────────────────────────────
+// 給与マスタテーブル（年度更新対応）
+// ─────────────────────────────────────────────
+
+// 都道府県別健康保険等級表（協会けんぽ）
+model HealthInsGradeTable {
+  id               String @id @default(uuid())
+  fiscalYear       Int    // 年度（例: 2026）
+  prefecture       String // 都道府県名
+  grade            Int    // 等級（1-50）
+  standardMonthly  Int    // 標準報酬月額（円）
+  employeeShare    Int    // 被保険者負担額（円）
+  employerShare    Int    // 事業主負担額（円）
+  nursingEmployee  Int    @default(0) // 介護保険被保険者負担額（円）※40歳以上
+  nursingEmployer  Int    @default(0) // 介護保険事業主負担額（円）
+
+  @@unique([fiscalYear, prefecture, grade])
+  @@index([fiscalYear, prefecture])
+}
+
+// 厚生年金等級表（全32等級）
+model PensionGradeTable {
+  id               String @id @default(uuid())
+  fiscalYear       Int
+  grade            Int    // 等級（1-32）
+  standardMonthly  Int    // 標準報酬月額（円）
+  employeeShare    Int    // 被保険者負担額（円）
+  employerShare    Int    // 事業主負担額（円）
+
+  @@unique([fiscalYear, grade])
+  @@index([fiscalYear])
+}
+
+// 雇用保険料率（事業種類別）
+model EmploymentInsRate {
+  id            String @id @default(uuid())
+  fiscalYear    Int
+  businessType  String // 一般/建設/農林水産
+  employeeRate  Float  // 被保険者負担率（例: 0.006）
+  employerRate  Float  // 事業主負担率（例: 0.0095）
+
+  @@unique([fiscalYear, businessType])
+  @@index([fiscalYear])
+}
+
+// 月額源泉徴収税額表（甲欄）
+model IncomeTaxTable {
+  id          String @id @default(uuid())
+  fiscalYear  Int
+  salaryFrom  Int    // 月額給与下限（円）
+  salaryTo    Int    // 月額給与上限（円）
+  dep0        Int    // 扶養0人の税額
+  dep1        Int    // 扶養1人
+  dep2        Int    // 扶養2人
+  dep3        Int    // 扶養3人
+  dep4        Int    // 扶養4人
+  dep5        Int    // 扶養5人
+  dep6        Int    // 扶養6人
+  dep7        Int    // 扶養7人
+
+  @@index([fiscalYear, salaryFrom])
+}
+
+// 住民税特別徴収（隊員別・月別）
+model ResidentTax {
+  id            String @id @default(uuid())
+  companyId     String
+  guardId       String
+  fiscalYear    Int    // 年度
+  month         Int    // 月（1-12）
+  amount        Int    // 特別徴収額（円）
+  municipality  String // 市区町村名
+
+  @@unique([guardId, fiscalYear, month])
+  @@index([companyId])
+  @@index([guardId])
+}
+
+// 有給休暇管理
+model PaidLeave {
+  id          String   @id @default(uuid())
+  companyId   String
+  guardId     String
+  grantDate   DateTime @db.Date // 付与日
+  grantDays   Float    // 付与日数
+  usedDays    Float    @default(0) // 使用日数
+  expiryDate  DateTime @db.Date // 有効期限（付与日から2年）
+
+  @@index([companyId])
+  @@index([guardId])
+}
+
+// 賞与明細
+model BonusPayroll {
+  id               String   @id @default(uuid())
+  companyId        String
+  guardId          String
+  paymentDate      DateTime @db.Date
+  bonusType        String   // SUMMER/WINTER/OTHER
+  grossAmount      Int      // 総支給額
+  healthInsurance  Int      @default(0)
+  pension          Int      @default(0)
+  employmentIns    Int      @default(0)
+  incomeTax        Int      @default(0) // 賞与用源泉徴収税
+  otherDeduction   Int      @default(0)
+  netAmount        Int      // 差引支給額
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([guardId])
+}
+
+// モジュール別アクセス権限
+model ModulePermission {
+  id       String  @id @default(uuid())
+  userId   String
+  module   String  // HR/ATTENDANCE/PAYROLL/INSURANCE/YEAREND/MYNUMBER/BONUS/TRANSFER
+  canView  Boolean @default(false)
+  canEdit  Boolean @default(false)
+  canAdmin Boolean @default(false)
+
+  @@unique([userId, module])
+  @@index([userId])
+}
+
+// 外国人就労時間アラートログ
+model ForeignWorkerAlert {
+  id          String   @id @default(uuid())
+  companyId   String
+  guardId     String
+  weekStart   DateTime @db.Date // 週の開始日
+  totalHours  Float    // その週の実労働時間
+  limitHours  Int      // 上限時間（28 or 40）
+  isVacation  Boolean  // 長期休暇中か
+  alertType   String   // WARNING（超過間近）/ VIOLATION（超過）/ EXPIRY（期限切れ）
+  message     String
+  createdAt   DateTime @default(now())
+
+  @@index([companyId])
+  @@index([guardId])
 }
