@@ -30,6 +30,7 @@ import PayrollPage from './pages/PayrollPage'
 import SubcontractorPaymentPage from './pages/SubcontractorPaymentPage'
 import ShiftSurveyPage from './pages/ShiftSurveyPage'
 import DispatchPage from './pages/DispatchPage'
+import DispatchMapPage from './pages/DispatchMapPage'
 import InsuranceRatesPage from './pages/InsuranceRatesPage'
 import ResidentTaxPage from './pages/ResidentTaxPage'
 import SuspendedPage from './pages/SuspendedPage'
@@ -93,6 +94,7 @@ export default function App() {
                     <Route path="schedule/*" element={<SchedulePage />} />
                     <Route path="attendance/*" element={<AttendancePage />} />
                     <Route path="dispatch/*" element={<DispatchPage />} />
+                    <Route path="dispatch-map/*" element={<DispatchMapPage />} />
                     <Route path="shift-surveys/*" element={<ShiftSurveyPage />} />
 
                     {/* ── 給与計算モジュール ── */}

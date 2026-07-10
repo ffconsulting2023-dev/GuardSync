@@ -30,7 +30,8 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: '/schedule',      label: '管制・配員',   icon: '📋' },
       { path: '/attendance',    label: '出退勤',       icon: '⏰' },
-      { path: '/dispatch',     label: '管制',         icon: '📡' },
+      { path: '/dispatch',      label: '管制',         icon: '📡' },
+      { path: '/dispatch-map', label: '配置マップ',   icon: '📌' },
       { path: '/shift-surveys', label: 'シフト調査',   icon: '📋' },
     ],
   },
