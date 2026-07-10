@@ -5629,6 +5629,545 @@ app.get('/api/my-number/audit-log', authenticate, requireSuperAdmin, async (req,
 })
 
 // ─────────────────────────────────────────────
+// 最適人材配置 API（地図ベース）
+// ─────────────────────────────────────────────
+
+// Haversine formula: 2点間の直線距離(km)を計算
+function haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371 // 地球の半径(km)
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLng = (lng2 - lng1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2)
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+// 都道府県の代表座標（Geocoding APIフォールバック用）
+const PREFECTURE_COORDS: Record<string, { lat: number; lng: number }> = {
+  '北海道': { lat: 43.0646, lng: 141.3468 },
+  '青森県': { lat: 40.8244, lng: 140.7400 },
+  '岩手県': { lat: 39.7036, lng: 141.1527 },
+  '宮城県': { lat: 38.2688, lng: 140.8721 },
+  '秋田県': { lat: 39.7186, lng: 140.1024 },
+  '山形県': { lat: 38.2404, lng: 140.3634 },
+  '福島県': { lat: 37.7503, lng: 140.4676 },
+  '茨城県': { lat: 36.3418, lng: 140.4468 },
+  '栃木県': { lat: 36.5657, lng: 139.8836 },
+  '群馬県': { lat: 36.3911, lng: 139.0608 },
+  '埼玉県': { lat: 35.8569, lng: 139.6489 },
+  '千葉県': { lat: 35.6047, lng: 140.1233 },
+  '東京都': { lat: 35.6895, lng: 139.6917 },
+  '神奈川県': { lat: 35.4478, lng: 139.6425 },
+  '新潟県': { lat: 37.9026, lng: 139.0236 },
+  '富山県': { lat: 36.6953, lng: 137.2114 },
+  '石川県': { lat: 36.5946, lng: 136.6256 },
+  '福井県': { lat: 36.0652, lng: 136.2219 },
+  '山梨県': { lat: 35.6642, lng: 138.5684 },
+  '長野県': { lat: 36.2326, lng: 138.1810 },
+  '岐阜県': { lat: 35.3912, lng: 136.7223 },
+  '静岡県': { lat: 34.9769, lng: 138.3831 },
+  '愛知県': { lat: 35.1802, lng: 136.9066 },
+  '三重県': { lat: 34.7303, lng: 136.5086 },
+  '滋賀県': { lat: 35.0045, lng: 135.8686 },
+  '京都府': { lat: 35.0116, lng: 135.7681 },
+  '大阪府': { lat: 34.6863, lng: 135.5200 },
+  '兵庫県': { lat: 34.6913, lng: 135.1830 },
+  '奈良県': { lat: 34.6851, lng: 135.8328 },
+  '和歌山県': { lat: 34.2260, lng: 135.1675 },
+  '鳥取県': { lat: 35.5039, lng: 134.2381 },
+  '島根県': { lat: 35.4723, lng: 133.0505 },
+  '岡山県': { lat: 34.6618, lng: 133.9344 },
+  '広島県': { lat: 34.3966, lng: 132.4596 },
+  '山口県': { lat: 34.1861, lng: 131.4714 },
+  '徳島県': { lat: 34.0658, lng: 134.5593 },
+  '香川県': { lat: 34.3401, lng: 134.0434 },
+  '愛媛県': { lat: 33.8416, lng: 132.7657 },
+  '高知県': { lat: 33.5597, lng: 133.5311 },
+  '福岡県': { lat: 33.6064, lng: 130.4183 },
+  '佐賀県': { lat: 33.2494, lng: 130.2988 },
+  '長崎県': { lat: 32.7448, lng: 129.8737 },
+  '熊本県': { lat: 32.7898, lng: 130.7417 },
+  '大分県': { lat: 33.2382, lng: 131.6126 },
+  '宮崎県': { lat: 31.9111, lng: 131.4239 },
+  '鹿児島県': { lat: 31.5602, lng: 130.5581 },
+  '沖縄県': { lat: 26.2124, lng: 127.6809 },
+}
+
+// 配置スコア計算
+function calculateAssignmentScore(
+  guard: {
+    id: string
+    lat: number | null
+    lng: number | null
+    certifications: string[]
+    guardClass: string | null
+    overallRating: number | null
+    ngGuardIds: unknown
+    ngCompanies: unknown
+    skills: string[]
+  },
+  site: {
+    id: string
+    lat: number | null
+    lng: number | null
+    requiredQualifiedA: number
+    clientName: string | null
+    clientId: string | null
+  },
+  mode: string,
+  alreadyAssignedGuardIds: string[],
+  pastExperienceCount: number,
+): { score: number; reasons: string[]; distanceKm: number | null } {
+  let score = 100
+  const reasons: string[] = []
+  let distanceKm: number | null = null
+
+  // NG チェック（スコア0 = 配置不可）
+  let ngGuards: Array<{ id?: string }> = []
+  let ngCompanies: Array<{ name?: string }> = []
+  try { ngGuards = JSON.parse(typeof guard.ngGuardIds === 'string' ? guard.ngGuardIds : JSON.stringify(guard.ngGuardIds || '[]')) } catch { ngGuards = [] }
+  try { ngCompanies = JSON.parse(typeof guard.ngCompanies === 'string' ? guard.ngCompanies : JSON.stringify(guard.ngCompanies || '[]')) } catch { ngCompanies = [] }
+
+  // ngGuards にこの現場に既に配置されている隊員がいたら不可
+  if (Array.isArray(ngGuards) && ngGuards.length > 0) {
+    const ngIds = ngGuards.map((ng) => ng.id).filter(Boolean)
+    const conflict = alreadyAssignedGuardIds.some((id) => ngIds.includes(id))
+    if (conflict) {
+      return { score: 0, reasons: ['NG隊員が配置済み'], distanceKm: null }
+    }
+  }
+
+  // ngCompanies にこの現場の取引先が含まれていたら不可
+  if (Array.isArray(ngCompanies) && ngCompanies.length > 0) {
+    const ngNames = ngCompanies.map((ng) => ng.name).filter(Boolean)
+    if (site.clientName && ngNames.includes(site.clientName)) {
+      return { score: 0, reasons: ['NG取引先'], distanceKm: null }
+    }
+  }
+
+  // 距離スコア
+  let distScore = 0
+  if (guard.lat && guard.lng && site.lat && site.lng) {
+    const dist = haversineDistance(guard.lat, guard.lng, site.lat, site.lng)
+    distanceKm = Math.round(dist * 10) / 10
+    if (dist <= 10) { distScore = 30; reasons.push(`近距離(${distanceKm}km)`) }
+    else if (dist <= 20) { distScore = 20; reasons.push(`中距離(${distanceKm}km)`) }
+    else if (dist <= 30) { distScore = 10; reasons.push(`${distanceKm}km`) }
+    else if (dist > 50) { distScore = -20; reasons.push(`遠距離(${distanceKm}km)`) }
+  }
+
+  // スキルマッチスコア
+  let skillScore = 0
+  if (site.requiredQualifiedA > 0 && guard.certifications && guard.certifications.length > 0) {
+    skillScore = 20
+    reasons.push('資格保有')
+  }
+
+  // クラススコア
+  let classScore = 0
+  if (guard.guardClass === 'S') { classScore = 15; reasons.push('Sクラス') }
+  else if (guard.guardClass === 'A') { classScore = 10; reasons.push('Aクラス') }
+  else if (guard.guardClass === 'B') { classScore = 5; reasons.push('Bクラス') }
+
+  // 過去の現場経験スコア
+  if (pastExperienceCount > 0) {
+    const expScore = Math.min(pastExperienceCount * 3, 15)
+    score += expScore
+    reasons.push(`経験${pastExperienceCount}回`)
+  }
+
+  // 評価スコア
+  if (guard.overallRating) {
+    const ratingScore = (guard.overallRating - 3) * 5
+    score += ratingScore
+    if (guard.overallRating >= 4) reasons.push(`評価${guard.overallRating}`)
+  }
+
+  // モード別の重み付け
+  if (mode === 'distance') {
+    score += distScore * 2 + skillScore + classScore
+  } else if (mode === 'skill') {
+    score += distScore + skillScore * 2 + classScore * 2
+  } else {
+    // balanced
+    score += distScore + skillScore + classScore
+  }
+
+  return { score, reasons, distanceKm }
+}
+
+// POST /api/dispatch/optimize - 最適人材配置
+app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { date, siteIds, guardIds, mode = 'balanced' } = req.body
+
+  if (!date) { res.status(400).json({ error: 'date は必須です' }); return }
+
+  const targetDate = new Date(date)
+
+  // 1. 対象現場を取得
+  const siteWhere: Record<string, unknown> = { companyId, isActive: true }
+  if (siteIds && Array.isArray(siteIds) && siteIds.length > 0) {
+    siteWhere.id = { in: siteIds }
+  }
+  const allSites = await prisma.site.findMany({ where: siteWhere })
+
+  // 各現場の配置済み人数を取得
+  const existingSchedules = await prisma.schedule.findMany({
+    where: {
+      companyId,
+      date: targetDate,
+      status: { not: 'CANCELLED' },
+      siteId: { in: allSites.map((s) => s.id) },
+    },
+    select: { siteId: true, guardId: true },
+  })
+
+  const siteAssignedMap = new Map<string, string[]>()
+  for (const s of existingSchedules) {
+    if (!siteAssignedMap.has(s.siteId)) siteAssignedMap.set(s.siteId, [])
+    siteAssignedMap.get(s.siteId)!.push(s.guardId)
+  }
+
+  // 未充足の現場のみ
+  const unfilledSites = allSites.filter((site) => {
+    const assigned = siteAssignedMap.get(site.id)?.length || 0
+    return assigned < site.requiredCount
+  })
+
+  // 2. その日にスケジュールがない隊員を取得
+  const guardWhere: Record<string, unknown> = { companyId, isActive: true }
+  if (guardIds && Array.isArray(guardIds) && guardIds.length > 0) {
+    guardWhere.id = { in: guardIds }
+  }
+  const allGuards = await prisma.guard.findMany({ where: guardWhere })
+
+  const busyGuardSchedules = await prisma.schedule.findMany({
+    where: {
+      companyId,
+      date: targetDate,
+      status: { not: 'CANCELLED' },
+      guardId: { in: allGuards.map((g) => g.id) },
+    },
+    select: { guardId: true },
+  })
+  const busyGuardIds = new Set(busyGuardSchedules.map((s) => s.guardId))
+  const availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+
+  // 3. 過去の配置回数を集計（各隊員×各現場）
+  const pastSchedules = await prisma.schedule.findMany({
+    where: {
+      companyId,
+      guardId: { in: availableGuards.map((g) => g.id) },
+      siteId: { in: unfilledSites.map((s) => s.id) },
+      status: { not: 'CANCELLED' },
+    },
+    select: { guardId: true, siteId: true },
+  })
+  const experienceMap = new Map<string, number>()
+  for (const ps of pastSchedules) {
+    const key = `${ps.guardId}:${ps.siteId}`
+    experienceMap.set(key, (experienceMap.get(key) || 0) + 1)
+  }
+
+  // 4. スコア計算 & Greedy割当
+  interface ScoreEntry {
+    guardId: string
+    guardName: string
+    guardLat: number | null
+    guardLng: number | null
+    siteId: string
+    score: number
+    reasons: string[]
+    distanceKm: number | null
+  }
+
+  const scoreEntries: ScoreEntry[] = []
+
+  for (const site of unfilledSites) {
+    const alreadyAssigned = siteAssignedMap.get(site.id) || []
+    for (const guard of availableGuards) {
+      const expCount = experienceMap.get(`${guard.id}:${site.id}`) || 0
+      const result = calculateAssignmentScore(
+        {
+          id: guard.id,
+          lat: guard.lat,
+          lng: guard.lng,
+          certifications: guard.certifications,
+          guardClass: guard.guardClass,
+          overallRating: guard.overallRating,
+          ngGuardIds: guard.ngGuardIds,
+          ngCompanies: guard.ngCompanies,
+          skills: guard.skills,
+        },
+        {
+          id: site.id,
+          lat: site.lat,
+          lng: site.lng,
+          requiredQualifiedA: site.requiredQualifiedA,
+          clientName: site.clientName,
+          clientId: site.clientId,
+        },
+        mode,
+        alreadyAssigned,
+        expCount,
+      )
+      if (result.score > 0) {
+        scoreEntries.push({
+          guardId: guard.id,
+          guardName: guard.name,
+          guardLat: guard.lat,
+          guardLng: guard.lng,
+          siteId: site.id,
+          score: result.score,
+          reasons: result.reasons,
+          distanceKm: result.distanceKm,
+        })
+      }
+    }
+  }
+
+  // スコア降順ソート
+  scoreEntries.sort((a, b) => b.score - a.score)
+
+  // Greedy割当（1隊員1現場）
+  const assignedGuardIds = new Set<string>()
+  const siteAssignments = new Map<string, ScoreEntry[]>()
+  const siteRemainingMap = new Map<string, number>()
+
+  for (const site of unfilledSites) {
+    const alreadyCount = siteAssignedMap.get(site.id)?.length || 0
+    siteRemainingMap.set(site.id, site.requiredCount - alreadyCount)
+    siteAssignments.set(site.id, [])
+  }
+
+  for (const entry of scoreEntries) {
+    if (assignedGuardIds.has(entry.guardId)) continue
+    const remaining = siteRemainingMap.get(entry.siteId) || 0
+    if (remaining <= 0) continue
+
+    assignedGuardIds.add(entry.guardId)
+    siteAssignments.get(entry.siteId)!.push(entry)
+    siteRemainingMap.set(entry.siteId, remaining - 1)
+  }
+
+  // 5. レスポンス構築
+  const assignments = unfilledSites.map((site) => {
+    const assigned = siteAssignments.get(site.id) || []
+    const alreadyCount = siteAssignedMap.get(site.id)?.length || 0
+    return {
+      siteId: site.id,
+      siteName: site.name,
+      siteAddress: site.address,
+      siteLat: site.lat,
+      siteLng: site.lng,
+      requiredCount: site.requiredCount,
+      assignedGuards: assigned.map((a) => ({
+        guardId: a.guardId,
+        guardName: a.guardName,
+        guardLat: a.guardLat,
+        guardLng: a.guardLng,
+        score: a.score,
+        reasons: a.reasons,
+        distanceKm: a.distanceKm,
+      })),
+      unfilledCount: Math.max(0, site.requiredCount - alreadyCount - assigned.length),
+    }
+  })
+
+  const unassignedGuards = availableGuards
+    .filter((g) => !assignedGuardIds.has(g.id))
+    .map((g) => ({
+      guardId: g.id,
+      guardName: g.name,
+      reason: '適合する未充足現場なし',
+    }))
+
+  res.json({
+    date,
+    assignments,
+    unassignedGuards,
+    stats: {
+      totalSites: unfilledSites.length,
+      totalGuards: availableGuards.length,
+      assignedCount: assignedGuardIds.size,
+      unfilledSites: assignments.filter((a) => a.unfilledCount > 0).length,
+    },
+  })
+})
+
+// POST /api/dispatch/optimize/apply - 最適化結果をScheduleに一括登録
+app.post('/api/dispatch/optimize/apply', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { date, assignments } = req.body
+
+  if (!date || !assignments || !Array.isArray(assignments)) {
+    res.status(400).json({ error: 'date と assignments は必須です' })
+    return
+  }
+
+  const targetDate = new Date(date)
+  const created = []
+
+  for (const assignment of assignments) {
+    const { siteId, guardId, startTime, endTime } = assignment
+
+    // 現場の存在確認
+    const site = await prisma.site.findFirst({ where: { id: siteId, companyId } })
+    if (!site) continue
+
+    // 隊員の存在確認
+    const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+    if (!guard) continue
+
+    // 既に同日同隊員のスケジュールが存在しないか確認
+    const existing = await prisma.schedule.findFirst({
+      where: { companyId, guardId, date: targetDate, status: { not: 'CANCELLED' } },
+    })
+    if (existing) continue
+
+    const schedule = await prisma.schedule.create({
+      data: {
+        companyId,
+        guardId,
+        siteId,
+        date: targetDate,
+        startTime: startTime || site.defaultStartTime || '09:00',
+        endTime: endTime || site.defaultEndTime || '17:00',
+        status: 'ASSIGNED',
+      },
+    })
+    created.push(schedule)
+  }
+
+  res.json({ ok: true, createdCount: created.length, schedules: created })
+})
+
+// GET /api/dispatch/map-data/:date - 地図表示用データ
+app.get('/api/dispatch/map-data/:date', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const date = req.params.date
+  const targetDate = new Date(date)
+
+  // 全アクティブ現場
+  const sites = await prisma.site.findMany({
+    where: { companyId, isActive: true },
+    select: {
+      id: true, name: true, address: true, lat: true, lng: true,
+      requiredCount: true, requiredQualifiedA: true, requiredQualifiedB: true,
+      clientName: true, defaultStartTime: true, defaultEndTime: true,
+    },
+  })
+
+  // 指定日の全スケジュール
+  const schedules = await prisma.schedule.findMany({
+    where: { companyId, date: targetDate, status: { not: 'CANCELLED' } },
+    select: { guardId: true, siteId: true, site: { select: { name: true } } },
+  })
+
+  const siteAssignedCounts = new Map<string, number>()
+  const guardAssignmentMap = new Map<string, string>()
+  for (const s of schedules) {
+    siteAssignedCounts.set(s.siteId, (siteAssignedCounts.get(s.siteId) || 0) + 1)
+    guardAssignmentMap.set(s.guardId, s.site.name)
+  }
+
+  // 全アクティブ隊員
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: true },
+    select: {
+      id: true, name: true, nameKana: true, lat: true, lng: true,
+      guardClass: true, certifications: true, skills: true,
+      prefecture: true, city: true,
+    },
+  })
+
+  res.json({
+    sites: sites.map((s) => ({
+      ...s,
+      assignedCount: siteAssignedCounts.get(s.id) || 0,
+    })),
+    guards: guards.map((g) => ({
+      ...g,
+      isAssigned: guardAssignmentMap.has(g.id),
+      assignedSiteName: guardAssignmentMap.get(g.id) || null,
+    })),
+  })
+})
+
+// POST /api/guards/:id/geocode - 隊員住所からジオコーディング
+app.post('/api/guards/:id/geocode', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guardId = req.params.id
+
+  const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  // 住所を構築
+  const addressParts = [guard.prefecture, guard.city, guard.addressDetail].filter(Boolean)
+  const fullAddress = addressParts.join('')
+
+  if (!fullAddress) {
+    res.status(400).json({ error: '住所が設定されていません' })
+    return
+  }
+
+  let lat: number | null = null
+  let lng: number | null = null
+  let geocodeSource = 'none'
+
+  // Google Geocoding API を試行
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY
+  if (apiKey) {
+    try {
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(fullAddress)}&key=${apiKey}&language=ja`
+      const response = await fetch(url)
+      const data = await response.json() as {
+        status: string
+        results: Array<{ geometry: { location: { lat: number; lng: number } } }>
+      }
+      if (data.status === 'OK' && data.results.length > 0) {
+        lat = data.results[0].geometry.location.lat
+        lng = data.results[0].geometry.location.lng
+        geocodeSource = 'google'
+      }
+    } catch (err) {
+      logger.warn('Google Geocoding API エラー、フォールバックを使用', { guardId, error: String(err) })
+    }
+  }
+
+  // フォールバック: 都道府県の代表座標を使用
+  if (lat === null && guard.prefecture) {
+    const coords = PREFECTURE_COORDS[guard.prefecture]
+    if (coords) {
+      lat = coords.lat
+      lng = coords.lng
+      geocodeSource = 'prefecture_fallback'
+    }
+  }
+
+  if (lat === null || lng === null) {
+    res.status(400).json({ error: 'ジオコーディングに失敗しました。住所を確認してください。' })
+    return
+  }
+
+  const updated = await prisma.guard.update({
+    where: { id: guardId },
+    data: { lat, lng },
+  })
+
+  res.json({
+    ok: true,
+    guardId: updated.id,
+    lat: updated.lat,
+    lng: updated.lng,
+    geocodeSource,
+    address: fullAddress,
+  })
+})
+
+// ─────────────────────────────────────────────
 // 静的ファイル配信（本番）
 // ─────────────────────────────────────────────
 

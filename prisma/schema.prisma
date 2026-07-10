@@ -143,6 +143,8 @@ model Guard {
   city           String?
   addressDetail  String?
   buildingName   String?
+  lat            Float?    // 緯度（Google Geocoding で取得）
+  lng            Float?    // 経度
 
   // 最寄駅
   nearestStation1 String?
