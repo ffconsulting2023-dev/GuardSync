@@ -3896,6 +3896,545 @@ app.get('/api/payroll/withholding-slip/:guardId/:year', authenticate, requireRol
 })
 
 // ─────────────────────────────────────────────
+// 賞与計算エンジン API
+// ─────────────────────────────────────────────
+
+// 賞与に対する源泉徴収税額の算出率を返す（前月課税給与額ベース）
+function getBonusTaxRate(prevMonthTaxable: number): number {
+  // 千円単位の閾値で判定
+  if (prevMonthTaxable < 68_000) return 0
+  if (prevMonthTaxable < 79_000) return 0.02042
+  if (prevMonthTaxable < 252_000) return 0.04084
+  if (prevMonthTaxable < 300_000) return 0.06126
+  if (prevMonthTaxable < 334_000) return 0.08168
+  if (prevMonthTaxable < 363_000) return 0.10210
+  if (prevMonthTaxable < 395_000) return 0.12252
+  if (prevMonthTaxable < 427_000) return 0.14294
+  if (prevMonthTaxable < 550_000) return 0.16336
+  if (prevMonthTaxable < 700_000) return 0.18378
+  if (prevMonthTaxable < 850_000) return 0.20420
+  return 0.22462
+}
+
+app.post('/api/bonus-payroll/generate', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as any).user as JwtPayload
+    const { guardId, paymentDate, bonusType, grossAmount } = req.body
+
+    if (!guardId || !paymentDate || !bonusType || grossAmount == null) {
+      res.status(400).json({ error: 'guardId, paymentDate, bonusType, grossAmount は必須です' }); return
+    }
+    if (!['SUMMER', 'WINTER', 'OTHER'].includes(bonusType)) {
+      res.status(400).json({ error: 'bonusType は SUMMER/WINTER/OTHER のいずれかです' }); return
+    }
+
+    const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+    if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+    const payDate = new Date(paymentDate)
+    const fiscalYear = payDate.getFullYear()
+
+    // --- 賞与の社保料計算 ---
+    let healthIns = 0
+    let pensionIns = 0
+    let nursingIns = 0
+    let employmentIns = 0
+
+    // 健康保険料（賞与額 × 料率）
+    if (guard.healthInsurance) {
+      const prefecture = guard.prefecture || ''
+      if (prefecture) {
+        try {
+          // 等級1の標準報酬月額に対する employeeShare の比率から保険料率を逆算
+          const grade1 = await prisma.healthInsGradeTable.findUnique({
+            where: { fiscalYear_prefecture_grade: { fiscalYear, prefecture, grade: 1 } },
+          })
+          if (grade1 && grade1.standardMonthly > 0) {
+            const healthRate = grade1.employeeShare / grade1.standardMonthly
+            healthIns = Math.round(grossAmount * healthRate)
+
+            // 介護保険（40歳以上）
+            if (guard.nursingInsurance && guard.birthDate) {
+              const birth = new Date(guard.birthDate)
+              const age = payDate.getFullYear() - birth.getFullYear()
+                - (payDate < new Date(payDate.getFullYear(), birth.getMonth(), birth.getDate()) ? 1 : 0)
+              if (age >= 40 && grade1.nursingEmployee > 0) {
+                const nursingRate = grade1.nursingEmployee / grade1.standardMonthly
+                nursingIns = Math.round(grossAmount * nursingRate)
+              }
+            }
+          } else {
+            // マスタデータがない場合は簡易計算（東京都）
+            healthIns = Math.round(grossAmount * 0.0499)
+          }
+        } catch {
+          healthIns = Math.round(grossAmount * 0.0499)
+        }
+      } else {
+        healthIns = Math.round(grossAmount * 0.0499)
+      }
+    }
+
+    // 厚生年金（賞与額 × 9.15%）
+    if (guard.pensionInsurance) {
+      pensionIns = Math.round(grossAmount * 0.0915)
+    }
+
+    // 雇用保険
+    if (guard.employmentInsurance) {
+      try {
+        const row = await prisma.employmentInsRate.findUnique({
+          where: { fiscalYear_businessType: { fiscalYear, businessType: '一般' } },
+        })
+        if (row) {
+          employmentIns = Math.round(grossAmount * row.employeeRate)
+        }
+      } catch { /* マスタデータなし */ }
+    }
+
+    // --- 賞与の所得税計算 ---
+    // 前月の給与の課税対象額を取得
+    const prevMonth = payDate.getMonth() // 0-based（前月）
+    const prevYear = prevMonth === 0 ? payDate.getFullYear() - 1 : payDate.getFullYear()
+    const prevMonthNum = prevMonth === 0 ? 12 : prevMonth
+
+    let incomeTax = 0
+    try {
+      const prevPayroll = await prisma.payroll.findFirst({
+        where: { companyId, guardId, year: prevYear, month: prevMonthNum },
+      })
+      const prevMonthTaxable = prevPayroll ? prevPayroll.taxableTotal : 0
+      const taxRate = getBonusTaxRate(prevMonthTaxable)
+
+      const socialInsTotal = healthIns + nursingIns + pensionIns + employmentIns
+      incomeTax = Math.round((grossAmount - socialInsTotal) * taxRate)
+      if (incomeTax < 0) incomeTax = 0
+    } catch {
+      // 前月給与データがない場合は税率0%
+      incomeTax = 0
+    }
+
+    // 健保に介護保険を含める（BonusPayroll モデルに介護保険専用フィールドがないため）
+    const totalHealthIns = healthIns + nursingIns
+    const otherDeduction = 0
+    const netAmount = grossAmount - (totalHealthIns + pensionIns + employmentIns + incomeTax + otherDeduction)
+
+    const bonus = await prisma.bonusPayroll.create({
+      data: {
+        companyId,
+        guardId,
+        paymentDate: payDate,
+        bonusType,
+        grossAmount: Number(grossAmount),
+        healthInsurance: totalHealthIns,
+        pension: pensionIns,
+        employmentIns,
+        incomeTax,
+        otherDeduction,
+        netAmount,
+      },
+    })
+    res.status(201).json(bonus)
+  } catch (e) {
+    logger.error('賞与計算エラー', e, { context: 'bonus-payroll' })
+    res.status(500).json({ error: '賞与計算に失敗しました' })
+  }
+})
+
+app.get('/api/bonus-payroll', authenticate, async (req, res) => {
+  try {
+    const { companyId } = (req as any).user as JwtPayload
+    const year = Number(req.query.year) || new Date().getFullYear()
+
+    const startDate = new Date(year, 0, 1)
+    const endDate = new Date(year, 11, 31)
+
+    const bonuses = await prisma.bonusPayroll.findMany({
+      where: {
+        companyId,
+        paymentDate: { gte: startDate, lte: endDate },
+      },
+      orderBy: { paymentDate: 'desc' },
+    })
+    res.json(bonuses)
+  } catch (e) {
+    logger.error('賞与一覧取得エラー', e, { context: 'bonus-payroll' })
+    res.status(500).json({ error: '賞与一覧の取得に失敗しました' })
+  }
+})
+
+app.get('/api/bonus-payroll/:id/pdf', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  try {
+    const { companyId } = (req as any).user as JwtPayload
+    const bonus = await prisma.bonusPayroll.findFirst({
+      where: { id: req.params.id, companyId },
+    })
+    if (!bonus) { res.status(404).json({ error: '賞与データが見つかりません' }); return }
+
+    const guard = await prisma.guard.findFirst({
+      where: { id: bonus.guardId, companyId },
+      select: { name: true, nameKana: true, employeeNumber: true },
+    })
+    const company = await prisma.company.findUnique({ where: { id: companyId }, select: { name: true } })
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 })
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename=bonus_${bonus.bonusType}_${bonus.guardId}.pdf`)
+    doc.pipe(res)
+
+    const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+    let fontRegistered = false
+    try {
+      const fs = require('fs')
+      if (fs.existsSync(fontPath)) {
+        doc.registerFont('JP', fontPath)
+        doc.font('JP')
+        fontRegistered = true
+      }
+    } catch { /* フォールバック */ }
+    if (!fontRegistered) doc.font('Helvetica')
+
+    const leftCol = 50
+    const rightCol = 300
+    let y = 50
+
+    // タイトル
+    const bonusLabel = bonus.bonusType === 'SUMMER' ? '夏季賞与' : bonus.bonusType === 'WINTER' ? '冬季賞与' : '賞与'
+    doc.fontSize(18).text(fontRegistered ? `${bonusLabel}明細書` : `Bonus Pay Slip (${bonus.bonusType})`, leftCol, y, { align: 'center' })
+    y += 35
+
+    // 支給日
+    const pd = new Date(bonus.paymentDate)
+    doc.fontSize(12).text(`${pd.getFullYear()}/${padLeft(pd.getMonth() + 1, 2)}/${padLeft(pd.getDate(), 2)}`, leftCol, y, { align: 'center' })
+    y += 25
+
+    // 隊員情報
+    doc.fontSize(10)
+    if (guard) {
+      doc.text(fontRegistered ? `氏名: ${guard.name}` : `Name: ${guard.name}`, leftCol, y)
+      doc.text(fontRegistered ? `社員番号: ${guard.employeeNumber || '-'}` : `Employee No: ${guard.employeeNumber || '-'}`, rightCol, y)
+      y += 20
+    }
+    if (company) {
+      doc.text(fontRegistered ? `会社: ${company.name}` : `Company: ${company.name}`, leftCol, y)
+      y += 20
+    }
+
+    doc.moveTo(leftCol, y).lineTo(550, y).stroke()
+    y += 15
+
+    // 支給額
+    doc.fontSize(12).text(fontRegistered ? '【支給】' : '[Payment]', leftCol, y)
+    y += 20
+    doc.fontSize(10)
+    doc.text(fontRegistered ? '賞与額' : 'Gross Amount', leftCol, y)
+    doc.text(formatCurrency(bonus.grossAmount), rightCol, y, { width: 180, align: 'right' })
+    y += 20
+
+    doc.moveTo(leftCol, y).lineTo(550, y).stroke()
+    y += 15
+
+    // 控除
+    doc.fontSize(12).text(fontRegistered ? '【控除】' : '[Deductions]', leftCol, y)
+    y += 20
+    doc.fontSize(10)
+
+    const deductionItems: [string, number][] = [
+      [fontRegistered ? '健康保険料' : 'Health Insurance', bonus.healthInsurance],
+      [fontRegistered ? '厚生年金' : 'Pension', bonus.pension],
+      [fontRegistered ? '雇用保険料' : 'Employment Insurance', bonus.employmentIns],
+      [fontRegistered ? '所得税' : 'Income Tax', bonus.incomeTax],
+      [fontRegistered ? 'その他控除' : 'Other Deduction', bonus.otherDeduction],
+    ]
+    for (const [label, amount] of deductionItems) {
+      doc.text(label, leftCol, y)
+      doc.text(formatCurrency(amount), rightCol, y, { width: 180, align: 'right' })
+      y += 18
+    }
+
+    const totalDeduction = bonus.healthInsurance + bonus.pension + bonus.employmentIns + bonus.incomeTax + bonus.otherDeduction
+    y += 5
+    doc.fontSize(11).text(fontRegistered ? '控除合計' : 'Total Deductions', leftCol, y)
+    doc.text(formatCurrency(totalDeduction), rightCol, y, { width: 180, align: 'right' })
+    y += 25
+
+    doc.moveTo(leftCol, y).lineTo(550, y).stroke()
+    y += 15
+
+    // 差引支給額
+    doc.fontSize(14).text(fontRegistered ? '差引支給額' : 'Net Amount', leftCol, y)
+    doc.text(formatCurrency(bonus.netAmount), rightCol, y, { width: 180, align: 'right' })
+
+    doc.end()
+  } catch (e) {
+    logger.error('賞与PDF生成エラー', e, { context: 'bonus-payroll' })
+    res.status(500).json({ error: '賞与PDF生成に失敗しました' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// 算定基礎届データ作成 API
+// ─────────────────────────────────────────────
+
+app.get('/api/insurance/santeikiso/:year', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as any).user as JwtPayload
+    const year = Number(req.params.year)
+
+    if (!year || year < 2000 || year > 2100) {
+      res.status(400).json({ error: '年度が不正です' }); return
+    }
+
+    // 4月・5月・6月の Payroll を全隊員分取得
+    const payrolls = await prisma.payroll.findMany({
+      where: { companyId, year, month: { in: [4, 5, 6] } },
+      include: { guard: { select: { id: true, name: true, employeeNumber: true, healthInsuranceGrade: true, pensionInsuranceGrade: true, prefecture: true } } },
+      orderBy: [{ guardId: 'asc' }, { month: 'asc' }],
+    })
+
+    // 隊員ごとにグルーピング
+    const guardMap = new Map<string, { guard: { id: string; name: string; employeeNumber: string; healthInsuranceGrade: number | null; pensionInsuranceGrade: number | null; prefecture: string | null }; months: { [month: number]: number } }>()
+
+    for (const p of payrolls) {
+      if (!guardMap.has(p.guardId)) {
+        guardMap.set(p.guardId, { guard: p.guard, months: {} })
+      }
+      const entry = guardMap.get(p.guardId)!
+      entry.months[p.month] = p.grossPay
+    }
+
+    // 等級テーブルを取得（健康保険: 都道府県別）
+    const healthGrades = await prisma.healthInsGradeTable.findMany({
+      where: { fiscalYear: year },
+      orderBy: [{ prefecture: 'asc' }, { grade: 'asc' }],
+    })
+
+    const results: Array<{
+      guardId: string; guardName: string; employeeNumber: string;
+      apr: number; may: number; jun: number; average: number;
+      currentGrade: number | null; newGrade: number; newStandardMonthly: number; changed: boolean;
+    }> = []
+
+    for (const [guardId, data] of guardMap) {
+      const apr = data.months[4] || 0
+      const may = data.months[5] || 0
+      const jun = data.months[6] || 0
+      const monthCount = (apr > 0 ? 1 : 0) + (may > 0 ? 1 : 0) + (jun > 0 ? 1 : 0)
+      if (monthCount === 0) continue
+
+      const average = Math.round((apr + may + jun) / monthCount)
+
+      // 都道府県別の等級テーブルから標準報酬月額を決定
+      const prefecture = data.guard.prefecture || '東京都'
+      const prefGrades = healthGrades.filter(g => g.prefecture === prefecture)
+
+      let newGrade = 1
+      let newStandardMonthly = 0
+      if (prefGrades.length > 0) {
+        // 報酬月額に最も近い標準報酬月額の等級を選択
+        let minDiff = Infinity
+        for (const g of prefGrades) {
+          const diff = Math.abs(g.standardMonthly - average)
+          if (diff < minDiff) {
+            minDiff = diff
+            newGrade = g.grade
+            newStandardMonthly = g.standardMonthly
+          }
+        }
+      }
+
+      const currentGrade = data.guard.healthInsuranceGrade
+      const changed = currentGrade !== newGrade
+
+      results.push({
+        guardId,
+        guardName: data.guard.name,
+        employeeNumber: data.guard.employeeNumber,
+        apr, may, jun, average,
+        currentGrade,
+        newGrade,
+        newStandardMonthly,
+        changed,
+      })
+    }
+
+    res.json(results)
+  } catch (e) {
+    logger.error('算定基礎届データ取得エラー', e, { context: 'insurance' })
+    res.status(500).json({ error: '算定基礎届データの取得に失敗しました' })
+  }
+})
+
+app.post('/api/insurance/santeikiso/:year/apply', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as any).user as JwtPayload
+    const year = Number(req.params.year)
+
+    if (!year || year < 2000 || year > 2100) {
+      res.status(400).json({ error: '年度が不正です' }); return
+    }
+
+    // 算定基礎データを再計算
+    const payrolls = await prisma.payroll.findMany({
+      where: { companyId, year, month: { in: [4, 5, 6] } },
+      include: { guard: { select: { id: true, prefecture: true } } },
+      orderBy: [{ guardId: 'asc' }, { month: 'asc' }],
+    })
+
+    const guardMap = new Map<string, { prefecture: string | null; months: { [month: number]: number } }>()
+    for (const p of payrolls) {
+      if (!guardMap.has(p.guardId)) {
+        guardMap.set(p.guardId, { prefecture: p.guard.prefecture, months: {} })
+      }
+      guardMap.get(p.guardId)!.months[p.month] = p.grossPay
+    }
+
+    const healthGrades = await prisma.healthInsGradeTable.findMany({
+      where: { fiscalYear: year },
+      orderBy: [{ prefecture: 'asc' }, { grade: 'asc' }],
+    })
+
+    const pensionGrades = await prisma.pensionGradeTable.findMany({
+      where: { fiscalYear: year },
+      orderBy: { grade: 'asc' },
+    })
+
+    let updatedCount = 0
+    for (const [guardId, data] of guardMap) {
+      const apr = data.months[4] || 0
+      const may = data.months[5] || 0
+      const jun = data.months[6] || 0
+      const monthCount = (apr > 0 ? 1 : 0) + (may > 0 ? 1 : 0) + (jun > 0 ? 1 : 0)
+      if (monthCount === 0) continue
+
+      const average = Math.round((apr + may + jun) / monthCount)
+
+      // 健保等級
+      const prefecture = data.prefecture || '東京都'
+      const prefGrades = healthGrades.filter(g => g.prefecture === prefecture)
+      let newHealthGrade = 1
+      if (prefGrades.length > 0) {
+        let minDiff = Infinity
+        for (const g of prefGrades) {
+          const diff = Math.abs(g.standardMonthly - average)
+          if (diff < minDiff) { minDiff = diff; newHealthGrade = g.grade }
+        }
+      }
+
+      // 年金等級
+      let newPensionGrade = 1
+      if (pensionGrades.length > 0) {
+        let minDiff = Infinity
+        for (const g of pensionGrades) {
+          const diff = Math.abs(g.standardMonthly - average)
+          if (diff < minDiff) { minDiff = diff; newPensionGrade = g.grade }
+        }
+      }
+
+      await prisma.guard.updateMany({
+        where: { id: guardId, companyId },
+        data: { healthInsuranceGrade: newHealthGrade, pensionInsuranceGrade: newPensionGrade },
+      })
+      updatedCount++
+    }
+
+    res.json({ success: true, updatedCount })
+  } catch (e) {
+    logger.error('算定基礎届適用エラー', e, { context: 'insurance' })
+    res.status(500).json({ error: '算定基礎届の適用に失敗しました' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// 月額変更届データ作成 API
+// ─────────────────────────────────────────────
+
+app.get('/api/insurance/getsuhen/:guardId', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as any).user as JwtPayload
+    const { guardId } = req.params
+    const changeMonth = req.query.changeMonth as string
+
+    if (!changeMonth || !/^\d{4}-\d{2}$/.test(changeMonth)) {
+      res.status(400).json({ error: 'changeMonth（例: 2026-04）は必須です' }); return
+    }
+
+    const guard = await prisma.guard.findFirst({
+      where: { id: guardId, companyId },
+      select: { id: true, name: true, employeeNumber: true, healthInsuranceGrade: true, pensionInsuranceGrade: true, prefecture: true },
+    })
+    if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+    // changeMonth から3ヶ月分の year/month を算出
+    const [startYear, startMonth] = changeMonth.split('-').map(Number)
+    const months: { year: number; month: number }[] = []
+    for (let i = 0; i < 3; i++) {
+      let m = startMonth + i
+      let y = startYear
+      if (m > 12) { m -= 12; y++ }
+      months.push({ year: y, month: m })
+    }
+
+    // 3ヶ月分の Payroll を取得
+    const payrolls = await prisma.payroll.findMany({
+      where: {
+        companyId,
+        guardId,
+        OR: months.map(m => ({ year: m.year, month: m.month })),
+      },
+      orderBy: [{ year: 'asc' }, { month: 'asc' }],
+    })
+
+    const monthlyAmounts: number[] = [0, 0, 0]
+    for (const p of payrolls) {
+      const idx = months.findIndex(m => m.year === p.year && m.month === p.month)
+      if (idx >= 0) monthlyAmounts[idx] = p.grossPay
+    }
+
+    const validMonths = monthlyAmounts.filter(a => a > 0)
+    const average = validMonths.length > 0 ? Math.round(validMonths.reduce((s, a) => s + a, 0) / validMonths.length) : 0
+
+    // 新しい標準報酬月額を決定
+    const fiscalYear = startYear
+    const prefecture = guard.prefecture || '東京都'
+    const healthGrades = await prisma.healthInsGradeTable.findMany({
+      where: { fiscalYear, prefecture },
+      orderBy: { grade: 'asc' },
+    })
+
+    let newGrade = 1
+    let newStandardMonthly = 0
+    if (healthGrades.length > 0) {
+      let minDiff = Infinity
+      for (const g of healthGrades) {
+        const diff = Math.abs(g.standardMonthly - average)
+        if (diff < minDiff) { minDiff = diff; newGrade = g.grade; newStandardMonthly = g.standardMonthly }
+      }
+    }
+
+    const currentGrade = guard.healthInsuranceGrade || 0
+    const gradeChange = Math.abs(newGrade - currentGrade)
+    const isEligible = gradeChange >= 2
+
+    res.json({
+      guardId: guard.id,
+      guardName: guard.name,
+      month1: monthlyAmounts[0],
+      month2: monthlyAmounts[1],
+      month3: monthlyAmounts[2],
+      average,
+      currentGrade: guard.healthInsuranceGrade,
+      newGrade,
+      gradeChange,
+      isEligible,
+    })
+  } catch (e) {
+    logger.error('月額変更届データ取得エラー', e, { context: 'insurance' })
+    res.status(500).json({ error: '月額変更届データの取得に失敗しました' })
+  }
+})
+
+// ─────────────────────────────────────────────
 // 支払管理 API
 // ─────────────────────────────────────────────
 
