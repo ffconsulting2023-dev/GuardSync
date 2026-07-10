@@ -3896,6 +3896,453 @@ app.get('/api/payroll/withholding-slip/:guardId/:year', authenticate, requireRol
 })
 
 // ─────────────────────────────────────────────
+// 年末調整計算エンジン
+// ─────────────────────────────────────────────
+
+/** 給与所得控除額（2026年税制） */
+function calcIncomeDeduction(grossPay: number): number {
+  if (grossPay <= 1_625_000) return 550_000
+  if (grossPay <= 1_800_000) return Math.floor(grossPay * 0.4 - 100_000)
+  if (grossPay <= 3_600_000) return Math.floor(grossPay * 0.3 + 80_000)
+  if (grossPay <= 6_600_000) return Math.floor(grossPay * 0.2 + 440_000)
+  if (grossPay <= 8_500_000) return Math.floor(grossPay * 0.1 + 1_100_000)
+  return 1_950_000
+}
+
+/** 所得税額（税率テーブル） */
+function calcIncomeTaxFromTaxable(taxableIncome: number): number {
+  if (taxableIncome <= 0) return 0
+  if (taxableIncome <= 1_950_000) return Math.floor(taxableIncome * 0.05)
+  if (taxableIncome <= 3_300_000) return Math.floor(taxableIncome * 0.10 - 97_500)
+  if (taxableIncome <= 6_950_000) return Math.floor(taxableIncome * 0.20 - 427_500)
+  if (taxableIncome <= 9_000_000) return Math.floor(taxableIncome * 0.23 - 636_000)
+  if (taxableIncome <= 18_000_000) return Math.floor(taxableIncome * 0.33 - 1_536_000)
+  if (taxableIncome <= 40_000_000) return Math.floor(taxableIncome * 0.40 - 2_796_000)
+  return Math.floor(taxableIncome * 0.45 - 4_796_000)
+}
+
+/** 年末調整の全計算を実行し結果オブジェクトを返す */
+async function executeYearEndAdjustment(
+  companyId: string,
+  guardId: string,
+  year: number,
+): Promise<{
+  totalGrossPay: number
+  incomeDeduction: number
+  totalDeductions: number
+  taxableIncome: number
+  annualTax: number
+  recoveryTax: number
+  totalAnnualTax: number
+  alreadyWithheld: number
+  adjustment: number
+  isRefund: boolean
+  totalSocialIns: number
+  spouseDeductionAmount: number
+  dependentsDeductionAmount: number
+  basicDeduction: number
+  guardName: string
+  guardAddress: string
+  companyName: string
+}> {
+  // 隊員情報
+  const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+  if (!guard) throw new Error('隊員が見つかりません')
+
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: { name: true } })
+
+  // 全月 Payroll
+  const payrolls = await prisma.payroll.findMany({
+    where: { companyId, guardId, year },
+    orderBy: { month: 'asc' },
+  })
+
+  // 全賞与（該当年の paymentDate が対象年内のもの）
+  const startDate = new Date(year, 0, 1)
+  const endDate = new Date(year, 11, 31, 23, 59, 59)
+  const bonuses = await prisma.bonusPayroll.findMany({
+    where: { companyId, guardId, paymentDate: { gte: startDate, lte: endDate } },
+  })
+
+  // 年間集計
+  const payrollGross = payrolls.reduce((s, p) => s + p.grossPay, 0)
+  const bonusGross = bonuses.reduce((s, b) => s + b.grossAmount, 0)
+  const totalGrossPay = payrollGross + bonusGross
+
+  const payrollSocialIns = payrolls.reduce(
+    (s, p) => s + p.healthInsurance + p.pension + p.employmentIns, 0,
+  )
+  const bonusSocialIns = bonuses.reduce(
+    (s, b) => s + b.healthInsurance + b.pension + b.employmentIns, 0,
+  )
+  const totalSocialIns = payrollSocialIns + bonusSocialIns
+
+  const payrollIncomeTax = payrolls.reduce((s, p) => s + p.incomeTax, 0)
+  const bonusIncomeTax = bonuses.reduce((s, b) => s + b.incomeTax, 0)
+  const alreadyWithheld = payrollIncomeTax + bonusIncomeTax
+
+  // 給与所得控除
+  const incomeDeduction = calcIncomeDeduction(totalGrossPay)
+  const salaryIncome = Math.max(0, totalGrossPay - incomeDeduction)
+
+  // 所得控除
+  const basicDeduction = salaryIncome <= 24_000_000 ? 480_000 : 0
+  const socialInsDeduction = totalSocialIns
+  const spouseDeductionAmount = guard.spouseDeduction ? 380_000 : 0
+  const dependentsCount = Number(guard.dependents || 0)
+  const dependentsDeductionAmount = dependentsCount * 380_000
+  const totalDeductions = basicDeduction + socialInsDeduction + spouseDeductionAmount + dependentsDeductionAmount
+
+  // 課税所得金額（1,000円未満切り捨て）
+  const taxableIncome = Math.max(0, Math.floor((salaryIncome - totalDeductions) / 1000) * 1000)
+
+  // 年税額
+  const annualTax = calcIncomeTaxFromTaxable(taxableIncome)
+  const recoveryTax = Math.floor(annualTax * 0.021) // 復興特別所得税
+  const totalAnnualTax = Math.floor((annualTax + recoveryTax) / 100) * 100 // 100円未満切り捨て
+
+  // 過不足額
+  const adjustment = totalAnnualTax - alreadyWithheld
+  const isRefund = adjustment < 0
+
+  // 受給者住所
+  const guardAddress = [guard.prefecture, guard.city, guard.addressDetail].filter(Boolean).join('')
+    || guard.address || ''
+
+  return {
+    totalGrossPay,
+    incomeDeduction,
+    totalDeductions,
+    taxableIncome,
+    annualTax,
+    recoveryTax,
+    totalAnnualTax,
+    alreadyWithheld,
+    adjustment,
+    isRefund,
+    totalSocialIns,
+    spouseDeductionAmount,
+    dependentsDeductionAmount,
+    basicDeduction,
+    guardName: guard.name,
+    guardAddress,
+    companyName: company?.name || '',
+  }
+}
+
+// POST: 年末調整を計算し12月分 Payroll に保存
+app.post('/api/year-end-adjustment/:guardId/:year', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as unknown as { user: JwtPayload }).user
+    const { guardId } = req.params
+    const year = Number(req.params.year)
+
+    if (!year || year < 2000 || year > 2100) {
+      res.status(400).json({ error: '年度が不正です' }); return
+    }
+
+    const result = await executeYearEndAdjustment(companyId, guardId, year)
+
+    // 12月分の Payroll を更新（yearEndAdj フィールド）
+    const decPayroll = await prisma.payroll.findFirst({
+      where: { companyId, guardId, year, month: 12 },
+    })
+
+    if (decPayroll) {
+      // yearEndAdj: 還付ならプラス（手取り増）、追加徴収ならマイナス（手取り減）
+      const yearEndAdjValue = result.adjustment * -1
+      await prisma.payroll.update({
+        where: { id: decPayroll.id },
+        data: {
+          yearEndAdj: yearEndAdjValue,
+          netPay: decPayroll.grossPay - decPayroll.totalDeduction + yearEndAdjValue,
+        },
+      })
+    }
+
+    res.json(result)
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err))
+    logger.error('年末調整計算エラー', { error: e.message })
+    res.status(e.message === '隊員が見つかりません' ? 404 : 500).json({ error: e.message })
+  }
+})
+
+// GET: 年末調整の計算結果を返却（保存なし）
+app.get('/api/year-end-adjustment/:guardId/:year', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as unknown as { user: JwtPayload }).user
+    const { guardId } = req.params
+    const year = Number(req.params.year)
+
+    if (!year || year < 2000 || year > 2100) {
+      res.status(400).json({ error: '年度が不正です' }); return
+    }
+
+    const result = await executeYearEndAdjustment(companyId, guardId, year)
+    res.json(result)
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err))
+    logger.error('年末調整取得エラー', { error: e.message })
+    res.status(e.message === '隊員が見つかりません' ? 404 : 500).json({ error: e.message })
+  }
+})
+
+// POST: 全隊員の年末調整を一括実行
+app.post('/api/year-end-adjustment/batch/:year', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as unknown as { user: JwtPayload }).user
+    const year = Number(req.params.year)
+
+    if (!year || year < 2000 || year > 2100) {
+      res.status(400).json({ error: '年度が不正です' }); return
+    }
+
+    // 該当年の給与データがある全隊員を取得
+    const payrollGuards = await prisma.payroll.findMany({
+      where: { companyId, year },
+      select: { guardId: true },
+      distinct: ['guardId'],
+    })
+
+    const results: Array<{ guardId: string; guardName: string; adjustment: number; isRefund: boolean; error?: string }> = []
+
+    for (const pg of payrollGuards) {
+      try {
+        const result = await executeYearEndAdjustment(companyId, pg.guardId, year)
+
+        // 12月分の Payroll を更新
+        const decPayroll = await prisma.payroll.findFirst({
+          where: { companyId, guardId: pg.guardId, year, month: 12 },
+        })
+
+        if (decPayroll) {
+          const yearEndAdjValue = result.adjustment * -1
+          await prisma.payroll.update({
+            where: { id: decPayroll.id },
+            data: {
+              yearEndAdj: yearEndAdjValue,
+              netPay: decPayroll.grossPay - decPayroll.totalDeduction + yearEndAdjValue,
+            },
+          })
+        }
+
+        results.push({
+          guardId: pg.guardId,
+          guardName: result.guardName,
+          adjustment: result.adjustment,
+          isRefund: result.isRefund,
+        })
+      } catch (err: unknown) {
+        const e = err instanceof Error ? err : new Error(String(err))
+        results.push({
+          guardId: pg.guardId,
+          guardName: '',
+          adjustment: 0,
+          isRefund: false,
+          error: e.message,
+        })
+      }
+    }
+
+    res.json({
+      year,
+      totalProcessed: results.length,
+      refundCount: results.filter(r => r.isRefund && !r.error).length,
+      additionalCount: results.filter(r => !r.isRefund && r.adjustment > 0 && !r.error).length,
+      errorCount: results.filter(r => r.error).length,
+      results,
+    })
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err))
+    logger.error('年末調整一括処理エラー', { error: e.message })
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─────────────────────────────────────────────
+// 源泉徴収票 完全版 API
+// ─────────────────────────────────────────────
+
+app.get('/api/payroll/withholding-slip-full/:guardId/:year', authenticate, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { companyId } = (req as unknown as { user: JwtPayload }).user
+    const { guardId } = req.params
+    const year = Number(req.params.year)
+
+    if (!year || year < 2000 || year > 2100) {
+      res.status(400).json({ error: '年度が不正です' }); return
+    }
+
+    // 年末調整計算を再利用
+    const result = await executeYearEndAdjustment(companyId, guardId, year)
+
+    // 会社情報を取得
+    const company = await prisma.company.findUnique({
+      where: { id: companyId },
+      select: { name: true },
+    })
+
+    // 令和変換
+    const reiwaYear = year - 2018
+    const reiwaLabel = `令和${reiwaYear}年分`
+
+    // 給与所得控除後の金額
+    const incomeAfterDeduction = Math.max(0, result.totalGrossPay - result.incomeDeduction)
+
+    // PDF生成（A4横向き）
+    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 30 })
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="withholding_full_${year}_${guardId}.pdf"`)
+    doc.pipe(res)
+
+    // フォント設定（日本語対応）
+    const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+    let fontRegistered = false
+    try {
+      const fs = require('fs')
+      if (fs.existsSync(fontPath)) {
+        doc.registerFont('JP', fontPath)
+        doc.font('JP')
+        fontRegistered = true
+      }
+    } catch { /* フォールバック */ }
+
+    if (!fontRegistered) {
+      doc.font('Helvetica')
+    }
+
+    const fmt = (n: number) => n.toLocaleString('ja-JP')
+    const marginL = 30
+    const marginR = 30
+    const contentW = 842 - marginL - marginR // A4横幅
+
+    // タイトル
+    const titleText = fontRegistered ? `${reiwaLabel} 給与所得の源泉徴収票` : `${year} WITHHOLDING TAX SLIP`
+    doc.fontSize(14).text(titleText, marginL, 30, { align: 'center', width: contentW })
+
+    // 外枠
+    const tableTop = 60
+    const tableLeft = marginL
+    const tableWidth = contentW
+    const rowH = 30
+
+    doc.lineWidth(1.5)
+    doc.rect(tableLeft, tableTop, tableWidth, rowH * 9).stroke()
+
+    // ユーティリティ: セル描画
+    const drawCell = (x: number, cy: number, w: number, h: number, label: string, value: string, labelSize = 7, valueSize = 10) => {
+      doc.lineWidth(0.5)
+      doc.rect(x, cy, w, h).stroke()
+      if (label) {
+        doc.fontSize(labelSize).text(label, x + 3, cy + 2, { width: w - 6 })
+      }
+      if (value) {
+        doc.fontSize(valueSize).text(value, x + 3, cy + h / 2 + (label ? 2 : -4), { width: w - 6, align: 'right' })
+      }
+    }
+
+    // 行1: 種別 / 支払金額 / 給与所得控除後の金額 / 所得控除の額の合計額 / 源泉徴収税額
+    const colW5 = tableWidth / 5
+    let cy = tableTop
+
+    const lbl = fontRegistered
+    drawCell(tableLeft, cy, colW5, rowH,
+      lbl ? '種別' : 'Type',
+      lbl ? '給与・賞与' : 'Salary/Bonus', 7, 9)
+    drawCell(tableLeft + colW5, cy, colW5, rowH,
+      lbl ? '支払金額' : 'Payment',
+      fmt(result.totalGrossPay))
+    drawCell(tableLeft + colW5 * 2, cy, colW5, rowH,
+      lbl ? '給与所得控除後の金額' : 'After Deduction',
+      fmt(incomeAfterDeduction))
+    drawCell(tableLeft + colW5 * 3, cy, colW5, rowH,
+      lbl ? '所得控除の額の合計額' : 'Total Deductions',
+      fmt(result.totalDeductions))
+    drawCell(tableLeft + colW5 * 4, cy, colW5, rowH,
+      lbl ? '源泉徴収税額' : 'Tax Amount',
+      fmt(result.totalAnnualTax))
+
+    // 行2: 社会保険料 / 配偶者控除 / 扶養控除 / 基礎控除
+    cy += rowH
+    const colW4 = tableWidth / 4
+    drawCell(tableLeft, cy, colW4, rowH,
+      lbl ? '社会保険料等の金額' : 'Social Insurance',
+      fmt(result.totalSocialIns))
+    drawCell(tableLeft + colW4, cy, colW4, rowH,
+      lbl ? '配偶者控除額' : 'Spouse Deduction',
+      fmt(result.spouseDeductionAmount))
+    drawCell(tableLeft + colW4 * 2, cy, colW4, rowH,
+      lbl ? '扶養控除額' : 'Dependents Deduction',
+      fmt(result.dependentsDeductionAmount))
+    drawCell(tableLeft + colW4 * 3, cy, colW4, rowH,
+      lbl ? '基礎控除額' : 'Basic Deduction',
+      fmt(result.basicDeduction))
+
+    // 行3: 課税所得金額 / 年税額 / 復興特別所得税 / 既徴収税額
+    cy += rowH
+    drawCell(tableLeft, cy, colW4, rowH,
+      lbl ? '課税所得金額' : 'Taxable Income',
+      fmt(result.taxableIncome))
+    drawCell(tableLeft + colW4, cy, colW4, rowH,
+      lbl ? '算出年税額' : 'Annual Tax',
+      fmt(result.annualTax))
+    drawCell(tableLeft + colW4 * 2, cy, colW4, rowH,
+      lbl ? '復興特別所得税' : 'Recovery Tax',
+      fmt(result.recoveryTax))
+    drawCell(tableLeft + colW4 * 3, cy, colW4, rowH,
+      lbl ? '既徴収税額' : 'Already Withheld',
+      fmt(result.alreadyWithheld))
+
+    // 行4: 過不足額
+    cy += rowH
+    const adjLabel = result.isRefund
+      ? (lbl ? '差引超過額（還付）' : 'Refund Amount')
+      : (lbl ? '差引不足額（追加徴収）' : 'Additional Tax')
+    drawCell(tableLeft, cy, tableWidth / 2, rowH, adjLabel, fmt(Math.abs(result.adjustment)))
+    drawCell(tableLeft + tableWidth / 2, cy, tableWidth / 2, rowH, '', '')
+
+    // 区切り
+    cy += rowH + 10
+    doc.lineWidth(1).moveTo(tableLeft, cy).lineTo(tableLeft + tableWidth, cy).stroke()
+    cy += 10
+
+    // 受給者情報
+    const col2W = tableWidth / 2
+    drawCell(tableLeft, cy, col2W, rowH * 2,
+      lbl ? '受給者 住所' : 'Recipient Address',
+      result.guardAddress || '-', 8, 9)
+    drawCell(tableLeft + col2W, cy, col2W, rowH * 2,
+      lbl ? '受給者 氏名（フリガナ）' : 'Recipient Name',
+      result.guardName, 8, 11)
+
+    // 支払者情報
+    cy += rowH * 2
+    drawCell(tableLeft, cy, col2W, rowH * 2,
+      lbl ? '支払者 住所' : 'Payer Address',
+      '-', 8, 9)
+    drawCell(tableLeft + col2W, cy, col2W, rowH * 2,
+      lbl ? '支払者 名称' : 'Payer Name',
+      company?.name || '-', 8, 11)
+
+    // 備考欄
+    cy += rowH * 2
+    drawCell(tableLeft, cy, tableWidth, rowH,
+      lbl ? '摘要' : 'Remarks',
+      lbl ? '年末調整済' : 'Year-end adjusted', 8, 9)
+
+    doc.end()
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err))
+    logger.error('源泉徴収票（完全版）生成エラー', { error: e.message })
+    if (!res.headersSent) {
+      res.status(e.message === '隊員が見つかりません' ? 404 : 500).json({ error: e.message })
+    }
+  }
+})
+
+// ─────────────────────────────────────────────
 // 賞与計算エンジン API
 // ─────────────────────────────────────────────
 
@@ -4897,6 +5344,179 @@ cron.schedule('0 9 * * *', async () => {
 
   logger.info('請求リマインド 完了', { context: 'cron' })
 }, { timezone: 'Asia/Tokyo' })
+
+// ─────────────────────────────────────────────
+// マイナンバー管理 API
+// ─────────────────────────────────────────────
+
+// マイナンバー登録・更新
+app.post('/api/guards/:id/my-number', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const { id } = req.params
+  const { myNumber } = req.body
+
+  if (!myNumber || !/^\d{12}$/.test(myNumber)) {
+    res.status(400).json({ error: 'マイナンバーは12桁の数字で入力してください' })
+    return
+  }
+
+  const guard = await prisma.guard.findFirst({ where: { id, companyId: user.companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  const encrypted = encrypt(myNumber)
+  await prisma.guard.update({
+    where: { id },
+    data: { myNumber: encrypted, myNumberUpdatedAt: new Date() },
+  })
+
+  // ユーザー名を取得
+  const dbUser = await prisma.user.findUnique({ where: { id: user.userId }, select: { name: true } })
+
+  await prisma.myNumberAuditLog.create({
+    data: {
+      companyId: user.companyId,
+      guardId: id,
+      userId: user.userId,
+      userName: dbUser?.name || 'Unknown',
+      action: 'UPDATE',
+      ipAddress: req.ip || req.headers['x-forwarded-for']?.toString() || null,
+      userAgent: req.headers['user-agent'] || null,
+    },
+  })
+
+  logger.info('マイナンバー更新', { guardId: id, userId: user.userId })
+  res.json({ success: true })
+})
+
+// マイナンバー取得（マスク表示）
+app.get('/api/guards/:id/my-number', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const { id } = req.params
+
+  const guard = await prisma.guard.findFirst({
+    where: { id, companyId: user.companyId },
+    select: { myNumber: true },
+  })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  if (!guard.myNumber) {
+    res.json({ myNumber: null, hasMyNumber: false })
+    return
+  }
+
+  const decrypted = decrypt(guard.myNumber)
+
+  // ユーザー名を取得
+  const dbUser = await prisma.user.findUnique({ where: { id: user.userId }, select: { name: true } })
+
+  await prisma.myNumberAuditLog.create({
+    data: {
+      companyId: user.companyId,
+      guardId: id,
+      userId: user.userId,
+      userName: dbUser?.name || 'Unknown',
+      action: 'VIEW',
+      ipAddress: req.ip || req.headers['x-forwarded-for']?.toString() || null,
+      userAgent: req.headers['user-agent'] || null,
+    },
+  })
+
+  // マスク表示: 先頭4桁のみ表示、残り8桁は ********
+  const masked = decrypted.slice(0, 4) + '********'
+  res.json({ myNumber: masked, hasMyNumber: true })
+})
+
+// マイナンバー取得（フル表示 - スーパー管理者のみ）
+app.get('/api/guards/:id/my-number/full', authenticate, requireSuperAdmin, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const { id } = req.params
+
+  const guard = await prisma.guard.findFirst({
+    where: { id, companyId: user.companyId },
+    select: { myNumber: true },
+  })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  if (!guard.myNumber) {
+    res.json({ myNumber: null })
+    return
+  }
+
+  const decrypted = decrypt(guard.myNumber)
+
+  // ユーザー名を取得
+  const dbUser = await prisma.user.findUnique({ where: { id: user.userId }, select: { name: true } })
+
+  await prisma.myNumberAuditLog.create({
+    data: {
+      companyId: user.companyId,
+      guardId: id,
+      userId: user.userId,
+      userName: dbUser?.name || 'Unknown',
+      action: 'VIEW',
+      ipAddress: req.ip || req.headers['x-forwarded-for']?.toString() || null,
+      userAgent: req.headers['user-agent'] || null,
+    },
+  })
+
+  res.json({ myNumber: decrypted })
+})
+
+// マイナンバー削除
+app.delete('/api/guards/:id/my-number', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const { id } = req.params
+
+  const guard = await prisma.guard.findFirst({ where: { id, companyId: user.companyId } })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  await prisma.guard.update({
+    where: { id },
+    data: { myNumber: null, myNumberUpdatedAt: null },
+  })
+
+  // ユーザー名を取得
+  const dbUser = await prisma.user.findUnique({ where: { id: user.userId }, select: { name: true } })
+
+  await prisma.myNumberAuditLog.create({
+    data: {
+      companyId: user.companyId,
+      guardId: id,
+      userId: user.userId,
+      userName: dbUser?.name || 'Unknown',
+      action: 'DELETE',
+      ipAddress: req.ip || req.headers['x-forwarded-for']?.toString() || null,
+      userAgent: req.headers['user-agent'] || null,
+    },
+  })
+
+  logger.info('マイナンバー削除', { guardId: id, userId: user.userId })
+  res.json({ success: true })
+})
+
+// マイナンバー監査ログ取得（スーパー管理者のみ）
+app.get('/api/my-number/audit-log', authenticate, requireSuperAdmin, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const { guardId, userId, from, to } = req.query as { guardId?: string; userId?: string; from?: string; to?: string }
+
+  const where: Record<string, unknown> = { companyId: user.companyId }
+  if (guardId) where.guardId = guardId
+  if (userId) where.userId = userId
+  if (from || to) {
+    where.createdAt = {
+      ...(from ? { gte: new Date(from) } : {}),
+      ...(to ? { lte: new Date(to) } : {}),
+    }
+  }
+
+  const logs = await prisma.myNumberAuditLog.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: 500,
+  })
+
+  res.json(logs)
+})
 
 // ─────────────────────────────────────────────
 // 静的ファイル配信（本番）

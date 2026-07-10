@@ -48,6 +48,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: '/insurance-rates', label: '社保マスタ', icon: '🏥' },
       { path: '/resident-tax',    label: '住民税',     icon: '🏛️' },
+      { path: '/my-number',       label: 'マイナンバー', icon: '🔐' },
     ],
   },
   {

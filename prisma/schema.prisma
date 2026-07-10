@@ -240,6 +240,9 @@ model Guard {
   docOther            Boolean @default(false)
   docWorkPermit       Boolean @default(false)  // 資格外活動許可書
 
+  myNumber          String?   // マイナンバー（AES-256暗号化して保存）
+  myNumberUpdatedAt DateTime? // 最終更新日時
+
   schedules       Schedule[]
   attendances     Attendance[]
   dailyPayRequests DailyPayRequest[]
@@ -1178,6 +1181,23 @@ model ModulePermission {
   canAdmin Boolean @default(false)
 
   @@unique([userId, module])
+  @@index([userId])
+}
+
+// マイナンバー監査ログ
+model MyNumberAuditLog {
+  id          String   @id @default(uuid())
+  companyId   String
+  guardId     String
+  userId      String   // アクセスしたユーザーID
+  userName    String   // アクセスしたユーザー名
+  action      String   // VIEW / UPDATE / DELETE
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  @@index([companyId])
+  @@index([guardId])
   @@index([userId])
 }
 
