@@ -80,28 +80,41 @@ export default function App() {
               auth.user ? (
                 <Layout>
                   <Routes>
+                    {/* ── ダッシュボード ── */}
                     <Route index element={<DashboardPage />} />
+
+                    {/* ── 人事管理モジュール ── */}
                     <Route path="guards/*" element={<GuardsPage />} />
-                    <Route path="sites/*" element={<SitesPage />} />
-                    <Route path="contracts/*" element={<ContractsPage />} />
+                    <Route path="partners/*" element={<PartnersPage />} />
+                    <Route path="vehicles/*" element={<VehiclesPage />} />
+
+                    {/* ── 勤怠管理モジュール ── */}
                     <Route path="schedule/*" element={<SchedulePage />} />
                     <Route path="attendance/*" element={<AttendancePage />} />
-                    <Route path="invoices/*" element={<InvoicesPage />} />
-                    <Route path="daily-pay/*" element={<DailyPayPage />} />
-                    <Route path="clients" element={<ClientsPage />} />
-                    <Route path="clients/:id" element={<ClientDetailPage />} />
-                    <Route path="partners/*" element={<PartnersPage />} />
-                    <Route path="e-contracts/*" element={<EContractsPage />} />
-                    <Route path="reports/*" element={<SecurityReportsPage />} />
-                    <Route path="vehicles/*" element={<VehiclesPage />} />
-                    <Route path="auto-receipts/*" element={<AutoReceiptPage />} />
-                    <Route path="notifications/*" element={<NotificationsPage />} />
-                    <Route path="payroll/*" element={<PayrollPage />} />
-                    <Route path="subcontractor-payments/*" element={<SubcontractorPaymentPage />} />
-                    <Route path="shift-surveys/*" element={<ShiftSurveyPage />} />
                     <Route path="dispatch/*" element={<DispatchPage />} />
+                    <Route path="shift-surveys/*" element={<ShiftSurveyPage />} />
+
+                    {/* ── 給与計算モジュール ── */}
+                    <Route path="payroll/*" element={<PayrollPage />} />
+                    <Route path="daily-pay/*" element={<DailyPayPage />} />
+
+                    {/* ── 社会保険事務モジュール ── */}
                     <Route path="insurance-rates/*" element={<InsuranceRatesPage />} />
                     <Route path="resident-tax/*" element={<ResidentTaxPage />} />
+
+                    {/* ── 取引管理モジュール ── */}
+                    <Route path="clients" element={<ClientsPage />} />
+                    <Route path="clients/:id" element={<ClientDetailPage />} />
+                    <Route path="sites/*" element={<SitesPage />} />
+                    <Route path="contracts/*" element={<ContractsPage />} />
+                    <Route path="invoices/*" element={<InvoicesPage />} />
+                    <Route path="subcontractor-payments/*" element={<SubcontractorPaymentPage />} />
+                    <Route path="e-contracts/*" element={<EContractsPage />} />
+
+                    {/* ── その他 ── */}
+                    <Route path="reports/*" element={<SecurityReportsPage />} />
+                    <Route path="notifications/*" element={<NotificationsPage />} />
+                    <Route path="auto-receipts/*" element={<AutoReceiptPage />} />
                     <Route path="settings/*" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
                     <Route path="super-admin/*" element={
                       auth.user?.isSuperAdmin

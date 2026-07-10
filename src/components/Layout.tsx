@@ -2,29 +2,77 @@ import React, { useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 
-const NAV_ITEMS = [
-  { path: '/',            label: 'ダッシュボード', icon: '🏠' },
-  { path: '/dispatch',     label: '管制',           icon: '📡' },
-  { path: '/schedule',    label: '管制・配員',     icon: '📋' },
-  { path: '/shift-surveys', label: 'シフト調査',   icon: '📋' },
-  { path: '/attendance',  label: '出退勤',         icon: '⏰' },
-  { path: '/guards',      label: '隊員管理',       icon: '👷' },
-  { path: '/sites',       label: '現場管理',       icon: '📍' },
-  { path: '/clients',     label: '取引先管理',     icon: '🏢' },
-  { path: '/contracts',   label: '契約管理',       icon: '📄' },
-  { path: '/invoices',    label: '請求管理',       icon: '💴' },
-  { path: '/daily-pay',   label: '日払い',         icon: '💵' },
-  { path: '/e-contracts', label: '電子契約',       icon: '✍️' },
-  { path: '/partners',    label: '協力会社',       icon: '🤝' },
-  { path: '/reports',     label: '警備報告書',     icon: '📝' },
-  { path: '/vehicles',      label: '車両管理',       icon: '🚗' },
-  { path: '/auto-receipts',  label: '自動受付',       icon: '📨' },
-  { path: '/notifications',  label: '通知管理',       icon: '🔔' },
-  { path: '/payroll',        label: '給与管理',       icon: '💰' },
-  { path: '/subcontractor-payments', label: '支払管理', icon: '📑' },
-  { path: '/insurance-rates',       label: '社保マスタ',   icon: '🏥' },
-  { path: '/resident-tax',          label: '住民税',       icon: '🏛️' },
-  { path: '/settings',       label: '設定',           icon: '⚙️' },
+interface NavItem {
+  path: string
+  label: string
+  icon: string
+}
+
+interface NavGroup {
+  module: string
+  moduleKey: string
+  items: NavItem[]
+}
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    module: '人事管理',
+    moduleKey: 'HR',
+    items: [
+      { path: '/guards',    label: '隊員管理',   icon: '👷' },
+      { path: '/partners',  label: '協力会社',   icon: '🤝' },
+      { path: '/vehicles',  label: '車両管理',   icon: '🚗' },
+    ],
+  },
+  {
+    module: '勤怠管理',
+    moduleKey: 'ATTENDANCE',
+    items: [
+      { path: '/schedule',      label: '管制・配員',   icon: '📋' },
+      { path: '/attendance',    label: '出退勤',       icon: '⏰' },
+      { path: '/dispatch',     label: '管制',         icon: '📡' },
+      { path: '/shift-surveys', label: 'シフト調査',   icon: '📋' },
+    ],
+  },
+  {
+    module: '給与計算',
+    moduleKey: 'PAYROLL',
+    items: [
+      { path: '/payroll',   label: '給与管理', icon: '💰' },
+      { path: '/daily-pay', label: '日払い',   icon: '💵' },
+    ],
+  },
+  {
+    module: '社会保険事務',
+    moduleKey: 'INSURANCE',
+    items: [
+      { path: '/insurance-rates', label: '社保マスタ', icon: '🏥' },
+      { path: '/resident-tax',    label: '住民税',     icon: '🏛️' },
+    ],
+  },
+  {
+    module: '取引管理',
+    moduleKey: 'BUSINESS',
+    items: [
+      { path: '/clients',                label: '取引先',   icon: '🏢' },
+      { path: '/sites',                  label: '現場管理', icon: '📍' },
+      { path: '/contracts',              label: '契約管理', icon: '📄' },
+      { path: '/invoices',               label: '請求管理', icon: '💴' },
+      { path: '/subcontractor-payments', label: '支払管理', icon: '📑' },
+      { path: '/e-contracts',            label: '電子契約', icon: '✍️' },
+    ],
+  },
+  {
+    module: 'その他',
+    moduleKey: 'OTHER',
+    items: [
+      { path: '/',               label: 'ダッシュボード', icon: '🏠' },
+      { path: '/reports',        label: '警備報告書',     icon: '📝' },
+      { path: '/notifications',  label: '通知管理',       icon: '🔔' },
+      { path: '/auto-receipts',  label: '自動受付',       icon: '📨' },
+      { path: '/settings',       label: '設定',           icon: '⚙️' },
+    ],
+  },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -63,21 +111,31 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         {/* ナビゲーション */}
         <nav className="flex-1 overflow-y-auto py-2">
-          {NAV_ITEMS.map((item) => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              end={item.path === '/'}
-              onClick={() => setSidebarOpen(false)}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
-                  isActive ? 'bg-[#2d5282] text-white font-medium' : 'text-white/70 hover:bg-[#2d5282]/50 hover:text-white'
-                }`
-              }
-            >
-              <span className="text-base">{item.icon}</span>
-              {item.label}
-            </NavLink>
+          {NAV_GROUPS.map((group, groupIndex) => (
+            <div key={group.moduleKey}>
+              {groupIndex > 0 && <div className="border-t border-[#2d5282] my-1" />}
+              <div className="px-4 pt-3 pb-1">
+                <span className="text-[10px] font-bold tracking-wider uppercase text-white/40">
+                  {group.module}
+                </span>
+              </div>
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.path === '/'}
+                  onClick={() => setSidebarOpen(false)}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 px-4 py-2 text-sm transition-colors ${
+                      isActive ? 'bg-[#2d5282] text-white font-medium' : 'text-white/70 hover:bg-[#2d5282]/50 hover:text-white'
+                    }`
+                  }
+                >
+                  <span className="text-base">{item.icon}</span>
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
           ))}
           {user?.isSuperAdmin && (
             <NavLink
