@@ -1232,19 +1232,83 @@ app.get('/api/daily-pay', authenticate, async (req, res) => {
 
 app.post('/api/daily-pay/request', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { guardId, amount, feeRate = 0.03 } = req.body
+  const { guardId, amount } = req.body
   if (!guardId || !amount) { res.status(400).json({ error: '必須項目が不足しています' }); return }
 
   const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId, dailyPayEnabled: true } })
   if (!guard) { res.status(400).json({ error: '日払い対象外の隊員です' }); return }
 
-  const feeAmount = Math.floor(amount * feeRate)
-  const netAmount = amount - feeAmount
+  const requestAmount = Number(amount)
+  const feeRate = guard.dailyPayFeeRate ?? 0.03
+
+  // 1回あたりの上限チェック
+  if (guard.dailyPayLimit && requestAmount > guard.dailyPayLimit) {
+    res.status(400).json({ error: `日払い上限額（¥${guard.dailyPayLimit.toLocaleString()}）を超えています` }); return
+  }
+
+  // 月間上限チェック
+  if (guard.dailyPayMonthlyLimit) {
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0)
+    const monthlyTotal = await prisma.dailyPayRequest.aggregate({
+      where: {
+        guardId, companyId,
+        status: { in: ['PENDING', 'APPROVED', 'PAID'] },
+        requestDate: { gte: monthStart, lte: monthEnd },
+      },
+      _sum: { amount: true },
+    })
+    const currentTotal = monthlyTotal._sum.amount ?? 0
+    if (currentTotal + requestAmount > guard.dailyPayMonthlyLimit) {
+      res.status(400).json({
+        error: `月間日払い上限額（¥${guard.dailyPayMonthlyLimit.toLocaleString()}）を超えます。今月の累計: ¥${currentTotal.toLocaleString()}`,
+        currentMonthlyTotal: currentTotal,
+        limit: guard.dailyPayMonthlyLimit,
+      }); return
+    }
+  }
+
+  const feeAmount = Math.floor(requestAmount * feeRate)
+  const netAmount = requestAmount - feeAmount
 
   const request = await prisma.dailyPayRequest.create({
-    data: { companyId, guardId, requestDate: new Date(), amount: Number(amount), feeRate, feeAmount, netAmount },
+    data: { companyId, guardId, requestDate: new Date(), amount: requestAmount, feeRate, feeAmount, netAmount },
   })
   res.status(201).json(request)
+})
+
+// 日払い月間サマリー（隊員別の限度額・累計・残高）
+app.get('/api/daily-pay/summary/:guardId', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guard = await prisma.guard.findFirst({
+    where: { id: req.params.guardId, companyId },
+    select: { id: true, name: true, dailyPayEnabled: true, dailyPayLimit: true, dailyPayMonthlyLimit: true, dailyPayFeeRate: true },
+  })
+  if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  const now = new Date()
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0)
+
+  const monthlyRequests = await prisma.dailyPayRequest.findMany({
+    where: {
+      guardId: req.params.guardId, companyId,
+      requestDate: { gte: monthStart, lte: monthEnd },
+    },
+    orderBy: { requestDate: 'desc' },
+  })
+
+  const totalAmount = monthlyRequests.filter(r => ['PENDING', 'APPROVED', 'PAID', 'DEDUCTED'].includes(r.status)).reduce((s, r) => s + r.amount, 0)
+  const totalFee = monthlyRequests.filter(r => ['APPROVED', 'PAID', 'DEDUCTED'].includes(r.status)).reduce((s, r) => s + r.feeAmount, 0)
+  const remaining = guard.dailyPayMonthlyLimit ? guard.dailyPayMonthlyLimit - totalAmount : null
+
+  res.json({
+    guard: { id: guard.id, name: guard.name, dailyPayEnabled: guard.dailyPayEnabled },
+    limits: { perRequest: guard.dailyPayLimit, monthly: guard.dailyPayMonthlyLimit, feeRate: guard.dailyPayFeeRate ?? 0.03 },
+    monthly: { totalAmount, totalFee, count: monthlyRequests.length, remaining },
+    requests: monthlyRequests,
+  })
 })
 
 app.put('/api/daily-pay/:id/approve', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
@@ -2885,6 +2949,9 @@ interface PayrollCalcResult {
   residentTax: number
   overtimePay: number
   holidayPay: number
+  dailyPayDeduction: number  // 日払い差引額（当月の承認済み日払い合計）
+  dailyPayFee: number        // 日払い手数料合計
+  dailyPayCount: number      // 日払い件数
 }
 
 async function calculatePayrollDeductions(
@@ -2902,6 +2969,9 @@ async function calculatePayrollDeductions(
     residentTax: 0,
     overtimePay: payrollData.overtimePay,
     holidayPay: payrollData.holidayPay,
+    dailyPayDeduction: 0,
+    dailyPayFee: 0,
+    dailyPayCount: 0,
   }
 
   // --- 7. 残業手当自動計算 ---
@@ -3008,6 +3078,39 @@ async function calculatePayrollDeductions(
     }
   }
 
+  // --- 日払い差引計算 ---
+  // 当月の承認済み（APPROVED/PAID）の日払い申請を集計し、月給から差し引く
+  try {
+    const guardId = String(guard.id || '')
+    if (guardId) {
+      const monthStart = new Date(fiscalYear, month - 1, 1)
+      const monthEnd = new Date(fiscalYear, month, 0)
+      const dailyPayRequests = await prisma.dailyPayRequest.findMany({
+        where: {
+          guardId,
+          companyId,
+          status: { in: ['APPROVED', 'PAID'] },
+          requestDate: { gte: monthStart, lte: monthEnd },
+        },
+      })
+      if (dailyPayRequests.length > 0) {
+        result.dailyPayDeduction = dailyPayRequests.reduce((sum, r) => sum + r.amount, 0)
+        result.dailyPayFee = dailyPayRequests.reduce((sum, r) => sum + r.feeAmount, 0)
+        result.dailyPayCount = dailyPayRequests.length
+
+        // 差引処理済みフラグを更新
+        for (const req of dailyPayRequests) {
+          if (!req.deductedAt) {
+            await prisma.dailyPayRequest.update({
+              where: { id: req.id },
+              data: { deductedAt: new Date(), status: 'DEDUCTED' },
+            })
+          }
+        }
+      }
+    }
+  } catch { /* 日払いデータなし: 0 を維持 */ }
+
   return result
 }
 
@@ -3091,7 +3194,7 @@ app.post('/api/payroll/:guardId/generate', authenticate, requireRole('ADMIN', 'M
   const nonTaxableTotal = travelExpense
   const grossPay = taxableTotal + nonTaxableTotal
   const totalDeduction = deductions.healthInsurance + deductions.pension + deductions.employmentIns
-    + deductions.incomeTax + deductions.residentTax
+    + deductions.incomeTax + deductions.residentTax + deductions.dailyPayDeduction
   const netPay = grossPay - totalDeduction
 
   const payrollFields = {
@@ -3181,6 +3284,13 @@ app.put('/api/payroll/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
   data.employmentIns = deductions.employmentIns
   data.incomeTax = deductions.incomeTax
   data.residentTax = deductions.residentTax
+
+  // 日払い差引を otherDeduction に加算（明細に反映するため notes にも記録）
+  if (deductions.dailyPayDeduction > 0) {
+    data.otherDeduction = (Number(data.otherDeduction || 0)) + deductions.dailyPayDeduction
+    const dailyPayNote = `日払い差引: ¥${deductions.dailyPayDeduction.toLocaleString()}（${deductions.dailyPayCount}件, 手数料¥${deductions.dailyPayFee.toLocaleString()}）`
+    data.notes = data.notes ? `${data.notes}\n${dailyPayNote}` : dailyPayNote
+  }
 
   // 最終的な支給合計・控除合計・差引支給額を再計算
   const n2 = (k: string) => Number((data[k] ?? existing[k as keyof typeof existing]) || 0)

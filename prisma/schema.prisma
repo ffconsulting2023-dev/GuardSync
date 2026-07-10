@@ -127,6 +127,9 @@ model Guard {
   employmentType  EmploymentType @default(PART_TIME)
   bankAccount     Json?       // { bank, branch, type, number, holder }
   dailyPayEnabled Boolean     @default(false)
+  dailyPayLimit   Int?        // 日払い1回の上限額（円）。null=制限なし
+  dailyPayMonthlyLimit Int?   // 日払い月間上限額（円）。null=制限なし
+  dailyPayFeeRate Float?      @default(0.03) // 日払い手数料率（デフォルト3%）
   lineWorksId     String?     // LINE Works メンバーID
   isActive        Boolean     @default(true)
   joinedAt        DateTime?
