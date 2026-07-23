@@ -37,6 +37,8 @@ model Company {
   contracts     Contract[]
   partners      Partner[]
   vehicles      Vehicle[]
+  equipment     Equipment[]
+  equipmentAssignments EquipmentAssignment[]
   schedules     Schedule[]
   attendances   Attendance[]
   invoices      Invoice[]
@@ -255,8 +257,67 @@ model Guard {
   shiftSurveyResponses ShiftSurveyResponse[]
   payrolls        Payroll[]
 
+  // 相性関連
+  compatibilitiesFrom GuardCompatibility[] @relation("CompatibilityFrom")
+  compatibilitiesTo   GuardCompatibility[] @relation("CompatibilityTo")
+
+  // 備品貸出
+  equipmentAssignments EquipmentAssignment[]
+
+  // 書類ファイル
+  documents       GuardDocument[]
+
   @@unique([companyId, employeeNumber])
   @@index([companyId])
+}
+
+// ─────────────────────────────────────────────
+// 隊員相性（GuardCompatibility）
+// ─────────────────────────────────────────────
+
+model GuardCompatibility {
+  id            String              @id @default(uuid())
+  companyId     String
+  guardId       String
+  guard         Guard               @relation("CompatibilityFrom", fields: [guardId], references: [id])
+  targetGuardId String
+  targetGuard   Guard               @relation("CompatibilityTo", fields: [targetGuardId], references: [id])
+  type          CompatibilityType   // GOOD=相性良好 / BAD=相性悪い / NG=配置不可
+  reason        String?             // 理由メモ
+
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@unique([guardId, targetGuardId])
+  @@index([companyId])
+  @@index([guardId])
+  @@index([targetGuardId])
+}
+
+enum CompatibilityType {
+  GOOD   // 相性良好（同じ現場に配置すると加点）
+  BAD    // 相性悪い（同じ現場に配置すると減点）
+  NG     // 配置不可（同じ現場に絶対配置しない）
+}
+
+// ─────────────────────────────────────────────
+// 隊員書類ファイル（GuardDocument）
+// ─────────────────────────────────────────────
+
+model GuardDocument {
+  id            String   @id @default(uuid())
+  companyId     String
+  guardId       String
+  guard         Guard    @relation(fields: [guardId], references: [id])
+  docType       String               // docMyNumber, docIdCard, docResume 等
+  fileName      String               // 元ファイル名
+  filePath      String               // サーバー上の保存パス
+  fileSize      Int                  // バイト数
+  mimeType      String               // application/pdf, image/jpeg 等
+  createdAt     DateTime @default(now())
+
+  @@index([companyId])
+  @@index([guardId])
 }
 
 enum Gender {
@@ -357,6 +418,7 @@ model Client {
 
   sites       Site[]
   logs        ClientLog[]
+  invoices    Invoice[]
 
   @@index([companyId])
 }
@@ -409,6 +471,7 @@ model Site {
   contracts   Contract[]
   schedules   Schedule[]
   securityReports SecurityReport[]
+  equipmentAssignments EquipmentAssignment[]
 
   @@index([companyId])
   @@index([clientId])
@@ -425,10 +488,15 @@ model Contract {
   siteId        String
   site          Site           @relation(fields: [siteId], references: [id])
   contractNumber String        @unique
-  clientName    String
+  clientName    String        // スナップショット：契約作成時の取引先名（Site→Clientで最新値を参照可能）
   startDate     DateTime
   endDate       DateTime?
-  unitPrice     Int            // 単価（円）
+  // 契約単価（4区分）- SSOTの正はContract。Client.unitPrice* はデフォルト値の参照元
+  unitPriceDay          Int?  // 日勤単価（円）
+  unitPriceNight        Int?  // 夜勤単価（円）
+  unitPriceHolidayDay   Int?  // 休日日勤単価（円）
+  unitPriceHolidayNight Int?  // 休日夜勤単価（円）
+  unitPrice     Int            // 旧単価フィールド（後方互換用。新規は unitPriceDay/Night を使用）
   guardCount    Int            @default(1)
   shiftPattern  Json?          // { start, end, breakMinutes }
   status        ContractStatus @default(ACTIVE)
@@ -440,6 +508,7 @@ model Contract {
 
   invoiceItems  InvoiceItem[]
   eContracts    ElectronicContract[]
+  schedules     Schedule[]
 
   @@index([companyId])
   @@index([siteId])
@@ -501,6 +570,72 @@ model Vehicle {
 }
 
 // ─────────────────────────────────────────────
+// 備品管理（Equipment）
+// ─────────────────────────────────────────────
+
+model Equipment {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id])
+  name            String               // 備品名（例: トランシーバー、誘導灯、ヘルメット）
+  category        EquipmentCategory     // カテゴリ
+  totalQuantity   Int                   // 会社保有数
+  unitCost        Int?                  // 単価（円）
+  manufacturer    String?               // メーカー名
+  modelNumber     String?               // 型番
+  notes           String?               // 備考
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  assignments     EquipmentAssignment[]
+
+  @@index([companyId])
+}
+
+enum EquipmentCategory {
+  RADIO           // トランシーバー・無線機
+  LIGHT           // 誘導灯・LED合図灯
+  SAFETY          // ヘルメット・安全ベスト・安全靴
+  SIGN            // コーン・バリケード・看板
+  UNIFORM         // 制服・雨具
+  VEHICLE_EQUIP   // 車載備品（発煙筒・三角表示板）
+  OFFICE          // 事務用品（バインダー・報告書用紙）
+  SIGNAGE         // サイネージ（電光掲示板・デジタル看板）
+  OTHER           // その他
+}
+
+model EquipmentAssignment {
+  id              String   @id @default(uuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id])
+  equipmentId     String
+  equipment       Equipment @relation(fields: [equipmentId], references: [id])
+  assigneeType    AssigneeType          // GUARD=隊員貸出 / SITE=現場配備
+  guardId         String?               // 隊員に貸出の場合
+  guard           Guard?   @relation(fields: [guardId], references: [id])
+  siteId          String?               // 現場に配備の場合
+  site            Site?    @relation(fields: [siteId], references: [id])
+  quantity        Int      @default(1)  // 数量
+  assignedAt      DateTime @default(now()) // 貸出・配備日
+  returnedAt      DateTime?             // 返却日（null=未返却）
+  notes           String?               // 備考（シリアル番号等）
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([equipmentId])
+  @@index([guardId])
+  @@index([siteId])
+}
+
+enum AssigneeType {
+  GUARD   // 隊員への貸出
+  SITE    // 現場への配備
+}
+
+// ─────────────────────────────────────────────
 // シフト・配員（Schedule）
 // ─────────────────────────────────────────────
 
@@ -524,11 +659,14 @@ model Schedule {
   shiftType      String   @default("DAY")  // DAY/NIGHT/DAY_AM/DAY_PM
   assemblyTime   String?  // 集合時間
   sentAt         DateTime?  // 送信日時
+  contractId     String?  // FK to Contract（どの契約に基づくシフトか）
+  contract       Contract? @relation(fields: [contractId], references: [id])
 
   attendance  Attendance?
 
   @@index([companyId, date])
   @@index([guardId, date])
+  @@index([contractId])
 }
 
 enum ScheduleStatus {
@@ -585,8 +723,10 @@ model Invoice {
   companyId     String
   company       Company       @relation(fields: [companyId], references: [id])
   invoiceNumber String        @unique
-  clientName    String
-  clientEmail   String?
+  clientId      String?       // FK to Client（SSOTの正。clientName/clientEmail はスナップショット）
+  client        Client?       @relation(fields: [clientId], references: [id])
+  clientName    String        // スナップショット：発行時点の取引先名（法的文書用）
+  clientEmail   String?       // スナップショット：発行時点のメールアドレス
   issueDate     DateTime      @db.Date
   dueDate       DateTime      @db.Date
   subtotal      Int
@@ -606,6 +746,7 @@ model Invoice {
 
   @@index([companyId])
   @@index([status])
+  @@index([clientId])
 }
 
 enum InvoiceStatus {
@@ -943,7 +1084,7 @@ model SubcontractorPayment {
   company       Company           @relation(fields: [companyId], references: [id])
   partnerId     String?
   partner       Partner?          @relation(fields: [partnerId], references: [id])
-  partnerName   String            // 協力会社名（手入力も可）
+  partnerName   String            // スナップショット：協力会社名（partnerId未設定の手入力対応のため保持）
   invoiceNumber String?
   year          Int
   month         Int

@@ -5,13 +5,9 @@ import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 import { format } from 'date-fns'
 
-const STATUS_LABELS: Record<string, { label: string; className: string }> = {
-  DRAFT:     { label: '下書き',     className: 'badge-gray' },
-  SENT:      { label: '送付済み',   className: 'badge-info' },
-  PAID:      { label: '入金済み',   className: 'badge-success' },
-  OVERDUE:   { label: '期限超過',   className: 'badge-danger' },
-  CANCELLED: { label: 'キャンセル', className: 'badge-danger' },
-}
+import { INVOICE_STATUS } from '../lib/constants'
+
+const STATUS_LABELS = INVOICE_STATUS
 
 interface InvoiceItem {
   description: string
@@ -20,7 +16,8 @@ interface InvoiceItem {
 }
 
 const EMPTY_FORM = {
-  invoiceNumber: '', clientName: '', clientEmail: '', issueDate: format(new Date(), 'yyyy-MM-dd'),
+  invoiceNumber: '', clientId: '', clientName: '', clientEmail: '',
+  issueDate: format(new Date(), 'yyyy-MM-dd'),
   dueDate: '', taxRate: '0.1', notes: '',
 }
 
@@ -34,6 +31,11 @@ export default function InvoicesPage() {
   const { data: invoices = [], isLoading } = useQuery({
     queryKey: ['invoices'],
     queryFn: () => api.get('/invoices').then(r => r.data),
+  })
+
+  const { data: clients = [] } = useQuery({
+    queryKey: ['clients'],
+    queryFn: () => api.get('/clients').then(r => r.data),
   })
 
   const createMutation = useMutation({
@@ -54,6 +56,16 @@ export default function InvoicesPage() {
   const resetForm = () => {
     setForm(EMPTY_FORM)
     setItems([{ description: '', quantity: 1, unitPrice: 0 }])
+  }
+
+  const handleClientChange = (clientId: string) => {
+    const client = clients.find((c: any) => c.id === clientId)
+    setForm(f => ({
+      ...f,
+      clientId,
+      clientName: client ? client.name : '',
+      clientEmail: client ? (client.accountingEmail || client.email || '') : '',
+    }))
   }
 
   const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
@@ -134,13 +146,39 @@ export default function InvoicesPage() {
                   <input type="text" value={form.invoiceNumber} onChange={e => setForm(f => ({ ...f, invoiceNumber: e.target.value }))} className="form-input" required />
                 </div>
                 <div>
-                  <label className="form-label">発注元名 *</label>
-                  <input type="text" value={form.clientName} onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))} className="form-input" required />
+                  <label className="form-label">取引先（マスタから選択）</label>
+                  <select
+                    value={form.clientId}
+                    onChange={e => handleClientChange(e.target.value)}
+                    className="form-input"
+                  >
+                    <option value="">選択してください（任意）</option>
+                    {clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
                 </div>
               </div>
-              <div>
-                <label className="form-label">発注元メールアドレス</label>
-                <input type="email" value={form.clientEmail} onChange={e => setForm(f => ({ ...f, clientEmail: e.target.value }))} className="form-input" />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="form-label">発注元名 *</label>
+                  <input
+                    type="text"
+                    value={form.clientName}
+                    onChange={e => setForm(f => ({ ...f, clientName: e.target.value }))}
+                    className="form-input"
+                    placeholder="取引先選択で自動入力"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="form-label">発注元メールアドレス</label>
+                  <input
+                    type="email"
+                    value={form.clientEmail}
+                    onChange={e => setForm(f => ({ ...f, clientEmail: e.target.value }))}
+                    className="form-input"
+                    placeholder="取引先選択で自動入力"
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

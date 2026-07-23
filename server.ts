@@ -12,6 +12,8 @@ import dotenv from 'dotenv'
 import { z } from 'zod'
 import nodemailer from 'nodemailer'
 import crypto from 'crypto'
+import multer from 'multer'
+import fs from 'fs'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -20,6 +22,28 @@ const Stripe = require('stripe')
 dotenv.config()
 
 const isProduction = process.env.NODE_ENV === 'production'
+
+// ─────────────────────────────────────────────
+// ファイルアップロード設定（multer）
+// ─────────────────────────────────────────────
+const UPLOAD_DIR = path.join(__dirname, 'uploads', 'documents')
+if (!fs.existsSync(UPLOAD_DIR)) { fs.mkdirSync(UPLOAD_DIR, { recursive: true }) }
+
+const docUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname)
+      cb(null, `${crypto.randomUUID()}${ext}`)
+    },
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
+    if (allowed.includes(file.mimetype)) { cb(null, true) }
+    else { cb(new Error('PDF・画像ファイルのみアップロード可能です')) }
+  },
+})
 
 // ─────────────────────────────────────────────
 // 構造化ログ
@@ -241,7 +265,7 @@ app.use(helmet({
 // H-3: CORS設定を明示的なオリジンリストに変更
 const ALLOWED_ORIGINS = process.env.NODE_ENV === 'production'
   ? [process.env.APP_URL].filter(Boolean) as string[]
-  : ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173']
+  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000', 'http://127.0.0.1:5173']
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -1028,13 +1052,26 @@ app.get('/api/contracts', authenticate, async (req, res) => {
 
 app.post('/api/contracts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId, userId } = (req as any).user as JwtPayload
-  const { siteId, contractNumber, clientName, startDate, endDate, unitPrice, guardCount, shiftPattern, notes } = req.body
-  if (!siteId || !contractNumber || !clientName || !startDate || !unitPrice) {
+  const { siteId, contractNumber, clientName, startDate, endDate, unitPrice, guardCount, shiftPattern, notes,
+    unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight } = req.body
+  if (!siteId || !contractNumber || !clientName || !startDate) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
+  // unitPriceは後方互換。日勤単価があればそちらを優先
+  const resolvedUnitPrice = unitPriceDay != null ? Number(unitPriceDay) : (unitPrice != null ? Number(unitPrice) : 0)
+
   const contract = await prisma.contract.create({
-    data: { companyId, siteId, contractNumber, clientName, startDate: new Date(startDate), endDate: endDate ? new Date(endDate) : null, unitPrice: Number(unitPrice), guardCount: Number(guardCount) || 1, shiftPattern, notes, createdById: userId },
+    data: {
+      companyId, siteId, contractNumber, clientName,
+      startDate: new Date(startDate), endDate: endDate ? new Date(endDate) : null,
+      unitPrice: resolvedUnitPrice,
+      unitPriceDay: unitPriceDay != null ? Number(unitPriceDay) : null,
+      unitPriceNight: unitPriceNight != null ? Number(unitPriceNight) : null,
+      unitPriceHolidayDay: unitPriceHolidayDay != null ? Number(unitPriceHolidayDay) : null,
+      unitPriceHolidayNight: unitPriceHolidayNight != null ? Number(unitPriceHolidayNight) : null,
+      guardCount: Number(guardCount) || 1, shiftPattern, notes, createdById: userId,
+    },
     include: { site: true },
   })
   res.status(201).json(contract)
@@ -1063,14 +1100,15 @@ app.get('/api/schedules', authenticate, async (req, res) => {
 
 app.post('/api/schedules', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, date, startTime, endTime, notes } = req.body
+  const { guardId, siteId, date, startTime, endTime, notes, contractId } = req.body
   if (!guardId || !siteId || !date || !startTime || !endTime) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
   const schedule = await prisma.schedule.create({
-    data: { companyId, guardId, siteId, date: new Date(date), startTime, endTime, notes },
-    include: { guard: true, site: true },
+    data: { companyId, guardId, siteId, date: new Date(date), startTime, endTime, notes,
+      contractId: contractId || null },
+    include: { guard: true, site: true, contract: true },
   })
   res.status(201).json(schedule)
 })
@@ -1080,13 +1118,14 @@ app.put('/api/schedules/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPE
   const existing = await prisma.schedule.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: 'シフトが見つかりません' }); return }
 
-  const { guardId, siteId, date, startTime, endTime, status, notes } = req.body
+  const { guardId, siteId, date, startTime, endTime, status, notes, contractId } = req.body
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   await prisma.schedule.updateMany({
     where: { id: req.params.id, companyId },
-    data: { guardId, siteId, date: date ? new Date(date) : undefined, startTime, endTime, status, notes },
+    data: { guardId, siteId, date: date ? new Date(date) : undefined, startTime, endTime, status, notes,
+      contractId: contractId !== undefined ? (contractId || null) : undefined },
   })
-  const schedule = await prisma.schedule.findFirst({ where: { id: req.params.id, companyId }, include: { guard: true, site: true } })
+  const schedule = await prisma.schedule.findFirst({ where: { id: req.params.id, companyId }, include: { guard: true, site: true, contract: true } })
   res.json(schedule)
 })
 
@@ -1152,7 +1191,7 @@ app.get('/api/invoices', authenticate, async (req, res) => {
 
 app.post('/api/invoices', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId, userId } = (req as any).user as JwtPayload
-  const { invoiceNumber, clientName, clientEmail, issueDate, dueDate, items, taxRate = 0.1, notes } = req.body
+  const { invoiceNumber, clientId, clientName, clientEmail, issueDate, dueDate, items, taxRate = 0.1, notes } = req.body
   if (!invoiceNumber || !clientName || !issueDate || !dueDate || !items?.length) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
@@ -1163,7 +1202,10 @@ app.post('/api/invoices', authenticate, requireRole('ADMIN', 'MANAGER'), async (
 
   const invoice = await prisma.invoice.create({
     data: {
-      companyId, invoiceNumber, clientName, clientEmail, issueDate: new Date(issueDate), dueDate: new Date(dueDate),
+      companyId, invoiceNumber,
+      clientId: clientId || null,      // SSOT: ClientへのFK
+      clientName, clientEmail,          // スナップショット（法的文書用）
+      issueDate: new Date(issueDate), dueDate: new Date(dueDate),
       subtotal, taxRate, taxAmount, total, notes, createdById: userId,
       items: { create: items.map((item: any) => ({ description: item.description, quantity: item.quantity, unitPrice: item.unitPrice, amount: item.quantity * item.unitPrice, contractId: item.contractId, date: item.date ? new Date(item.date) : undefined })) },
     },
@@ -5694,7 +5736,14 @@ const PREFECTURE_COORDS: Record<string, { lat: number; lng: number }> = {
   '沖縄県': { lat: 26.2124, lng: 127.6809 },
 }
 
-// 配置スコア計算
+// 相性情報の型定義
+interface CompatibilityRecord {
+  guardId: string
+  targetGuardId: string
+  type: 'GOOD' | 'BAD' | 'NG'
+}
+
+// 配置スコア計算（相性・勤務条件対応版）
 function calculateAssignmentScore(
   guard: {
     id: string
@@ -5706,6 +5755,7 @@ function calculateAssignmentScore(
     ngGuardIds: unknown
     ngCompanies: unknown
     skills: string[]
+    workConditions: unknown
   },
   site: {
     id: string
@@ -5718,18 +5768,21 @@ function calculateAssignmentScore(
   mode: string,
   alreadyAssignedGuardIds: string[],
   pastExperienceCount: number,
+  compatibilities: CompatibilityRecord[],
+  targetDate: Date,
 ): { score: number; reasons: string[]; distanceKm: number | null } {
   let score = 100
   const reasons: string[] = []
   let distanceKm: number | null = null
 
-  // NG チェック（スコア0 = 配置不可）
-  let ngGuards: Array<{ id?: string }> = []
-  let ngCompanies: Array<{ name?: string }> = []
-  try { ngGuards = JSON.parse(typeof guard.ngGuardIds === 'string' ? guard.ngGuardIds : JSON.stringify(guard.ngGuardIds || '[]')) } catch { ngGuards = [] }
-  try { ngCompanies = JSON.parse(typeof guard.ngCompanies === 'string' ? guard.ngCompanies : JSON.stringify(guard.ngCompanies || '[]')) } catch { ngCompanies = [] }
+  // ─── NG チェック（スコア0 = 配置不可）───
 
-  // ngGuards にこの現場に既に配置されている隊員がいたら不可
+  // 1. レガシーNG（Guard.ngGuardIds / ngCompanies）
+  let ngGuards: Array<{ id?: string }> = []
+  let ngCompaniesArr: Array<{ name?: string }> = []
+  try { ngGuards = JSON.parse(typeof guard.ngGuardIds === 'string' ? guard.ngGuardIds : JSON.stringify(guard.ngGuardIds || '[]')) } catch { ngGuards = [] }
+  try { ngCompaniesArr = JSON.parse(typeof guard.ngCompanies === 'string' ? guard.ngCompanies : JSON.stringify(guard.ngCompanies || '[]')) } catch { ngCompaniesArr = [] }
+
   if (Array.isArray(ngGuards) && ngGuards.length > 0) {
     const ngIds = ngGuards.map((ng) => ng.id).filter(Boolean)
     const conflict = alreadyAssignedGuardIds.some((id) => ngIds.includes(id))
@@ -5738,15 +5791,27 @@ function calculateAssignmentScore(
     }
   }
 
-  // ngCompanies にこの現場の取引先が含まれていたら不可
-  if (Array.isArray(ngCompanies) && ngCompanies.length > 0) {
-    const ngNames = ngCompanies.map((ng) => ng.name).filter(Boolean)
+  if (Array.isArray(ngCompaniesArr) && ngCompaniesArr.length > 0) {
+    const ngNames = ngCompaniesArr.map((ng) => ng.name).filter(Boolean)
     if (site.clientName && ngNames.includes(site.clientName)) {
       return { score: 0, reasons: ['NG取引先'], distanceKm: null }
     }
   }
 
-  // 距離スコア
+  // 2. GuardCompatibility テーブルによる双方向 NG チェック
+  for (const assignedId of alreadyAssignedGuardIds) {
+    const isNg = compatibilities.some(
+      (c) => c.type === 'NG' && (
+        (c.guardId === guard.id && c.targetGuardId === assignedId) ||
+        (c.guardId === assignedId && c.targetGuardId === guard.id)
+      ),
+    )
+    if (isNg) {
+      return { score: 0, reasons: ['NG相性（配置不可）'], distanceKm: null }
+    }
+  }
+
+  // ─── 距離スコア ───
   let distScore = 0
   if (guard.lat && guard.lng && site.lat && site.lng) {
     const dist = haversineDistance(guard.lat, guard.lng, site.lat, site.lng)
@@ -5757,41 +5822,78 @@ function calculateAssignmentScore(
     else if (dist > 50) { distScore = -20; reasons.push(`遠距離(${distanceKm}km)`) }
   }
 
-  // スキルマッチスコア
+  // ─── スキルマッチスコア ───
   let skillScore = 0
   if (site.requiredQualifiedA > 0 && guard.certifications && guard.certifications.length > 0) {
     skillScore = 20
     reasons.push('資格保有')
   }
 
-  // クラススコア
+  // ─── クラススコア ───
   let classScore = 0
   if (guard.guardClass === 'S') { classScore = 15; reasons.push('Sクラス') }
   else if (guard.guardClass === 'A') { classScore = 10; reasons.push('Aクラス') }
   else if (guard.guardClass === 'B') { classScore = 5; reasons.push('Bクラス') }
 
-  // 過去の現場経験スコア
+  // ─── 過去の現場経験スコア ───
   if (pastExperienceCount > 0) {
     const expScore = Math.min(pastExperienceCount * 3, 15)
     score += expScore
     reasons.push(`経験${pastExperienceCount}回`)
   }
 
-  // 評価スコア
+  // ─── 評価スコア ───
   if (guard.overallRating) {
     const ratingScore = (guard.overallRating - 3) * 5
     score += ratingScore
     if (guard.overallRating >= 4) reasons.push(`評価${guard.overallRating}`)
   }
 
-  // モード別の重み付け
+  // ─── 相性ボーナス / ペナルティ ───
+  let compatScore = 0
+  for (const assignedId of alreadyAssignedGuardIds) {
+    for (const c of compatibilities) {
+      const isMatch = (c.guardId === guard.id && c.targetGuardId === assignedId) ||
+                      (c.guardId === assignedId && c.targetGuardId === guard.id)
+      if (!isMatch) continue
+      if (c.type === 'GOOD') {
+        compatScore += 20
+        reasons.push('相性◎')
+      } else if (c.type === 'BAD') {
+        compatScore -= 15
+        reasons.push('相性△')
+      }
+    }
+  }
+
+  // ─── 勤務希望条件チェック ───
+  let condScore = 0
+  if (guard.workConditions) {
+    let wc: { preferredDays?: string[]; preferredAreas?: string[]; maxHours?: number; remarks?: string } = {}
+    try { wc = typeof guard.workConditions === 'string' ? JSON.parse(guard.workConditions) : (guard.workConditions as typeof wc) } catch { /* ignore */ }
+
+    // 曜日希望チェック
+    if (wc.preferredDays && Array.isArray(wc.preferredDays) && wc.preferredDays.length > 0) {
+      const dayNames = ['日', '月', '火', '水', '木', '金', '土']
+      const dayOfWeek = dayNames[targetDate.getDay()]
+      if (wc.preferredDays.includes(dayOfWeek)) {
+        condScore += 10
+        reasons.push('希望曜日')
+      } else {
+        condScore -= 10
+        reasons.push('希望外曜日')
+      }
+    }
+  }
+
+  // ─── モード別の重み付け ───
   if (mode === 'distance') {
-    score += distScore * 2 + skillScore + classScore
+    score += distScore * 2 + skillScore + classScore + compatScore + condScore
   } else if (mode === 'skill') {
-    score += distScore + skillScore * 2 + classScore * 2
+    score += distScore + skillScore * 2 + classScore * 2 + compatScore + condScore
   } else {
     // balanced
-    score += distScore + skillScore + classScore
+    score += distScore + skillScore + classScore + compatScore + condScore
   }
 
   return { score, reasons, distanceKm }
@@ -5871,7 +5973,22 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     experienceMap.set(key, (experienceMap.get(key) || 0) + 1)
   }
 
-  // 4. スコア計算 & Greedy割当
+  // 3.5. 相性データを取得
+  const allGuardIds = availableGuards.map((g) => g.id)
+  const allAssignedGuardIds = Array.from(new Set(existingSchedules.map((s) => s.guardId)))
+  const relevantGuardIds = [...new Set([...allGuardIds, ...allAssignedGuardIds])]
+  const compatRecords = await prisma.guardCompatibility.findMany({
+    where: {
+      companyId,
+      OR: [
+        { guardId: { in: relevantGuardIds } },
+        { targetGuardId: { in: relevantGuardIds } },
+      ],
+    },
+    select: { guardId: true, targetGuardId: true, type: true },
+  })
+
+  // 4. スコア計算 & 最適割当
   interface ScoreEntry {
     guardId: string
     guardName: string
@@ -5900,6 +6017,7 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
           ngGuardIds: guard.ngGuardIds,
           ngCompanies: guard.ngCompanies,
           skills: guard.skills,
+          workConditions: guard.workConditions,
         },
         {
           id: site.id,
@@ -5912,6 +6030,8 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
         mode,
         alreadyAssigned,
         expCount,
+        compatRecords as CompatibilityRecord[],
+        targetDate,
       )
       if (result.score > 0) {
         scoreEntries.push({
@@ -5928,10 +6048,9 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     }
   }
 
-  // スコア降順ソート
-  scoreEntries.sort((a, b) => b.score - a.score)
+  // ─── 最適割当アルゴリズム（改良版） ───
+  // スコア行列を構築し、相性ペアボーナスを含めた反復改善で全体最適を目指す
 
-  // Greedy割当（1隊員1現場）
   const assignedGuardIds = new Set<string>()
   const siteAssignments = new Map<string, ScoreEntry[]>()
   const siteRemainingMap = new Map<string, number>()
@@ -5942,6 +6061,15 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     siteAssignments.set(site.id, [])
   }
 
+  // スコアマップ: guardId -> siteId -> ScoreEntry
+  const scoreMap = new Map<string, Map<string, ScoreEntry>>()
+  for (const entry of scoreEntries) {
+    if (!scoreMap.has(entry.guardId)) scoreMap.set(entry.guardId, new Map())
+    scoreMap.get(entry.guardId)!.set(entry.siteId, entry)
+  }
+
+  // Phase A: Greedy初期割当（スコア降順）
+  scoreEntries.sort((a, b) => b.score - a.score)
   for (const entry of scoreEntries) {
     if (assignedGuardIds.has(entry.guardId)) continue
     const remaining = siteRemainingMap.get(entry.siteId) || 0
@@ -5950,6 +6078,93 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     assignedGuardIds.add(entry.guardId)
     siteAssignments.get(entry.siteId)!.push(entry)
     siteRemainingMap.set(entry.siteId, remaining - 1)
+  }
+
+  // Phase B: 相性を考慮した割当改善（ペアスワップ）
+  // 異なる現場に配置された2人の隊員を入れ替えて全体スコアが上がるか試行
+  const goodPairs = compatRecords.filter((c) => c.type === 'GOOD')
+  if (goodPairs.length > 0) {
+    for (const pair of goodPairs) {
+      const g1 = pair.guardId
+      const g2 = pair.targetGuardId
+      if (!assignedGuardIds.has(g1) || !assignedGuardIds.has(g2)) continue
+
+      // 現在の配置先を特定
+      let site1: string | null = null
+      let site2: string | null = null
+      for (const [siteId, entries] of siteAssignments) {
+        for (const e of entries) {
+          if (e.guardId === g1) site1 = siteId
+          if (e.guardId === g2) site2 = siteId
+        }
+      }
+      if (!site1 || !site2 || site1 === site2) continue // 同じ現場なら既にOK
+
+      // g2をsite1に、g1をsite2に移した場合のスコアを計算
+      const g1AtSite1 = scoreMap.get(g1)?.get(site1)?.score || 0
+      const g2AtSite2 = scoreMap.get(g2)?.get(site2)?.score || 0
+      const g1AtSite2 = scoreMap.get(g1)?.get(site2)?.score || 0
+      const g2AtSite1 = scoreMap.get(g2)?.get(site1)?.score || 0
+
+      const currentTotal = g1AtSite1 + g2AtSite2
+      // 同じ現場に配置するボーナス: g2→site1 or g1→site2
+      const swapToSite1Total = g1AtSite1 + g2AtSite1 + 20 // 相性ボーナス
+      const swapToSite2Total = g1AtSite2 + g2AtSite2 + 20 // 相性ボーナス
+
+      if (swapToSite1Total > currentTotal && g2AtSite1 > 0) {
+        // g2をsite1に移動、site2に空きを作る
+        const s2Entries = siteAssignments.get(site2)!
+        const s1Entries = siteAssignments.get(site1)!
+        const g2Entry = s2Entries.find((e) => e.guardId === g2)
+        if (g2Entry && siteRemainingMap.get(site1)! >= 0) {
+          // site2からg2を外す
+          siteAssignments.set(site2, s2Entries.filter((e) => e.guardId !== g2))
+          siteRemainingMap.set(site2, (siteRemainingMap.get(site2) || 0) + 1)
+          // site1にg2を追加
+          const newEntry = scoreMap.get(g2)?.get(site1)
+          if (newEntry) {
+            s1Entries.push({ ...newEntry, reasons: [...newEntry.reasons, '相性◎ペア配置'] })
+            siteRemainingMap.set(site1, (siteRemainingMap.get(site1) || 0) - 1)
+          }
+        }
+      } else if (swapToSite2Total > currentTotal && g1AtSite2 > 0) {
+        // g1をsite2に移動
+        const s1Entries = siteAssignments.get(site1)!
+        const s2Entries = siteAssignments.get(site2)!
+        const g1Entry = s1Entries.find((e) => e.guardId === g1)
+        if (g1Entry && siteRemainingMap.get(site2)! >= 0) {
+          siteAssignments.set(site1, s1Entries.filter((e) => e.guardId !== g1))
+          siteRemainingMap.set(site1, (siteRemainingMap.get(site1) || 0) + 1)
+          const newEntry = scoreMap.get(g1)?.get(site2)
+          if (newEntry) {
+            s2Entries.push({ ...newEntry, reasons: [...newEntry.reasons, '相性◎ペア配置'] })
+            siteRemainingMap.set(site2, (siteRemainingMap.get(site2) || 0) - 1)
+          }
+        }
+      }
+    }
+
+    // Phase C: 空いた枠を未割当隊員で埋める
+    const stillUnassigned = availableGuards.filter((g) => !assignedGuardIds.has(g.id))
+    for (const guard of stillUnassigned) {
+      const guardScores = scoreMap.get(guard.id)
+      if (!guardScores) continue
+      let bestEntry: ScoreEntry | null = null
+      let bestScore = 0
+      for (const [siteId, entry] of guardScores) {
+        const remaining = siteRemainingMap.get(siteId) || 0
+        if (remaining <= 0) continue
+        if (entry.score > bestScore) {
+          bestScore = entry.score
+          bestEntry = entry
+        }
+      }
+      if (bestEntry) {
+        assignedGuardIds.add(bestEntry.guardId)
+        siteAssignments.get(bestEntry.siteId)!.push(bestEntry)
+        siteRemainingMap.set(bestEntry.siteId, (siteRemainingMap.get(bestEntry.siteId) || 0) - 1)
+      }
+    }
   }
 
   // 5. レスポンス構築
@@ -6165,6 +6380,421 @@ app.post('/api/guards/:id/geocode', authenticate, requireRole('ADMIN'), async (r
     geocodeSource,
     address: fullAddress,
   })
+})
+
+// ─────────────────────────────────────────────
+// 隊員相性管理（GuardCompatibility）
+// ─────────────────────────────────────────────
+
+// GET /api/guards/:id/compatibility - 隊員の相性一覧取得
+app.get('/api/guards/:id/compatibility', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guardId = req.params.id
+
+  const records = await prisma.guardCompatibility.findMany({
+    where: {
+      companyId,
+      OR: [{ guardId }, { targetGuardId: guardId }],
+    },
+    include: {
+      guard: { select: { id: true, name: true, nameKana: true, guardClass: true } },
+      targetGuard: { select: { id: true, name: true, nameKana: true, guardClass: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  res.json(records)
+})
+
+// POST /api/guards/:id/compatibility - 相性登録
+app.post('/api/guards/:id/compatibility', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guardId = req.params.id
+  const { targetGuardId, type, reason } = req.body
+
+  if (!targetGuardId || !type) {
+    res.status(400).json({ error: 'targetGuardId と type は必須です' })
+    return
+  }
+  if (!['GOOD', 'BAD', 'NG'].includes(type)) {
+    res.status(400).json({ error: 'type は GOOD/BAD/NG のいずれかです' })
+    return
+  }
+  if (guardId === targetGuardId) {
+    res.status(400).json({ error: '同一隊員は指定できません' })
+    return
+  }
+
+  // 両方の隊員が同じ会社に所属しているか確認
+  const [guard, target] = await Promise.all([
+    prisma.guard.findFirst({ where: { id: guardId, companyId } }),
+    prisma.guard.findFirst({ where: { id: targetGuardId, companyId } }),
+  ])
+  if (!guard || !target) {
+    res.status(404).json({ error: '隊員が見つかりません' })
+    return
+  }
+
+  // upsert: 既存レコードがあれば更新
+  const record = await prisma.guardCompatibility.upsert({
+    where: { guardId_targetGuardId: { guardId, targetGuardId } },
+    update: { type: type as 'GOOD' | 'BAD' | 'NG', reason: reason || null },
+    create: { companyId, guardId, targetGuardId, type: type as 'GOOD' | 'BAD' | 'NG', reason: reason || null },
+    include: {
+      guard: { select: { id: true, name: true, nameKana: true, guardClass: true } },
+      targetGuard: { select: { id: true, name: true, nameKana: true, guardClass: true } },
+    },
+  })
+
+  res.json(record)
+})
+
+// DELETE /api/guards/:id/compatibility/:targetId - 相性削除
+app.delete('/api/guards/:id/compatibility/:targetId', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { id: guardId, targetId: targetGuardId } = req.params
+
+  // 正方向・逆方向どちらでも削除
+  const deleted = await prisma.guardCompatibility.deleteMany({
+    where: {
+      companyId,
+      OR: [
+        { guardId, targetGuardId },
+        { guardId: targetGuardId, targetGuardId: guardId },
+      ],
+    },
+  })
+
+  res.json({ ok: true, deletedCount: deleted.count })
+})
+
+// ─────────────────────────────────────────────
+// 隊員書類ファイル管理（GuardDocument）
+// ─────────────────────────────────────────────
+
+// GET /api/guards/:id/documents - 隊員の書類一覧
+app.get('/api/guards/:id/documents', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const docs = await prisma.guardDocument.findMany({
+    where: { companyId, guardId: req.params.id },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(docs)
+})
+
+// POST /api/guards/:id/documents/upload - 書類アップロード
+app.post('/api/guards/:id/documents/upload', authenticate, requireRole('ADMIN', 'MANAGER'), docUpload.single('file'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guardId = req.params.id
+  const { docType } = req.body
+  const file = req.file
+
+  if (!file) { res.status(400).json({ error: 'ファイルが必要です' }); return }
+  if (!docType) { res.status(400).json({ error: 'docType が必要です' }); return }
+
+  const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
+  if (!guard) {
+    fs.unlinkSync(file.path)
+    res.status(404).json({ error: '隊員が見つかりません' })
+    return
+  }
+
+  // 同タイプの既存ファイルがあれば削除（上書き）
+  const existing = await prisma.guardDocument.findMany({ where: { companyId, guardId, docType } })
+  for (const old of existing) {
+    try { fs.unlinkSync(old.filePath) } catch { /* file may not exist */ }
+    await prisma.guardDocument.delete({ where: { id: old.id } })
+  }
+
+  const doc = await prisma.guardDocument.create({
+    data: {
+      companyId, guardId, docType,
+      fileName: file.originalname,
+      filePath: file.path,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+    },
+  })
+
+  // チェックボックスも自動でONにする
+  const docFieldMap: Record<string, string> = {
+    docMyNumber: 'docMyNumber', docIdCard: 'docIdCard', docIdentityCert: 'docIdentityCert',
+    docResidenceCard: 'docResidenceCard', docResume: 'docResume', docPledge: 'docPledge',
+    docPhoto: 'docPhoto', docOther: 'docOther', docWorkPermit: 'docWorkPermit',
+  }
+  if (docFieldMap[docType]) {
+    await prisma.guard.update({ where: { id: guardId }, data: { [docFieldMap[docType]]: true } })
+  }
+
+  res.json(doc)
+})
+
+// GET /api/guards/documents/:docId/download - 書類ダウンロード
+app.get('/api/guards/documents/:docId/download', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const doc = await prisma.guardDocument.findFirst({ where: { id: req.params.docId, companyId } })
+  if (!doc) { res.status(404).json({ error: '書類が見つかりません' }); return }
+
+  if (!fs.existsSync(doc.filePath)) {
+    res.status(404).json({ error: 'ファイルが見つかりません' })
+    return
+  }
+
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(doc.fileName)}`)
+  res.setHeader('Content-Type', doc.mimeType)
+  res.sendFile(path.resolve(doc.filePath))
+})
+
+// DELETE /api/guards/documents/:docId - 書類削除
+app.delete('/api/guards/documents/:docId', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const doc = await prisma.guardDocument.findFirst({ where: { id: req.params.docId, companyId } })
+  if (!doc) { res.status(404).json({ error: '書類が見つかりません' }); return }
+
+  try { fs.unlinkSync(doc.filePath) } catch { /* ignore */ }
+  await prisma.guardDocument.delete({ where: { id: doc.id } })
+
+  res.json({ ok: true })
+})
+
+// ─────────────────────────────────────────────
+// 備品管理（Equipment）
+// ─────────────────────────────────────────────
+
+// GET /api/equipment - 備品一覧（在庫サマリー付き）
+app.get('/api/equipment', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+
+  const equipment = await prisma.equipment.findMany({
+    where: { companyId, isActive: true },
+    include: {
+      assignments: {
+        where: { returnedAt: null }, // 未返却のみ
+        include: {
+          guard: { select: { id: true, name: true, employeeNumber: true } },
+          site: { select: { id: true, name: true } },
+        },
+      },
+    },
+    orderBy: { name: 'asc' },
+  })
+
+  // 在庫サマリーを付与
+  const result = equipment.map((eq) => {
+    const lentToGuards = eq.assignments
+      .filter((a) => a.assigneeType === 'GUARD')
+      .reduce((sum, a) => sum + a.quantity, 0)
+    const deployedToSites = eq.assignments
+      .filter((a) => a.assigneeType === 'SITE')
+      .reduce((sum, a) => sum + a.quantity, 0)
+    const inUse = lentToGuards + deployedToSites
+    const available = eq.totalQuantity - inUse
+
+    return {
+      ...eq,
+      stockSummary: {
+        total: eq.totalQuantity,
+        lentToGuards,
+        deployedToSites,
+        inUse,
+        available,
+      },
+    }
+  })
+
+  res.json(result)
+})
+
+// POST /api/equipment - 備品登録
+app.post('/api/equipment', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { name, category, totalQuantity, unitCost, manufacturer, modelNumber, notes } = req.body
+
+  if (!name || !category || totalQuantity == null) {
+    res.status(400).json({ error: 'name, category, totalQuantity は必須です' })
+    return
+  }
+
+  const eq = await prisma.equipment.create({
+    data: { companyId, name, category, totalQuantity: Number(totalQuantity), unitCost: unitCost ? Number(unitCost) : null, manufacturer, modelNumber, notes },
+  })
+  res.json(eq)
+})
+
+// PUT /api/equipment/:id - 備品更新
+app.put('/api/equipment/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { name, category, totalQuantity, unitCost, manufacturer, modelNumber, notes, isActive } = req.body
+
+  const eq = await prisma.equipment.updateMany({
+    where: { id: req.params.id, companyId },
+    data: {
+      ...(name !== undefined && { name }),
+      ...(category !== undefined && { category }),
+      ...(totalQuantity !== undefined && { totalQuantity: Number(totalQuantity) }),
+      ...(unitCost !== undefined && { unitCost: unitCost ? Number(unitCost) : null }),
+      ...(manufacturer !== undefined && { manufacturer }),
+      ...(modelNumber !== undefined && { modelNumber }),
+      ...(notes !== undefined && { notes }),
+      ...(isActive !== undefined && { isActive }),
+    },
+  })
+  if (eq.count === 0) { res.status(404).json({ error: '備品が見つかりません' }); return }
+  res.json({ ok: true })
+})
+
+// DELETE /api/equipment/:id - 備品論理削除
+app.delete('/api/equipment/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  await prisma.equipment.updateMany({ where: { id: req.params.id, companyId }, data: { isActive: false } })
+  res.json({ ok: true })
+})
+
+// POST /api/equipment/:id/assign - 備品貸出・配備
+app.post('/api/equipment/:id/assign', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const equipmentId = req.params.id
+  const { assigneeType, guardId, siteId, quantity, notes } = req.body
+
+  if (!assigneeType || !['GUARD', 'SITE'].includes(assigneeType)) {
+    res.status(400).json({ error: 'assigneeType は GUARD または SITE です' })
+    return
+  }
+  if (assigneeType === 'GUARD' && !guardId) {
+    res.status(400).json({ error: '隊員IDが必要です' })
+    return
+  }
+  if (assigneeType === 'SITE' && !siteId) {
+    res.status(400).json({ error: '現場IDが必要です' })
+    return
+  }
+
+  // 在庫チェック
+  const eq = await prisma.equipment.findFirst({ where: { id: equipmentId, companyId } })
+  if (!eq) { res.status(404).json({ error: '備品が見つかりません' }); return }
+
+  const currentAssignments = await prisma.equipmentAssignment.findMany({
+    where: { equipmentId, companyId, returnedAt: null },
+  })
+  const inUse = currentAssignments.reduce((sum, a) => sum + a.quantity, 0)
+  const qty = Number(quantity) || 1
+  if (inUse + qty > eq.totalQuantity) {
+    res.status(400).json({ error: `在庫不足です（残り${eq.totalQuantity - inUse}個）` })
+    return
+  }
+
+  const assignment = await prisma.equipmentAssignment.create({
+    data: {
+      companyId, equipmentId, assigneeType,
+      guardId: assigneeType === 'GUARD' ? guardId : null,
+      siteId: assigneeType === 'SITE' ? siteId : null,
+      quantity: qty, notes,
+    },
+    include: {
+      guard: { select: { id: true, name: true, employeeNumber: true } },
+      site: { select: { id: true, name: true } },
+    },
+  })
+  res.json(assignment)
+})
+
+// POST /api/equipment/assignments/:id/return - 備品返却
+app.post('/api/equipment/assignments/:id/return', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+
+  const assignment = await prisma.equipmentAssignment.findFirst({
+    where: { id: req.params.id, companyId, returnedAt: null },
+  })
+  if (!assignment) { res.status(404).json({ error: '貸出記録が見つかりません' }); return }
+
+  const updated = await prisma.equipmentAssignment.update({
+    where: { id: assignment.id },
+    data: { returnedAt: new Date() },
+  })
+  res.json(updated)
+})
+
+// GET /api/equipment/site-shortage - 現場別 備品過不足一覧
+app.get('/api/equipment/site-shortage', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+
+  const sites = await prisma.site.findMany({
+    where: { companyId, isActive: true },
+    select: { id: true, name: true, requiredCount: true },
+  })
+
+  const equipment = await prisma.equipment.findMany({
+    where: { companyId, isActive: true },
+    include: {
+      assignments: {
+        where: { assigneeType: 'SITE', returnedAt: null },
+        select: { siteId: true, quantity: true },
+      },
+    },
+  })
+
+  // 現場ごとに各備品の配備数と必要数（requiredCount基準）を算出
+  const shortageData = sites.map((site) => {
+    const items = equipment.map((eq) => {
+      const deployed = eq.assignments
+        .filter((a) => a.siteId === site.id)
+        .reduce((sum, a) => sum + a.quantity, 0)
+      // 基本的な必要数: トランシーバー→隊員数分、その他→1セットを基準
+      const needed = eq.category === 'RADIO' ? site.requiredCount : (deployed > 0 ? deployed : 0)
+      return {
+        equipmentId: eq.id,
+        equipmentName: eq.name,
+        category: eq.category,
+        deployed,
+        needed: eq.category === 'RADIO' ? site.requiredCount : deployed,
+        shortage: eq.category === 'RADIO' ? Math.max(0, site.requiredCount - deployed) : 0,
+      }
+    })
+    return {
+      siteId: site.id,
+      siteName: site.name,
+      requiredGuards: site.requiredCount,
+      items: items.filter((i) => i.deployed > 0 || i.needed > 0),
+    }
+  })
+
+  res.json(shortageData)
+})
+
+// GET /api/equipment/guard-holdings - 隊員別 備品保有一覧
+app.get('/api/equipment/guard-holdings', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: true },
+    select: { id: true, name: true, employeeNumber: true },
+  })
+
+  const assignments = await prisma.equipmentAssignment.findMany({
+    where: { companyId, assigneeType: 'GUARD', returnedAt: null },
+    include: {
+      equipment: { select: { id: true, name: true, category: true } },
+    },
+  })
+
+  const guardHoldings = guards.map((guard) => ({
+    guardId: guard.id,
+    guardName: guard.name,
+    employeeNumber: guard.employeeNumber,
+    holdings: assignments
+      .filter((a) => a.guardId === guard.id)
+      .map((a) => ({
+        assignmentId: a.id,
+        equipmentId: a.equipment.id,
+        equipmentName: a.equipment.name,
+        category: a.equipment.category,
+        quantity: a.quantity,
+        assignedAt: a.assignedAt,
+        notes: a.notes,
+      })),
+  }))
+
+  res.json(guardHoldings.filter((g) => g.holdings.length > 0))
 })
 
 // ─────────────────────────────────────────────

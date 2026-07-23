@@ -5,13 +5,9 @@ import { format, addDays, subDays, startOfWeek, eachDayOfInterval } from 'date-f
 import { ja } from 'date-fns/locale'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
+import { SCHEDULE_STATUS } from '../lib/constants'
 
-const STATUS_LABELS: Record<string, { label: string; className: string }> = {
-  DRAFT:     { label: '下書き',   className: 'badge-gray' },
-  ASSIGNED:  { label: '配員済み', className: 'badge-info' },
-  CONFIRMED: { label: '確認済み', className: 'badge-success' },
-  CANCELLED: { label: 'キャンセル', className: 'badge-danger' },
-}
+const STATUS_LABELS = SCHEDULE_STATUS
 
 export default function SchedulePage() {
   const { user } = useAuth()
@@ -21,7 +17,7 @@ export default function SchedulePage() {
   const [showForm, setShowForm] = useState(false)
   const [showAvailable, setShowAvailable] = useState(false)
   const [form, setForm] = useState({
-    guardId: '', siteId: '',
+    guardId: '', siteId: '', contractId: '',
     date: format(new Date(), 'yyyy-MM-dd'),
     startTime: '09:00', endTime: '17:00', notes: '',
   })
@@ -41,12 +37,18 @@ export default function SchedulePage() {
 
   const { data: guards = [] } = useQuery({ queryKey: ['guards'], queryFn: () => api.get('/guards?isActive=true').then(r => r.data) })
   const { data: sites = [] } = useQuery({ queryKey: ['sites'], queryFn: () => api.get('/sites').then(r => r.data) })
+  const { data: allContracts = [] } = useQuery({ queryKey: ['contracts'], queryFn: () => api.get('/contracts').then(r => r.data) })
 
   const { data: availableGuards = [] } = useQuery({
     queryKey: ['available-guards', form.date],
     queryFn: () => api.get(`/schedules/available-guards?date=${form.date}`).then(r => r.data),
     enabled: showForm,
   })
+
+  // 選択中の現場に紐づく有効な契約
+  const siteContracts = form.siteId
+    ? allContracts.filter((c: any) => c.siteId === form.siteId && c.status === 'ACTIVE')
+    : []
 
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/schedules', data),
@@ -62,7 +64,11 @@ export default function SchedulePage() {
     mutationFn: (id: string) => api.post(`/schedules/${id}/send-reminder`),
   })
 
-  const resetForm = () => setForm({ guardId: '', siteId: '', date: format(new Date(), 'yyyy-MM-dd'), startTime: '09:00', endTime: '17:00', notes: '' })
+  const resetForm = () => setForm({ guardId: '', siteId: '', contractId: '', date: format(new Date(), 'yyyy-MM-dd'), startTime: '09:00', endTime: '17:00', notes: '' })
+
+  const handleSiteChange = (siteId: string) => {
+    setForm(f => ({ ...f, siteId, contractId: '' }))
+  }
 
   const weekDays = view === 'week'
     ? eachDayOfInterval({ start: new Date(dateFrom), end: new Date(dateTo) })
@@ -146,6 +152,7 @@ export default function SchedulePage() {
                           <p className="font-medium text-gray-800 text-sm">{s.guard?.name}</p>
                           <span className="text-xs text-gray-400">{s.guard?.employeeNumber}</span>
                           <span className={`badge ${STATUS_LABELS[s.status]?.className}`}>{STATUS_LABELS[s.status]?.label}</span>
+                          {s.contract && <span className="text-xs text-blue-500">#{s.contract.contractNumber}</span>}
                         </div>
                         <p className="text-xs text-gray-500 mt-0.5">{s.startTime}〜{s.endTime}</p>
                       </div>
@@ -238,11 +245,28 @@ export default function SchedulePage() {
               </div>
               <div>
                 <label className="form-label">現場 *</label>
-                <select value={form.siteId} onChange={e => setForm(f => ({ ...f, siteId: e.target.value }))} className="form-input" required>
+                <select value={form.siteId} onChange={e => handleSiteChange(e.target.value)} className="form-input" required>
                   <option value="">選択してください</option>
                   {sites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
+              {form.siteId && (
+                <div>
+                  <label className="form-label">契約（任意）</label>
+                  {siteContracts.length > 0 ? (
+                    <select value={form.contractId} onChange={e => setForm(f => ({ ...f, contractId: e.target.value }))} className="form-input">
+                      <option value="">紐付けなし</option>
+                      {siteContracts.map((c: any) => (
+                        <option key={c.id} value={c.id}>
+                          {c.contractNumber} — {c.clientName}（日勤¥{(c.unitPriceDay ?? c.unitPrice).toLocaleString()}）
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className="text-xs text-gray-400 py-2">この現場の有効な契約がありません</p>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="form-label">開始時間 *</label>

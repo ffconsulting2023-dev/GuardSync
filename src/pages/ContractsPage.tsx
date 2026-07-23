@@ -4,18 +4,14 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 import { format } from 'date-fns'
+import { CONTRACT_STATUS } from '../lib/constants'
 
-const STATUS_LABELS: Record<string, { label: string; className: string }> = {
-  DRAFT:     { label: '下書き',   className: 'badge-gray' },
-  ACTIVE:    { label: '有効',     className: 'badge-success' },
-  SUSPENDED: { label: '停止中',   className: 'badge-warning' },
-  EXPIRED:   { label: '期限切れ', className: 'badge-danger' },
-  CANCELLED: { label: 'キャンセル', className: 'badge-danger' },
-}
+const STATUS_LABELS = CONTRACT_STATUS
 
 const EMPTY_FORM = {
   siteId: '', contractNumber: '', clientName: '', startDate: '', endDate: '',
   unitPrice: '', guardCount: '1', notes: '',
+  unitPriceDay: '', unitPriceNight: '', unitPriceHolidayDay: '', unitPriceHolidayNight: '',
 }
 
 export default function ContractsPage() {
@@ -38,6 +34,23 @@ export default function ContractsPage() {
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
 
+  // 現場選択時：clientの単価をデフォルト値として自動補完
+  const handleSiteChange = (siteId: string) => {
+    const site = sites.find((s: any) => s.id === siteId)
+    const client = site?.client
+    setForm(f => ({
+      ...f,
+      siteId,
+      clientName: client ? client.name : f.clientName,
+      unitPriceDay: client?.unitPriceDay != null ? String(client.unitPriceDay) : f.unitPriceDay,
+      unitPriceNight: client?.unitPriceNight != null ? String(client.unitPriceNight) : f.unitPriceNight,
+      unitPriceHolidayDay: client?.unitPriceHolidayDay != null ? String(client.unitPriceHolidayDay) : f.unitPriceHolidayDay,
+      unitPriceHolidayNight: client?.unitPriceHolidayNight != null ? String(client.unitPriceHolidayNight) : f.unitPriceHolidayNight,
+      // 旧unitPriceは日勤単価をデフォルトとする
+      unitPrice: client?.unitPriceDay != null ? String(client.unitPriceDay) : f.unitPrice,
+    }))
+  }
+
   return (
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between">
@@ -58,7 +71,7 @@ export default function ContractsPage() {
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">発注元</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">現場</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">期間</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 hidden lg:table-cell">単価</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 hidden lg:table-cell">日勤単価</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">ステータス</th>
               </tr>
             </thead>
@@ -75,7 +88,9 @@ export default function ContractsPage() {
                       {format(new Date(c.startDate), 'yyyy/M/d')} 〜 {c.endDate ? format(new Date(c.endDate), 'yyyy/M/d') : '無期限'}
                     </td>
                     <td className="px-4 py-3 text-right text-gray-800 hidden lg:table-cell">
-                      ¥{c.unitPrice.toLocaleString()} × {c.guardCount}名
+                      {c.unitPriceDay != null
+                        ? `¥${c.unitPriceDay.toLocaleString()} × ${c.guardCount}名`
+                        : `¥${c.unitPrice.toLocaleString()} × ${c.guardCount}名`}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`badge ${STATUS_LABELS[c.status]?.className}`}>{STATUS_LABELS[c.status]?.label}</span>
@@ -98,10 +113,13 @@ export default function ContractsPage() {
             <form onSubmit={e => { e.preventDefault(); createMutation.mutate(form) }} className="p-6 space-y-4">
               <div>
                 <label className="form-label">現場 *</label>
-                <select value={form.siteId} onChange={e => setForm(f => ({ ...f, siteId: e.target.value }))} className="form-input" required>
+                <select value={form.siteId} onChange={e => handleSiteChange(e.target.value)} className="form-input" required>
                   <option value="">選択してください</option>
                   {sites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
+                {form.siteId && sites.find((s: any) => s.id === form.siteId)?.client && (
+                  <p className="text-xs text-blue-600 mt-1">取引先「{sites.find((s: any) => s.id === form.siteId)?.client?.name}」の単価を自動補完しました</p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -123,11 +141,32 @@ export default function ContractsPage() {
                   <input type="date" value={form.endDate} onChange={e => setForm(f => ({ ...f, endDate: e.target.value }))} className="form-input" />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="form-label">単価（円）*</label>
-                  <input type="number" value={form.unitPrice} onChange={e => setForm(f => ({ ...f, unitPrice: e.target.value }))} className="form-input" required min="0" />
+
+              {/* 契約単価（4区分） */}
+              <div>
+                <label className="form-label">契約単価（円）</label>
+                <p className="text-xs text-gray-400 mb-2">現場の取引先単価から自動補完。個別に上書き可能です。</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-gray-500">日勤単価</label>
+                    <input type="number" value={form.unitPriceDay} onChange={e => setForm(f => ({ ...f, unitPriceDay: e.target.value, unitPrice: e.target.value }))} className="form-input" min="0" placeholder="例: 15000" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500">夜勤単価</label>
+                    <input type="number" value={form.unitPriceNight} onChange={e => setForm(f => ({ ...f, unitPriceNight: e.target.value }))} className="form-input" min="0" placeholder="例: 18000" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500">休日日勤単価</label>
+                    <input type="number" value={form.unitPriceHolidayDay} onChange={e => setForm(f => ({ ...f, unitPriceHolidayDay: e.target.value }))} className="form-input" min="0" placeholder="例: 17000" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500">休日夜勤単価</label>
+                    <input type="number" value={form.unitPriceHolidayNight} onChange={e => setForm(f => ({ ...f, unitPriceHolidayNight: e.target.value }))} className="form-input" min="0" placeholder="例: 20000" />
+                  </div>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="form-label">配員数</label>
                   <input type="number" value={form.guardCount} onChange={e => setForm(f => ({ ...f, guardCount: e.target.value }))} className="form-input" min="1" />
