@@ -265,7 +265,7 @@ app.use(helmet({
 // H-3: CORS設定を明示的なオリジンリストに変更
 const ALLOWED_ORIGINS = process.env.NODE_ENV === 'production'
   ? [process.env.APP_URL].filter(Boolean) as string[]
-  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000', 'http://127.0.0.1:5173']
+  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:3000', 'http://127.0.0.1:5173']
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -6818,6 +6818,98 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
   } else {
     res.status(500).json({ error: err.message, stack: err.stack })
   }
+})
+
+// ─────────────────────────────────────────────
+// 管制ボード API（ドラッグ配員用）
+// ─────────────────────────────────────────────
+
+// GET /api/guards/:id/photo - 隊員プロフィール写真（インライン配信）
+app.get('/api/guards/:id/photo', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const doc = await prisma.guardDocument.findFirst({
+    where: { companyId, guardId: req.params.id, docType: 'docPhoto' },
+    orderBy: { createdAt: 'desc' },
+  })
+  if (!doc || !fs.existsSync(doc.filePath)) {
+    res.status(404).json({ error: '写真が登録されていません' }); return
+  }
+  res.setHeader('Content-Type', doc.mimeType)
+  res.setHeader('Cache-Control', 'private, max-age=3600')
+  res.sendFile(path.resolve(doc.filePath))
+})
+
+// GET /api/schedules/dispatch-board?date= - 管制ボード用一括データ
+app.get('/api/schedules/dispatch-board', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { date } = req.query
+  if (!date) { res.status(400).json({ error: 'dateは必須です' }); return }
+
+  const targetDate = new Date(String(date))
+
+  // 当日の全スケジュール
+  const schedules = await prisma.schedule.findMany({
+    where: { companyId, date: targetDate, status: { not: 'CANCELLED' } },
+    include: { guard: true, site: true, contract: true },
+    orderBy: { startTime: 'asc' },
+  })
+  const assignedGuardIds = new Set(schedules.map(s => s.guardId))
+
+  // 全有効隊員
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: true },
+    orderBy: { employeeNumber: 'asc' },
+  })
+
+  // 対象日を含む最新シフトアンケートの回答を取得
+  const survey = await prisma.shiftSurvey.findFirst({
+    where: {
+      companyId,
+      startDate: { lte: targetDate },
+      endDate: { gte: targetDate },
+    },
+    include: {
+      responses: { select: { guardId: true, answers: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  // guardId → survey availability マップ
+  const surveyMap: Record<string, boolean | null> = {}
+  if (survey) {
+    for (const resp of survey.responses) {
+      const answers = resp.answers as Array<{ date: string; available: boolean }>
+      const dateStr = String(date)
+      const answer = answers.find(a => a.date === dateStr)
+      surveyMap[resp.guardId] = answer ? answer.available : null
+    }
+  }
+
+  // 隊員データに写真有無・最寄駅・survey結果を付加
+  const guardsWithMeta = await Promise.all(guards.map(async g => {
+    const hasPhoto = g.docPhoto
+    return {
+      ...g,
+      hasPhoto,
+      isAssigned: assignedGuardIds.has(g.id),
+      surveyAvailable: surveyMap[g.id] ?? null, // true/false/null(未回答)
+    }
+  }))
+
+  // 全有効現場
+  const sites = await prisma.site.findMany({
+    where: { companyId, isActive: true },
+    include: { client: { select: { id: true, name: true } } },
+    orderBy: { name: 'asc' },
+  })
+
+  // 現場ごとにスケジュールをマージ
+  const sitesWithSchedules = sites.map(site => ({
+    ...site,
+    schedules: schedules.filter(s => s.siteId === site.id),
+  }))
+
+  res.json({ guards: guardsWithMeta, sites: sitesWithSchedules, hasSurvey: !!survey })
 })
 
 // 404ハンドラー（APIルート）

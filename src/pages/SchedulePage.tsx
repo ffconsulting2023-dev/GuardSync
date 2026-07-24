@@ -1,7 +1,7 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
-import { format, addDays, subDays, startOfWeek, eachDayOfInterval } from 'date-fns'
+import { format, addDays, subDays } from 'date-fns'
 import { ja } from 'date-fns/locale'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
@@ -9,70 +9,275 @@ import { SCHEDULE_STATUS } from '../lib/constants'
 
 const STATUS_LABELS = SCHEDULE_STATUS
 
+// ─── 隊員アバター（写真 or 頭文字）───────────────────────────
+function GuardAvatar({ guardId, name, hasPhoto, size = 'md' }: {
+  guardId: string; name: string; hasPhoto: boolean; size?: 'sm' | 'md' | 'lg'
+}) {
+  const [src, setSrc] = useState<string | null>(null)
+  const sizeClass = size === 'sm' ? 'w-8 h-8 text-xs' : size === 'lg' ? 'w-14 h-14 text-lg' : 'w-10 h-10 text-sm'
+
+  useEffect(() => {
+    if (!hasPhoto) return
+    const token = localStorage.getItem('token')
+    fetch(`/api/guards/${guardId}/photo`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => {
+      if (!r.ok) return
+      return r.blob()
+    }).then(blob => {
+      if (blob) setSrc(URL.createObjectURL(blob))
+    }).catch(() => {})
+    return () => { if (src) URL.revokeObjectURL(src) }
+  }, [guardId, hasPhoto])
+
+  const initials = name.slice(0, 1)
+
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt={name}
+        className={`${sizeClass} rounded-full object-cover flex-shrink-0 border-2 border-white shadow`}
+      />
+    )
+  }
+  return (
+    <div className={`${sizeClass} rounded-full bg-[#1e3a5f] text-white flex items-center justify-center flex-shrink-0 font-bold shadow`}>
+      {initials}
+    </div>
+  )
+}
+
+// ─── 配員確認モーダル ─────────────────────────────────────────
+interface AssignModalProps {
+  guard: any
+  site: any
+  date: string
+  contracts: any[]
+  onClose: () => void
+  onConfirm: (data: { startTime: string; endTime: string; contractId: string }) => void
+  isPending: boolean
+}
+
+function AssignModal({ guard, site, date, contracts, onClose, onConfirm, isPending }: AssignModalProps) {
+  const [startTime, setStartTime] = useState('09:00')
+  const [endTime, setEndTime] = useState('17:00')
+  const [contractId, setContractId] = useState('')
+
+  // 現場に紐づく有効契約
+  const siteContracts = contracts.filter((c: any) => c.siteId === site.id && c.status === 'ACTIVE')
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
+          <GuardAvatar guardId={guard.id} name={guard.name} hasPhoto={guard.hasPhoto} size="md" />
+          <div>
+            <p className="font-semibold text-gray-800">{guard.name}</p>
+            <p className="text-xs text-gray-400">{guard.nearestStation1 && `${guard.nearestStation1}駅`}</p>
+          </div>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <div className="bg-blue-50 rounded-lg px-3 py-2 text-sm">
+            <span className="text-blue-600 font-medium">📍 {site.name}</span>
+            <span className="text-gray-400 mx-2">›</span>
+            <span className="text-gray-600">{format(new Date(date), 'M月d日(E)', { locale: ja })}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="form-label">開始時間 *</label>
+              <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="form-input" />
+            </div>
+            <div>
+              <label className="form-label">終了時間 *</label>
+              <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="form-input" />
+            </div>
+          </div>
+          {siteContracts.length > 0 && (
+            <div>
+              <label className="form-label">契約（任意）</label>
+              <select value={contractId} onChange={e => setContractId(e.target.value)} className="form-input">
+                <option value="">紐付けなし</option>
+                {siteContracts.map((c: any) => (
+                  <option key={c.id} value={c.id}>
+                    {c.contractNumber} — {c.clientName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+        <div className="px-6 pb-5 flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">キャンセル</button>
+          <button
+            onClick={() => onConfirm({ startTime, endTime, contractId })}
+            disabled={isPending}
+            className="btn-primary flex-1 disabled:opacity-50"
+          >
+            {isPending ? '配員中...' : '配員する'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── 隊員カード（ドラッグ対象）──────────────────────────────
+function GuardCard({ guard, onDragStart }: { guard: any; onDragStart: (g: any) => void }) {
+  const surveyBadge = guard.surveyAvailable === true
+    ? <span className="text-xs text-green-600 font-medium">◎ 勤務可</span>
+    : guard.surveyAvailable === false
+    ? <span className="text-xs text-red-400">✕ 勤務不可</span>
+    : <span className="text-xs text-gray-300">— 未回答</span>
+
+  return (
+    <div
+      draggable
+      onDragStart={e => {
+        e.dataTransfer.setData('guardId', guard.id)
+        e.dataTransfer.effectAllowed = 'copy'
+        onDragStart(guard)
+      }}
+      className={`flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-grab active:cursor-grabbing border transition-all select-none
+        ${guard.isAssigned
+          ? 'bg-gray-50 border-gray-100 opacity-50'
+          : 'bg-white border-gray-200 hover:border-[#1e3a5f]/30 hover:shadow-md'
+        }`}
+    >
+      <GuardAvatar guardId={guard.id} name={guard.name} hasPhoto={guard.hasPhoto} size="md" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <p className="font-medium text-gray-800 text-sm truncate">{guard.name}</p>
+          {guard.isAssigned && <span className="text-xs text-blue-500 flex-shrink-0">配員済</span>}
+        </div>
+        <p className="text-xs text-gray-400 truncate">
+          {guard.nearestStation1 ? `${guard.nearestStation1}駅` : ''}
+          {guard.line1 ? ` · ${guard.line1}` : ''}
+          {!guard.nearestStation1 && !guard.line1 ? '最寄駅未設定' : ''}
+        </p>
+        <div className="mt-0.5">{surveyBadge}</div>
+      </div>
+    </div>
+  )
+}
+
+// ─── 現場カード（ドロップ対象）──────────────────────────────
+function SiteDropZone({
+  site, onDrop, onCancelSchedule, canEdit,
+}: {
+  site: any
+  onDrop: (siteId: string) => void
+  onCancelSchedule: (scheduleId: string) => void
+  canEdit: boolean
+}) {
+  const [isOver, setIsOver] = useState(false)
+
+  return (
+    <div
+      className={`card p-0 overflow-hidden transition-all ${isOver ? 'ring-2 ring-[#1e3a5f] shadow-lg' : ''}`}
+      onDragOver={e => { e.preventDefault(); setIsOver(true) }}
+      onDragLeave={() => setIsOver(false)}
+      onDrop={e => {
+        e.preventDefault()
+        setIsOver(false)
+        onDrop(site.id)
+      }}
+    >
+      {/* ヘッダー */}
+      <div className={`px-4 py-2.5 border-b border-gray-100 flex items-center justify-between transition-colors ${isOver ? 'bg-[#1e3a5f]/10' : 'bg-[#1e3a5f]/5'}`}>
+        <div>
+          <p className="text-sm font-semibold text-[#1e3a5f]">📍 {site.name}</p>
+          <p className="text-xs text-gray-400">{site.address}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-xs text-gray-500">
+            {site.schedules.length}名 / {site.requiredCount}名必要
+          </p>
+          {site.schedules.length < site.requiredCount && (
+            <span className="text-xs text-orange-500 font-medium">要員不足</span>
+          )}
+          {site.schedules.length >= site.requiredCount && (
+            <span className="text-xs text-green-600 font-medium">配員完了</span>
+          )}
+        </div>
+      </div>
+
+      {/* 配員済み隊員 */}
+      <div className="px-3 py-2 min-h-[56px]">
+        {site.schedules.length === 0 ? (
+          <p className={`text-xs text-center py-3 transition-colors ${isOver ? 'text-[#1e3a5f] font-medium' : 'text-gray-300'}`}>
+            {isOver ? '↓ ここにドロップ' : '配員なし — 隊員をドロップして配員'}
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2 py-1">
+            {site.schedules.map((s: any) => (
+              <div key={s.id} className={`flex items-center gap-1.5 bg-white border rounded-lg px-2 py-1 text-xs shadow-sm
+                ${s.status === 'CONFIRMED' ? 'border-green-300' : 'border-gray-200'}`}>
+                <GuardAvatar guardId={s.guard.id} name={s.guard.name} hasPhoto={false} size="sm" />
+                <div>
+                  <p className="font-medium text-gray-700">{s.guard.name}</p>
+                  <p className="text-gray-400">{s.startTime}〜{s.endTime}</p>
+                </div>
+                <span className={`badge ml-1 ${STATUS_LABELS[s.status]?.className}`}>{STATUS_LABELS[s.status]?.label}</span>
+                {canEdit && s.status !== 'CANCELLED' && (
+                  <button
+                    onClick={() => { if (window.confirm(`${s.guard.name}の配員をキャンセルしますか？`)) onCancelSchedule(s.id) }}
+                    className="text-red-300 hover:text-red-500 ml-1"
+                    title="キャンセル"
+                  >✕</button>
+                )}
+              </div>
+            ))}
+            {isOver && (
+              <div className="flex items-center gap-1 border-2 border-dashed border-[#1e3a5f]/40 rounded-lg px-3 py-1.5 text-xs text-[#1e3a5f]">
+                ＋ 追加する
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── メインページ ─────────────────────────────────────────────
 export default function SchedulePage() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const [viewDate, setViewDate] = useState(new Date())
-  const [view, setView] = useState<'day' | 'week'>('day')
-  const [showForm, setShowForm] = useState(false)
-  const [showAvailable, setShowAvailable] = useState(false)
-  const [form, setForm] = useState({
-    guardId: '', siteId: '', contractId: '',
-    date: format(new Date(), 'yyyy-MM-dd'),
-    startTime: '09:00', endTime: '17:00', notes: '',
-  })
+  const [surveyFilter, setSurveyFilter] = useState<'all' | 'available' | 'unavailable' | 'noAnswer'>('all')
+  const [draggedGuard, setDraggedGuard] = useState<any>(null)
+  const [assignTarget, setAssignTarget] = useState<{ guard: any; site: any } | null>(null)
 
-  const dateFrom = view === 'week'
-    ? format(startOfWeek(viewDate, { weekStartsOn: 1 }), 'yyyy-MM-dd')
-    : format(viewDate, 'yyyy-MM-dd')
-  const dateTo = view === 'week'
-    ? format(addDays(startOfWeek(viewDate, { weekStartsOn: 1 }), 6), 'yyyy-MM-dd')
-    : format(viewDate, 'yyyy-MM-dd')
+  const dateStr = format(viewDate, 'yyyy-MM-dd')
+  const canEdit = hasRole(user, 'ADMIN', 'MANAGER', 'OPERATOR')
 
-  const { data: schedules = [], isLoading } = useQuery({
-    queryKey: ['schedules', dateFrom, dateTo],
-    queryFn: () => api.get(`/schedules?from=${dateFrom}&to=${dateTo}`).then(r => r.data),
+  // 管制ボードデータ（隊員＋現場＋当日スケジュール）
+  const { data: board, isLoading } = useQuery({
+    queryKey: ['dispatch-board', dateStr],
+    queryFn: () => api.get(`/schedules/dispatch-board?date=${dateStr}`).then(r => r.data),
     refetchInterval: 30000,
   })
 
-  const { data: guards = [] } = useQuery({ queryKey: ['guards'], queryFn: () => api.get('/guards?isActive=true').then(r => r.data) })
-  const { data: sites = [] } = useQuery({ queryKey: ['sites'], queryFn: () => api.get('/sites').then(r => r.data) })
-  const { data: allContracts = [] } = useQuery({ queryKey: ['contracts'], queryFn: () => api.get('/contracts').then(r => r.data) })
-
-  const { data: availableGuards = [] } = useQuery({
-    queryKey: ['available-guards', form.date],
-    queryFn: () => api.get(`/schedules/available-guards?date=${form.date}`).then(r => r.data),
-    enabled: showForm,
+  // 契約一覧（ドロップ時の契約選択に使用）
+  const { data: contracts = [] } = useQuery({
+    queryKey: ['contracts'],
+    queryFn: () => api.get('/contracts').then(r => r.data),
   })
-
-  // 選択中の現場に紐づく有効な契約
-  const siteContracts = form.siteId
-    ? allContracts.filter((c: any) => c.siteId === form.siteId && c.status === 'ACTIVE')
-    : []
 
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/schedules', data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['schedules'] }); setShowForm(false); resetForm() },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dispatch-board', dateStr] })
+      setAssignTarget(null)
+      setDraggedGuard(null)
+    },
   })
 
   const cancelMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/schedules/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dispatch-board', dateStr] }),
   })
-
-  const reminderMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/schedules/${id}/send-reminder`),
-  })
-
-  const resetForm = () => setForm({ guardId: '', siteId: '', contractId: '', date: format(new Date(), 'yyyy-MM-dd'), startTime: '09:00', endTime: '17:00', notes: '' })
-
-  const handleSiteChange = (siteId: string) => {
-    setForm(f => ({ ...f, siteId, contractId: '' }))
-  }
-
-  const weekDays = view === 'week'
-    ? eachDayOfInterval({ start: new Date(dateFrom), end: new Date(dateTo) })
-    : [viewDate]
 
   // 月間CSVダウンロード
   const downloadMonthlyCSV = async () => {
@@ -90,204 +295,138 @@ export default function SchedulePage() {
     URL.revokeObjectURL(url)
   }
 
-  const canEdit = hasRole(user, 'ADMIN', 'MANAGER', 'OPERATOR')
+  const guards: any[] = board?.guards ?? []
+  const sites: any[] = board?.sites ?? []
+  const hasSurvey: boolean = board?.hasSurvey ?? false
 
-  // サイト別グループ
-  const bySite = schedules.reduce((acc: any, s: any) => {
-    const key = s.siteId
-    if (!acc[key]) acc[key] = { site: s.site, schedules: [] }
-    acc[key].schedules.push(s)
-    return acc
-  }, {})
+  // フィルタ適用
+  const filteredGuards = guards.filter(g => {
+    if (surveyFilter === 'available') return g.surveyAvailable === true
+    if (surveyFilter === 'unavailable') return g.surveyAvailable === false
+    if (surveyFilter === 'noAnswer') return g.surveyAvailable === null
+    return true
+  })
+
+  const handleDrop = (siteId: string) => {
+    if (!draggedGuard) return
+    const site = sites.find(s => s.id === siteId)
+    if (!site) return
+    setAssignTarget({ guard: draggedGuard, site })
+  }
+
+  const handleAssignConfirm = (data: { startTime: string; endTime: string; contractId: string }) => {
+    if (!assignTarget) return
+    createMutation.mutate({
+      guardId: assignTarget.guard.id,
+      siteId: assignTarget.site.id,
+      date: dateStr,
+      startTime: data.startTime,
+      endTime: data.endTime,
+      contractId: data.contractId || undefined,
+    })
+  }
 
   return (
-    <div className="p-4 md:p-6 space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <h1 className="text-xl font-bold text-gray-800">管制・配員</h1>
-        <div className="flex gap-2">
+    <div className="flex flex-col h-full" style={{ height: 'calc(100vh - 56px)' }}>
+      {/* ─── ヘッダー ─── */}
+      <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-3 bg-white border-b border-gray-100">
+        <h1 className="text-lg font-bold text-gray-800">管制・配員ボード</h1>
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* 日付ナビ */}
+          <button onClick={() => setViewDate(d => subDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">◀</button>
+          <span className="text-sm font-medium text-gray-700 min-w-32 text-center">
+            {format(viewDate, 'yyyy年M月d日(E)', { locale: ja })}
+          </span>
+          <button onClick={() => setViewDate(d => addDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">▶</button>
+          <button onClick={() => setViewDate(new Date())} className="text-xs text-blue-600 hover:underline">今日</button>
           <button onClick={downloadMonthlyCSV} className="btn-secondary text-sm">📥 月間CSV</button>
-          {canEdit && (
-            <button onClick={() => { resetForm(); setShowForm(true) }} className="btn-primary text-sm">+ 配員追加</button>
-          )}
         </div>
       </div>
 
-      {/* ナビゲーション */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <div className="flex rounded-lg border border-gray-200 overflow-hidden">
-          <button onClick={() => setView('day')} className={`px-3 py-1.5 text-sm ${view === 'day' ? 'bg-[#1e3a5f] text-white' : 'bg-white text-gray-600'}`}>日</button>
-          <button onClick={() => setView('week')} className={`px-3 py-1.5 text-sm ${view === 'week' ? 'bg-[#1e3a5f] text-white' : 'bg-white text-gray-600'}`}>週</button>
-        </div>
-        <button onClick={() => setViewDate(d => view === 'week' ? subDays(d, 7) : subDays(d, 1))} className="btn-secondary px-3 py-1.5 text-sm">◀</button>
-        <span className="text-sm font-medium text-gray-700 min-w-36 text-center">
-          {view === 'week'
-            ? `${format(new Date(dateFrom), 'M/d(E)', { locale: ja })} 〜 ${format(new Date(dateTo), 'M/d(E)', { locale: ja })}`
-            : format(viewDate, 'yyyy年M月d日(E)', { locale: ja })
-          }
-        </span>
-        <button onClick={() => setViewDate(d => view === 'week' ? addDays(d, 7) : addDays(d, 1))} className="btn-secondary px-3 py-1.5 text-sm">▶</button>
-        <button onClick={() => setViewDate(new Date())} className="text-xs text-blue-600 hover:underline">今日</button>
-        <span className="ml-auto text-sm text-gray-500">{schedules.length}件</span>
-      </div>
-
+      {/* ─── メインコンテンツ（左右分割）─── */}
       {isLoading ? (
-        <div className="text-center py-12 text-gray-400">読み込み中...</div>
-      ) : view === 'day' ? (
-        // 日表示：現場別グループ
-        <div className="space-y-3">
-          {Object.keys(bySite).length === 0 ? (
-            <div className="card text-center py-12 text-gray-400">この日の配員はありません</div>
-          ) : (
-            Object.values(bySite).map((group: any) => (
-              <div key={group.site.id} className="card p-0 overflow-hidden">
-                <div className="px-4 py-2.5 bg-[#1e3a5f]/5 border-b border-gray-100">
-                  <p className="text-sm font-semibold text-[#1e3a5f]">📍 {group.site.name}</p>
-                  <p className="text-xs text-gray-400">{group.site.address}</p>
-                </div>
-                <div className="divide-y divide-gray-50">
-                  {group.schedules.map((s: any) => (
-                    <div key={s.id} className="px-4 py-3 flex items-center gap-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="font-medium text-gray-800 text-sm">{s.guard?.name}</p>
-                          <span className="text-xs text-gray-400">{s.guard?.employeeNumber}</span>
-                          <span className={`badge ${STATUS_LABELS[s.status]?.className}`}>{STATUS_LABELS[s.status]?.label}</span>
-                          {s.contract && <span className="text-xs text-blue-500">#{s.contract.contractNumber}</span>}
-                        </div>
-                        <p className="text-xs text-gray-500 mt-0.5">{s.startTime}〜{s.endTime}</p>
-                      </div>
-                      {s.attendance && (
-                        <div className="text-right">
-                          <span className={`badge text-xs ${s.attendance.status === 'COMPLETED' ? 'badge-success' : s.attendance.status === 'CLOCKED_IN' ? 'badge-info' : 'badge-gray'}`}>
-                            {s.attendance.status === 'COMPLETED' ? '退勤済' : s.attendance.status === 'CLOCKED_IN' ? '出勤中' : '未打刻'}
-                          </span>
-                        </div>
-                      )}
-                      {canEdit && s.status !== 'CANCELLED' && (
-                        <div className="flex gap-2 items-center">
-                          <button
-                            onClick={() => reminderMutation.mutate(s.id)}
-                            disabled={reminderMutation.isPending}
-                            title="前日確認メール送信"
-                            className="text-blue-400 hover:text-blue-600 text-xs"
-                          >📨</button>
-                          <button onClick={() => { if (window.confirm('キャンセルしますか？')) cancelMutation.mutate(s.id) }} className="text-red-400 hover:text-red-600 text-xs">✕</button>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
+        <div className="flex-1 flex items-center justify-center text-gray-400">読み込み中...</div>
       ) : (
-        // 週表示
-        <div className="grid grid-cols-7 gap-1 overflow-x-auto">
-          {weekDays.map(day => {
-            const dayStr = format(day, 'yyyy-MM-dd')
-            const daySchedules = schedules.filter((s: any) => s.date.split('T')[0] === dayStr)
-            const isToday = dayStr === format(new Date(), 'yyyy-MM-dd')
-            return (
-              <div key={dayStr} className={`bg-white rounded-lg border min-w-[80px] ${isToday ? 'border-[#1e3a5f]' : 'border-gray-100'} overflow-hidden`}>
-                <div className={`px-1 py-1.5 text-center text-xs font-medium ${isToday ? 'bg-[#1e3a5f] text-white' : 'bg-gray-50 text-gray-600'}`}>
-                  <p>{format(day, 'M/d', { locale: ja })}</p>
-                  <p>{format(day, '(E)', { locale: ja })}</p>
-                  {daySchedules.length > 0 && <span className="bg-white/30 rounded px-1">{daySchedules.length}件</span>}
-                </div>
-                <div className="p-1 space-y-1 min-h-20">
-                  {daySchedules.map((s: any) => (
-                    <div key={s.id} className={`text-xs rounded px-1 py-0.5 truncate ${
-                      s.attendance?.status === 'COMPLETED' ? 'bg-green-100 text-green-800' :
-                      s.attendance?.status === 'CLOCKED_IN' ? 'bg-blue-100 text-blue-800' :
-                      'bg-gray-100 text-gray-700'
-                    }`}>
-                      {s.guard?.name?.slice(0, 4)}
-                    </div>
-                  ))}
-                  {daySchedules.length === 0 && <div className="text-xs text-gray-200 text-center pt-3">—</div>}
-                </div>
+        <div className="flex flex-1 overflow-hidden">
+
+          {/* ─── 左パネル：隊員リスト ─── */}
+          <div className="w-64 flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50">
+            <div className="px-3 py-2.5 border-b border-gray-100 bg-white">
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-xs font-semibold text-gray-600">隊員一覧</p>
+                <span className="text-xs text-gray-400">{filteredGuards.length}名</span>
               </div>
-            )
-          })}
+              {hasSurvey && (
+                <select
+                  value={surveyFilter}
+                  onChange={e => setSurveyFilter(e.target.value as any)}
+                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-600 focus:outline-none focus:border-[#1e3a5f]"
+                >
+                  <option value="all">シフト調査：全員</option>
+                  <option value="available">◎ 勤務可のみ</option>
+                  <option value="unavailable">✕ 勤務不可のみ</option>
+                  <option value="noAnswer">— 未回答のみ</option>
+                </select>
+              )}
+              {!hasSurvey && (
+                <p className="text-xs text-gray-300">この日のシフト調査なし</p>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+              {filteredGuards.length === 0 ? (
+                <p className="text-xs text-gray-300 text-center py-8">隊員なし</p>
+              ) : (
+                filteredGuards.map(g => (
+                  <GuardCard key={g.id} guard={g} onDragStart={setDraggedGuard} />
+                ))
+              )}
+            </div>
+
+            {/* 凡例 */}
+            <div className="px-3 py-2 border-t border-gray-100 bg-white">
+              <p className="text-xs text-gray-400 mb-1">カードをドラッグして現場へ配員</p>
+              <div className="space-y-0.5">
+                <p className="text-xs text-green-600">◎ 勤務可（シフト調査回答）</p>
+                <p className="text-xs text-red-400">✕ 勤務不可</p>
+                <p className="text-xs text-gray-300">— 未回答 / 調査対象外</p>
+              </div>
+            </div>
+          </div>
+
+          {/* ─── 右パネル：配員ボード ─── */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {sites.length === 0 ? (
+              <div className="text-center py-20 text-gray-300">
+                <p className="text-4xl mb-3">📋</p>
+                <p className="text-sm">現場が登録されていません</p>
+              </div>
+            ) : (
+              sites.map(site => (
+                <SiteDropZone
+                  key={site.id}
+                  site={site}
+                  onDrop={handleDrop}
+                  onCancelSchedule={id => cancelMutation.mutate(id)}
+                  canEdit={canEdit}
+                />
+              ))
+            )}
+          </div>
         </div>
       )}
 
-      {/* 配員追加モーダル */}
-      {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-              <h2 className="font-semibold text-gray-800">配員追加</h2>
-              <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600">✕</button>
-            </div>
-            <form onSubmit={(e) => { e.preventDefault(); createMutation.mutate(form) }} className="p-6 space-y-4">
-              <div>
-                <label className="form-label">日付 *</label>
-                <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value, guardId: '' }))} className="form-input" required />
-              </div>
-              <div>
-                <label className="form-label">
-                  隊員 *
-                  {availableGuards.length > 0 && <span className="ml-2 text-xs text-green-600">（{availableGuards.length}名空き）</span>}
-                </label>
-                <select value={form.guardId} onChange={e => setForm(f => ({ ...f, guardId: e.target.value }))} className="form-input" required>
-                  <option value="">選択してください</option>
-                  <optgroup label={`空き隊員（${availableGuards.length}名）`}>
-                    {availableGuards.map((g: any) => (
-                      <option key={g.id} value={g.id}>{g.name} ({g.employeeNumber})</option>
-                    ))}
-                  </optgroup>
-                  <optgroup label="全隊員">
-                    {guards.map((g: any) => <option key={g.id} value={g.id}>{g.name} ({g.employeeNumber})</option>)}
-                  </optgroup>
-                </select>
-              </div>
-              <div>
-                <label className="form-label">現場 *</label>
-                <select value={form.siteId} onChange={e => handleSiteChange(e.target.value)} className="form-input" required>
-                  <option value="">選択してください</option>
-                  {sites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
-              {form.siteId && (
-                <div>
-                  <label className="form-label">契約（任意）</label>
-                  {siteContracts.length > 0 ? (
-                    <select value={form.contractId} onChange={e => setForm(f => ({ ...f, contractId: e.target.value }))} className="form-input">
-                      <option value="">紐付けなし</option>
-                      {siteContracts.map((c: any) => (
-                        <option key={c.id} value={c.id}>
-                          {c.contractNumber} — {c.clientName}（日勤¥{(c.unitPriceDay ?? c.unitPrice).toLocaleString()}）
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <p className="text-xs text-gray-400 py-2">この現場の有効な契約がありません</p>
-                  )}
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="form-label">開始時間 *</label>
-                  <input type="time" value={form.startTime} onChange={e => setForm(f => ({ ...f, startTime: e.target.value }))} className="form-input" required />
-                </div>
-                <div>
-                  <label className="form-label">終了時間 *</label>
-                  <input type="time" value={form.endTime} onChange={e => setForm(f => ({ ...f, endTime: e.target.value }))} className="form-input" required />
-                </div>
-              </div>
-              <div>
-                <label className="form-label">メモ</label>
-                <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className="form-input" rows={2} />
-              </div>
-              <div className="flex gap-3">
-                <button type="button" onClick={() => setShowForm(false)} className="btn-secondary flex-1">キャンセル</button>
-                <button type="submit" disabled={createMutation.isPending} className="btn-primary flex-1 disabled:opacity-50">追加</button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {/* ─── 配員確認モーダル ─── */}
+      {assignTarget && (
+        <AssignModal
+          guard={assignTarget.guard}
+          site={assignTarget.site}
+          date={dateStr}
+          contracts={contracts}
+          onClose={() => { setAssignTarget(null); setDraggedGuard(null) }}
+          onConfirm={handleAssignConfirm}
+          isPending={createMutation.isPending}
+        />
       )}
     </div>
   )
