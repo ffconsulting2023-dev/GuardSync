@@ -9,6 +9,49 @@ import { SCHEDULE_STATUS } from '../lib/constants'
 
 const STATUS_LABELS = SCHEDULE_STATUS
 
+// 警備業務資格の略語変換マップ
+const CERT_ABBR: Record<string, string> = {
+  // 交通誘導
+  '交通誘導警備業務検定1級': '交通1級',
+  '交通誘導警備業務検定2級': '交通2級',
+  '交通誘導1級': '交通1級',
+  '交通誘導2級': '交通2級',
+  // 施設警備
+  '施設警備業務検定1級': '施設1級',
+  '施設警備業務検定2級': '施設2級',
+  '施設警備1級': '施設1級',
+  '施設警備2級': '施設2級',
+  // 雑踏警備
+  '雑踏警備業務検定1級': '雑踏1級',
+  '雑踏警備業務検定2級': '雑踏2級',
+  '雑踏警備1級': '雑踏1級',
+  '雑踏警備2級': '雑踏2級',
+  // 貴重品運搬
+  '貴重品運搬警備業務検定1級': '貴重1級',
+  '貴重品運搬警備業務検定2級': '貴重2級',
+  '貴重品運搬1級': '貴重1級',
+  '貴重品運搬2級': '貴重2級',
+  // 核燃料
+  '核燃料物質等危険物運搬警備業務検定1級': '核燃1級',
+  '核燃料物質等危険物運搬警備業務検定2級': '核燃2級',
+  // 空港保安
+  '空港保安警備業務検定1級': '空港1級',
+  '空港保安警備業務検定2級': '空港2級',
+  '空港保安1級': '空港1級',
+  '空港保安2級': '空港2級',
+  // 機械警備
+  '機械警備業務管理者': '機械警備',
+  // その他よくある表記
+  '警備業務検定1級': '検定1級',
+  '警備業務検定2級': '検定2級',
+}
+
+function abbreviateCert(cert: string): string {
+  if (CERT_ABBR[cert]) return CERT_ABBR[cert]
+  // 部分一致フォールバック：長すぎる場合は先頭4文字+…
+  return cert.length > 6 ? cert.slice(0, 5) + '…' : cert
+}
+
 // ─── 隊員アバター（写真 or 頭文字）───────────────────────────
 function GuardAvatar({ guardId, name, hasPhoto, size = 'md' }: {
   guardId: string; name: string; hasPhoto: boolean; size?: 'sm' | 'md' | 'lg'
@@ -199,8 +242,8 @@ function GuardCardHorizontal({ guard, onDragStart }: { guard: any; onDragStart: 
         {guard.nearestStation1 ? `${guard.nearestStation1}駅` : '—'}
       </p>
       {hasCert && (
-        <span className="text-[10px] text-red-500 font-medium leading-tight text-center">
-          {guard.certifications[0]}
+        <span className="text-[10px] text-red-500 font-medium leading-tight text-center" title={guard.certifications.join(', ')}>
+          {guard.certifications.slice(0, 2).map(abbreviateCert).join(' ')}
         </span>
       )}
       {guard.isAssigned && <span className="text-[10px] text-blue-500">配員済</span>}
