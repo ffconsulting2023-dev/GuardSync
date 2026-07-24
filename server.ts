@@ -630,6 +630,9 @@ const guardSchema = z.object({
   employmentType: z.enum(['FULL_TIME', 'PART_TIME', 'CONTRACT', 'DISPATCH']).optional(),
   dailyPayEnabled: z.boolean().optional(),
   lineWorksId: z.string().optional(),
+  // 入退社
+  joinedAt: z.string().optional(),
+  leftAt: z.string().optional(),
   // 住所（構造化）
   postalCode: z.string().optional(),
   prefecture: z.string().optional(),
@@ -721,7 +724,13 @@ app.post('/api/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (re
   if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
 
   const guard = await prisma.guard.create({
-    data: { ...parsed.data, companyId, birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined },
+    data: {
+      ...parsed.data,
+      companyId,
+      birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined,
+      joinedAt: parsed.data.joinedAt ? new Date(parsed.data.joinedAt) : undefined,
+      leftAt: parsed.data.leftAt ? new Date(parsed.data.leftAt) : undefined,
+    },
   })
   res.status(201).json(guard)
 })
@@ -737,7 +746,12 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   const updated = await prisma.guard.updateMany({
     where: { id: req.params.id, companyId },
-    data: { ...parsed.data, birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined },
+    data: {
+      ...parsed.data,
+      birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined,
+      joinedAt: parsed.data.joinedAt !== undefined ? (parsed.data.joinedAt ? new Date(parsed.data.joinedAt) : null) : undefined,
+      leftAt: parsed.data.leftAt !== undefined ? (parsed.data.leftAt ? new Date(parsed.data.leftAt) : null) : undefined,
+    },
   })
   if (updated.count === 0) { res.status(404).json({ error: '隊員が見つかりません' }); return }
   const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
