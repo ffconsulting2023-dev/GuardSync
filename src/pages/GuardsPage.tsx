@@ -4,34 +4,17 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const EMPLOYMENT_LABELS: Record<string, string> = {
-  FULL_TIME: '正社員', PART_TIME: 'アルバイト', CONTRACT: '契約社員', DISPATCH: '派遣',
-}
+import {
+  EMPLOYMENT_TYPE, GENDER, PREFECTURES, GUARD_CLASSES, SKILL_OPTIONS, PAY_TYPE,
+} from '../lib/constants'
 
-const GENDER_LABELS: Record<string, string> = { MALE: '男性', FEMALE: '女性', OTHER: 'その他' }
-
-const PREFECTURES = [
-  '北海道','青森県','岩手県','宮城県','秋田県','山形県','福島県',
-  '茨城県','栃木県','群馬県','埼玉県','千葉県','東京都','神奈川県',
-  '新潟県','富山県','石川県','福井県','山梨県','長野県',
-  '岐阜県','静岡県','愛知県','三重県',
-  '滋賀県','京都府','大阪府','兵庫県','奈良県','和歌山県',
-  '鳥取県','島根県','岡山県','広島県','山口県',
-  '徳島県','香川県','愛媛県','高知県',
-  '福岡県','佐賀県','長崎県','熊本県','大分県','宮崎県','鹿児島県','沖縄県',
-]
-
-const GUARD_CLASSES = ['S', 'A', 'B', 'C']
-const SKILL_OPTIONS = ['隊長', '方交', '交通誘導', '施設警備', '雑踏警備', '身辺警護', '運搬警備']
-const PAY_TYPES = [
-  { value: 'DAY', label: '日給' },
-  { value: 'MONTH', label: '月給' },
-  { value: 'HOUR', label: '時給' },
-]
+const EMPLOYMENT_LABELS = EMPLOYMENT_TYPE
+const GENDER_LABELS = GENDER
+const PAY_TYPES = PAY_TYPE
 
 interface GuardFormData {
   employeeNumber: string; name: string; nameKana: string; birthDate: string; gender: string
-  phone: string; email: string; address: string; employmentType: string; certifications: string
+  phone: string; email: string; address: string; employmentType: string; certifications: string[]
   dailyPayEnabled: boolean; lineWorksId: string
   // 基本情報拡張
   guardClass: string; skills: string[]; nationality: string; financialIssues: boolean
@@ -65,7 +48,7 @@ interface GuardFormData {
 
 const EMPTY_FORM: GuardFormData = {
   employeeNumber: '', name: '', nameKana: '', birthDate: '', gender: 'MALE',
-  phone: '', email: '', address: '', employmentType: 'PART_TIME', certifications: '', dailyPayEnabled: false,
+  phone: '', email: '', address: '', employmentType: 'PART_TIME', certifications: [], dailyPayEnabled: false,
   lineWorksId: '',
   guardClass: '', skills: [], nationality: '', financialIssues: false, mbti: '', dormitory: '', notes: '',
   postalCode: '', prefecture: '', city: '', addressDetail: '', buildingName: '',
@@ -96,6 +79,9 @@ export default function GuardsPage() {
   const [activeSection, setActiveSection] = useState(0)
   const [ngGuardInput, setNgGuardInput] = useState('')
   const [ngCompanyInput, setNgCompanyInput] = useState('')
+  const [compatTargetId, setCompatTargetId] = useState('')
+  const [compatType, setCompatType] = useState<'GOOD' | 'BAD' | 'NG'>('GOOD')
+  const [compatReason, setCompatReason] = useState('')
 
   const { data: guards = [], isLoading } = useQuery({
     queryKey: ['guards', search],
@@ -117,6 +103,64 @@ export default function GuardsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['guards'] }),
   })
 
+  // 相性データ
+  const { data: compatibilities = [] } = useQuery({
+    queryKey: ['guard-compatibility', editTarget?.id],
+    queryFn: () => api.get(`/guards/${editTarget.id}/compatibility`).then(r => r.data),
+    enabled: !!editTarget?.id,
+  })
+
+  const addCompatMutation = useMutation({
+    mutationFn: ({ guardId, data }: { guardId: string; data: any }) =>
+      api.post(`/guards/${guardId}/compatibility`, data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['guard-compatibility'] }); setCompatTargetId(''); setCompatReason('') },
+  })
+
+  const deleteCompatMutation = useMutation({
+    mutationFn: ({ guardId, targetId }: { guardId: string; targetId: string }) =>
+      api.delete(`/guards/${guardId}/compatibility/${targetId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['guard-compatibility'] }),
+  })
+
+  // 書類ファイルデータ
+  const { data: guardDocuments = [] } = useQuery({
+    queryKey: ['guard-documents', editTarget?.id],
+    queryFn: () => api.get(`/guards/${editTarget.id}/documents`).then(r => r.data),
+    enabled: !!editTarget?.id,
+  })
+
+  const uploadDocMutation = useMutation({
+    mutationFn: ({ guardId, formData }: { guardId: string; formData: FormData }) =>
+      api.post(`/guards/${guardId}/documents/upload`, formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['guard-documents'] })
+      qc.invalidateQueries({ queryKey: ['guards'] })
+    },
+  })
+
+  const deleteDocMutation = useMutation({
+    mutationFn: (docId: string) => api.delete(`/guards/documents/${docId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['guard-documents'] }),
+  })
+
+  const handleDocUpload = (docType: string) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.pdf,.jpg,.jpeg,.png,.gif,.webp'
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0]
+      if (!file || !editTarget) return
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('docType', docType)
+      uploadDocMutation.mutate({ guardId: editTarget.id, formData: fd })
+    }
+    input.click()
+  }
+
+  const getDocForType = (docType: string) =>
+    guardDocuments.find((d: any) => d.docType === docType)
+
   const openEdit = (guard: any) => {
     setEditTarget(guard)
     const bank = guard.bankAccount || {}
@@ -124,7 +168,7 @@ export default function GuardsPage() {
       employeeNumber: guard.employeeNumber, name: guard.name, nameKana: guard.nameKana,
       birthDate: guard.birthDate ? guard.birthDate.split('T')[0] : '', gender: guard.gender || 'MALE',
       phone: guard.phone || '', email: guard.email || '', address: guard.address || '',
-      employmentType: guard.employmentType, certifications: (guard.certifications || []).join(', '),
+      employmentType: guard.employmentType, certifications: guard.certifications || [],
       dailyPayEnabled: guard.dailyPayEnabled, lineWorksId: guard.lineWorksId || '',
       guardClass: guard.guardClass || '', skills: guard.skills || [], nationality: guard.nationality || '',
       financialIssues: guard.financialIssues || false, mbti: guard.mbti || '',
@@ -168,10 +212,9 @@ export default function GuardsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const { bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder, certifications, ...rest } = form
+    const { bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder, ...rest } = form
     const data: any = {
       ...rest,
-      certifications: certifications ? certifications.split(',').map(s => s.trim()).filter(Boolean) : [],
       bankAccount: bankName ? { bank: bankName, branch: bankBranch, type: bankAccountType, number: bankAccountNumber, holder: bankAccountHolder } : undefined,
       ngGuardIds: form.ngGuardIds.length > 0 ? form.ngGuardIds : undefined,
       ngCompanies: form.ngCompanies.length > 0 ? form.ngCompanies : undefined,
@@ -189,7 +232,7 @@ export default function GuardsPage() {
     { label: '基本情報', icon: '1' },
     { label: '現住所', icon: '2' },
     { label: '緊急連絡先', icon: '3' },
-    { label: 'NG設定', icon: '4' },
+    { label: 'NG・相性', icon: '4' },
     { label: '給与・社保', icon: '5' },
     { label: '書類', icon: '6' },
     { label: '振込先', icon: '7' },
@@ -399,8 +442,31 @@ export default function GuardsPage() {
                     </div>
                   </div>
                   <div>
-                    <label className="form-label">保有資格（カンマ区切り）</label>
-                    <input type="text" value={form.certifications} onChange={e => setForm(f => ({ ...f, certifications: e.target.value }))} className="form-input" placeholder="施設警備2級, 雑踏警備2級" />
+                    <label className="form-label">保有資格</label>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-1">
+                      {[
+                        '交通誘導警備業務検定1級', '交通誘導警備業務検定2級',
+                        '雑踏警備業務検定1級',    '雑踏警備業務検定2級',
+                        '施設警備業務検定1級',    '施設警備業務検定2級',
+                        '空港保安警備業務検定1級', '空港保安警備業務検定2級',
+                        '貴重品運搬警備業務検定1級', '貴重品運搬警備業務検定2級',
+                      ].map(cert => (
+                        <label key={cert} className="flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={form.certifications.includes(cert)}
+                            onChange={e => {
+                              const next = e.target.checked
+                                ? [...form.certifications, cert]
+                                : form.certifications.filter(c => c !== cert)
+                              setForm(f => ({ ...f, certifications: next }))
+                            }}
+                            className="w-4 h-4 accent-[#1e3a5f] flex-shrink-0"
+                          />
+                          <span className="text-sm text-gray-700">{cert}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -568,6 +634,73 @@ export default function GuardsPage() {
                     <label className="form-label">NG条件</label>
                     <textarea value={form.ngConditions} onChange={e => setForm(f => ({ ...f, ngConditions: e.target.value }))} className="form-input" rows={3} placeholder="その他のNG条件を記載" />
                   </div>
+
+                  {/* 相性設定（編集時のみ表示） */}
+                  {editTarget && (
+                    <div className="mt-4 border-t pt-4">
+                      <h4 className="text-sm font-semibold text-gray-700 mb-3">隊員間の相性設定</h4>
+
+                      {/* 登録フォーム */}
+                      <div className="bg-gray-50 rounded-lg p-3 mb-3">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+                          <div>
+                            <label className="text-xs text-gray-500">対象隊員</label>
+                            <select value={compatTargetId} onChange={e => setCompatTargetId(e.target.value)} className="form-input text-sm">
+                              <option value="">選択...</option>
+                              {guards.filter((g: any) => g.id !== editTarget.id).map((g: any) => (
+                                <option key={g.id} value={g.id}>{g.name}（{g.employeeNumber}）</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">種別</label>
+                            <select value={compatType} onChange={e => setCompatType(e.target.value as 'GOOD' | 'BAD' | 'NG')} className="form-input text-sm">
+                              <option value="GOOD">良好（GOOD）</option>
+                              <option value="BAD">悪い（BAD）</option>
+                              <option value="NG">配置不可（NG）</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-gray-500">理由</label>
+                            <input type="text" value={compatReason} onChange={e => setCompatReason(e.target.value)}
+                              className="form-input text-sm" placeholder="理由（任意）" />
+                          </div>
+                        </div>
+                        <button type="button" disabled={!compatTargetId}
+                          onClick={() => addCompatMutation.mutate({ guardId: editTarget.id, data: { targetGuardId: compatTargetId, type: compatType, reason: compatReason } })}
+                          className="btn-primary text-sm px-4 py-1 disabled:opacity-50">
+                          相性を登録
+                        </button>
+                      </div>
+
+                      {/* 登録済み一覧 */}
+                      {compatibilities.length > 0 ? (
+                        <div className="space-y-1">
+                          {compatibilities.map((c: any) => {
+                            const isFrom = c.guardId === editTarget.id
+                            const other = isFrom ? c.targetGuard : c.guard
+                            const typeLabel = c.type === 'GOOD' ? '良好' : c.type === 'BAD' ? '悪い' : '配置不可'
+                            const typeColor = c.type === 'GOOD' ? 'bg-green-50 text-green-700' : c.type === 'BAD' ? 'bg-yellow-50 text-yellow-700' : 'bg-red-50 text-red-700'
+                            return (
+                              <div key={c.id} className="flex items-center justify-between bg-white border rounded px-3 py-2">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-xs px-2 py-0.5 rounded-full ${typeColor}`}>{typeLabel}</span>
+                                  <span className="text-sm">{other.name}</span>
+                                  {other.guardClass && <span className="text-xs text-gray-400">{other.guardClass}クラス</span>}
+                                  {c.reason && <span className="text-xs text-gray-400 ml-2">({c.reason})</span>}
+                                </div>
+                                <button type="button"
+                                  onClick={() => deleteCompatMutation.mutate({ guardId: editTarget.id, targetId: other.id })}
+                                  className="text-red-400 hover:text-red-600 text-xs">削除</button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-400">相性設定はまだありません</p>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
 
@@ -666,16 +799,56 @@ export default function GuardsPage() {
               {activeSection === 5 && (
                 <>
                   <p className="text-sm text-gray-500 mb-2">提出済みの書類にチェックを入れてください</p>
-                  <div className="grid grid-cols-2 gap-3">
-                    {checkInput('マイナンバー', 'docMyNumber')}
-                    {checkInput('身分証明書', 'docIdCard')}
-                    {checkInput('身元証明書', 'docIdentityCert')}
-                    {checkInput('住民票', 'docResidenceCard')}
-                    {checkInput('履歴書', 'docResume')}
-                    {checkInput('誓約書', 'docPledge')}
-                    {checkInput('顔写真', 'docPhoto')}
-                    {checkInput('その他', 'docOther')}
+                  <div className="space-y-2">
+                    {([
+                      { label: 'マイナンバー', key: 'docMyNumber' },
+                      { label: '身分証明書', key: 'docIdCard' },
+                      { label: '身元証明書', key: 'docIdentityCert' },
+                      { label: '住民票', key: 'docResidenceCard' },
+                      { label: '履歴書', key: 'docResume' },
+                      { label: '誓約書', key: 'docPledge' },
+                      { label: '顔写真', key: 'docPhoto' },
+                      { label: 'その他', key: 'docOther' },
+                    ] as { label: string; key: keyof GuardFormData }[]).map(({ label, key }) => {
+                      const doc = getDocForType(key)
+                      return (
+                        <div key={key} className="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
+                          <label className="flex items-center gap-2 cursor-pointer flex-1">
+                            <input type="checkbox" checked={!!form[key]}
+                              onChange={e => setForm(f => ({ ...f, [key]: e.target.checked }))}
+                              className="w-4 h-4 rounded border-gray-300" />
+                            <span className="text-sm">{label}</span>
+                          </label>
+                          <div className="flex items-center gap-2">
+                            {doc ? (
+                              <>
+                                <a href={`${(import.meta as any).env?.VITE_API_URL || ''}/api/guards/documents/${doc.id}/download`}
+                                  target="_blank" rel="noopener noreferrer"
+                                  className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded hover:bg-blue-100 flex items-center gap-1">
+                                  <span>📄</span>
+                                  <span className="max-w-[120px] truncate">{doc.fileName}</span>
+                                </a>
+                                {canEdit && (
+                                  <button type="button" onClick={() => { if (confirm('ファイルを削除しますか？')) deleteDocMutation.mutate(doc.id) }}
+                                    className="text-xs text-red-400 hover:text-red-600">✕</button>
+                                )}
+                              </>
+                            ) : null}
+                            {canEdit && editTarget && (
+                              <button type="button" onClick={() => handleDocUpload(key)}
+                                disabled={uploadDocMutation.isPending}
+                                className="text-xs bg-green-50 text-green-700 px-2 py-1 rounded hover:bg-green-100 disabled:opacity-50">
+                                {doc ? '差替' : 'アップロード'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
+                  {uploadDocMutation.isPending && (
+                    <p className="text-xs text-blue-500 mt-2">アップロード中...</p>
+                  )}
                 </>
               )}
 
