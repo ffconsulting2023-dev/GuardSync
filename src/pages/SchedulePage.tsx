@@ -163,6 +163,8 @@ function GuardCard({ guard, onDragStart }: { guard: any; onDragStart: (g: any) =
 
 // ─── 隊員カード・横並び版（上段用）─────────────────────────
 function GuardCardHorizontal({ guard, onDragStart }: { guard: any; onDragStart: (g: any) => void }) {
+  const hasCert = Array.isArray(guard.certifications) && guard.certifications.length > 0
+
   const surveyDot = guard.surveyAvailable === true
     ? <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" title="勤務可" />
     : guard.surveyAvailable === false
@@ -177,9 +179,11 @@ function GuardCardHorizontal({ guard, onDragStart }: { guard: any; onDragStart: 
         e.dataTransfer.effectAllowed = 'copy'
         onDragStart(guard)
       }}
-      className={`flex flex-col items-center gap-1.5 px-2 py-2 rounded-xl cursor-grab active:cursor-grabbing border transition-all select-none flex-shrink-0 w-20
+      className={`flex flex-col items-center gap-1 px-2 py-2 rounded-xl cursor-grab active:cursor-grabbing border transition-all select-none flex-shrink-0 w-20
         ${guard.isAssigned
           ? 'bg-gray-50 border-gray-100 opacity-50'
+          : hasCert
+          ? 'bg-red-50 border-red-200 hover:border-red-400 hover:shadow-md'
           : 'bg-white border-gray-200 hover:border-[#1e3a5f]/40 hover:shadow-md'
         }`}
     >
@@ -187,9 +191,17 @@ function GuardCardHorizontal({ guard, onDragStart }: { guard: any; onDragStart: 
         <GuardAvatar guardId={guard.id} name={guard.name} hasPhoto={guard.hasPhoto} size="lg" />
         <span className="absolute -bottom-0.5 -right-0.5">{surveyDot}</span>
       </div>
-      <p className="text-xs font-medium text-gray-700 text-center leading-tight line-clamp-2 w-full">{guard.name}</p>
-      {guard.nearestStation1 && (
-        <p className="text-[10px] text-gray-400 text-center leading-tight truncate w-full">{guard.nearestStation1}駅</p>
+      <p className={`text-xs font-semibold text-center leading-tight line-clamp-2 w-full
+        ${hasCert ? 'text-red-600' : 'text-gray-700'}`}>
+        {guard.name}
+      </p>
+      <p className="text-[10px] text-gray-400 text-center leading-tight truncate w-full">
+        {guard.nearestStation1 ? `${guard.nearestStation1}駅` : '—'}
+      </p>
+      {hasCert && (
+        <span className="text-[10px] text-red-500 font-medium leading-tight text-center">
+          {guard.certifications[0]}
+        </span>
       )}
       {guard.isAssigned && <span className="text-[10px] text-blue-500">配員済</span>}
     </div>
