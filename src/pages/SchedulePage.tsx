@@ -276,7 +276,14 @@ function SiteDropZone({
       {/* ヘッダー */}
       <div className={`px-4 py-2.5 border-b border-gray-100 flex items-center justify-between transition-colors ${isOver ? 'bg-[#1e3a5f]/10' : 'bg-[#1e3a5f]/5'}`}>
         <div>
-          <p className="text-sm font-semibold text-[#1e3a5f]">📍 {site.name}</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-sm font-semibold text-[#1e3a5f]">📍 {site.name}</p>
+            {(site.defaultStartTime || site.defaultEndTime) && (
+              <span className="text-xs text-gray-500 bg-white border border-gray-200 rounded px-1.5 py-0.5 font-mono">
+                {site.defaultStartTime ?? '--:--'}〜{site.defaultEndTime ?? '--:--'}
+              </span>
+            )}
+          </div>
           <p className="text-xs text-gray-400">{site.address}</p>
         </div>
         <div className="text-right">
@@ -462,6 +469,7 @@ export default function SchedulePage() {
   const [draggedGuard, setDraggedGuard] = useState<any>(null)
   const [assignTarget, setAssignTarget] = useState<{ guard: any; site: any } | null>(null)
   const [suggestResult, setSuggestResult] = useState<SuggestResult | null>(null)
+  const [duplicateError, setDuplicateError] = useState<string | null>(null)
 
   const dateStr = format(viewDate, 'yyyy-MM-dd')
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER', 'OPERATOR')
@@ -479,10 +487,21 @@ export default function SchedulePage() {
     queryFn: () => api.get('/contracts').then(r => r.data),
   })
 
+  const showDuplicateError = (msg: string) => {
+    setDuplicateError(msg)
+    setTimeout(() => setDuplicateError(null), 4000)
+  }
+
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/schedules', data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dispatch-board', dateStr] })
+      setAssignTarget(null)
+      setDraggedGuard(null)
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.error ?? '配員に失敗しました'
+      showDuplicateError(msg)
       setAssignTarget(null)
       setDraggedGuard(null)
     },
@@ -541,6 +560,20 @@ export default function SchedulePage() {
     if (!draggedGuard) return
     const site = sites.find(s => s.id === siteId)
     if (!site) return
+
+    // 同日配員済みチェック（フロント側の即時フィードバック）
+    if (draggedGuard.isAssigned) {
+      // どの現場に配員済みか特定する
+      const assignedSite = sites.find(s =>
+        s.schedules.some((sc: any) => sc.guardId === draggedGuard.id)
+      )
+      showDuplicateError(
+        `${draggedGuard.name} はすでに「${assignedSite?.name ?? '別現場'}」に配員済みです`
+      )
+      setDraggedGuard(null)
+      return
+    }
+
     setAssignTarget({ guard: draggedGuard, site })
   }
 
@@ -645,6 +678,15 @@ export default function SchedulePage() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ─── 重複エラートースト ─── */}
+      {duplicateError && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-red-600 text-white px-5 py-3 rounded-xl shadow-lg text-sm animate-pulse">
+          <span>⚠️</span>
+          <span>{duplicateError}</span>
+          <button onClick={() => setDuplicateError(null)} className="ml-2 text-white/70 hover:text-white">✕</button>
         </div>
       )}
 

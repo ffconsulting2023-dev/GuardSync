@@ -1136,6 +1136,16 @@ app.post('/api/schedules', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERAT
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
+  // 同日同一隊員の重複チェック（CANCELLED除く）
+  const duplicate = await prisma.schedule.findFirst({
+    where: { companyId, guardId, date: new Date(date), status: { not: 'CANCELLED' } },
+    include: { site: { select: { name: true } } },
+  })
+  if (duplicate) {
+    res.status(409).json({ error: `この隊員はすでに「${duplicate.site?.name ?? '別現場'}」に配員済みです` })
+    return
+  }
+
   const schedule = await prisma.schedule.create({
     data: { companyId, guardId, siteId, date: new Date(date), startTime, endTime, notes,
       contractId: contractId || null },
