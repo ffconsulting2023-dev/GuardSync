@@ -330,6 +330,129 @@ function SiteDropZone({
   )
 }
 
+// ─── サジェストモーダル ───────────────────────────────────────
+interface SuggestResult {
+  assignments: Array<{
+    siteId: string
+    siteName: string
+    siteAddress: string | null
+    requiredCount: number
+    assignedGuards: Array<{
+      guardId: string
+      guardName: string
+      score: number
+      reasons: string[]
+      distanceKm: number | null
+    }>
+    unfilledCount: number
+  }>
+  stats: { totalSites: number; totalGuards: number; assignedCount: number; unfilledSites: number }
+}
+
+function SuggestModal({ result, onClose, onApply, isApplying, date }: {
+  result: SuggestResult
+  onClose: () => void
+  onApply: (assignments: Array<{ siteId: string; guardId: string }>) => void
+  isApplying: boolean
+  date: string
+}) {
+  const allAssignments = result.assignments.flatMap(a =>
+    a.assignedGuards.map(g => ({ siteId: a.siteId, guardId: g.guardId }))
+  )
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-xl">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <h2 className="font-semibold text-gray-800">🤖 自動配置サジェスト</h2>
+            <p className="text-xs text-gray-400 mt-0.5">
+              距離・相性・資格・経験を総合スコアで算出しました（{date}）
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
+        </div>
+
+        {/* 統計サマリ */}
+        <div className="flex gap-4 px-6 py-3 bg-blue-50 border-b border-blue-100 text-xs">
+          <span className="text-blue-700">対象現場: <b>{result.stats.totalSites}</b></span>
+          <span className="text-blue-700">配置可能隊員: <b>{result.stats.totalGuards}</b></span>
+          <span className="text-green-700">配置提案: <b>{result.stats.assignedCount}</b>名</span>
+          {result.stats.unfilledSites > 0 && (
+            <span className="text-orange-600">要員不足現場: <b>{result.stats.unfilledSites}</b></span>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          {result.assignments.length === 0 ? (
+            <p className="text-center text-gray-400 py-8">提案できる配置がありません（隊員が不足しているか、全員配置済みです）</p>
+          ) : (
+            result.assignments.map(site => (
+              <div key={site.siteId} className="border border-gray-100 rounded-xl overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50">
+                  <div>
+                    <p className="font-medium text-gray-800 text-sm">{site.siteName}</p>
+                    {site.siteAddress && <p className="text-xs text-gray-400">{site.siteAddress}</p>}
+                  </div>
+                  <div className="text-right text-xs">
+                    <span className="text-gray-500">{site.assignedGuards.length}/{site.requiredCount}名</span>
+                    {site.unfilledCount > 0 && (
+                      <span className="ml-2 text-orange-500">あと{site.unfilledCount}名不足</span>
+                    )}
+                  </div>
+                </div>
+                <div className="px-4 py-3 space-y-2">
+                  {site.assignedGuards.length === 0 ? (
+                    <p className="text-xs text-gray-400">この現場への配置提案なし</p>
+                  ) : (
+                    site.assignedGuards.map(g => (
+                      <div key={g.guardId} className="flex items-center gap-3 text-xs">
+                        <div className="w-24 font-medium text-gray-700 truncate">{g.guardName}</div>
+                        <div className="flex-1 flex flex-wrap gap-1">
+                          {g.distanceKm !== null && (
+                            <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded text-[10px]">
+                              {g.distanceKm}km
+                            </span>
+                          )}
+                          {g.reasons.map((r, i) => (
+                            <span key={i} className={`px-1.5 py-0.5 rounded text-[10px]
+                              ${r.includes('NG') || r.includes('相性△') ? 'bg-red-50 text-red-500'
+                              : r.includes('相性◎') ? 'bg-green-50 text-green-600'
+                              : r.includes('資格') || r.includes('級') ? 'bg-purple-50 text-purple-600'
+                              : 'bg-gray-100 text-gray-500'}`}>
+                              {r}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="text-right font-mono">
+                          <span className={`font-bold ${g.score >= 120 ? 'text-green-600' : g.score >= 100 ? 'text-blue-600' : 'text-gray-500'}`}>
+                            {g.score}pt
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">キャンセル</button>
+          <button
+            onClick={() => onApply(allAssignments)}
+            disabled={isApplying || allAssignments.length === 0}
+            className="btn-primary flex-1 disabled:opacity-50"
+          >
+            {isApplying ? '反映中...' : `一括反映（${allAssignments.length}件）`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── メインページ ─────────────────────────────────────────────
 export default function SchedulePage() {
   const { user } = useAuth()
@@ -338,6 +461,7 @@ export default function SchedulePage() {
   const [surveyFilter, setSurveyFilter] = useState<'all' | 'available' | 'unavailable' | 'noAnswer'>('all')
   const [draggedGuard, setDraggedGuard] = useState<any>(null)
   const [assignTarget, setAssignTarget] = useState<{ guard: any; site: any } | null>(null)
+  const [suggestResult, setSuggestResult] = useState<SuggestResult | null>(null)
 
   const dateStr = format(viewDate, 'yyyy-MM-dd')
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER', 'OPERATOR')
@@ -367,6 +491,22 @@ export default function SchedulePage() {
   const cancelMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/schedules/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dispatch-board', dateStr] }),
+  })
+
+  // 自動配置サジェスト
+  const suggestMutation = useMutation({
+    mutationFn: (respectSurvey: boolean) =>
+      api.post('/dispatch/optimize', { date: dateStr, mode: 'balanced', respectSurvey }).then(r => r.data),
+    onSuccess: (data) => setSuggestResult(data),
+  })
+
+  const applyMutation = useMutation({
+    mutationFn: (assignments: Array<{ siteId: string; guardId: string }>) =>
+      api.post('/dispatch/optimize/apply', { date: dateStr, assignments }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dispatch-board', dateStr] })
+      setSuggestResult(null)
+    },
   })
 
   // 月間CSVダウンロード
@@ -430,6 +570,16 @@ export default function SchedulePage() {
           <button onClick={() => setViewDate(d => addDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">▶</button>
           <button onClick={() => setViewDate(new Date())} className="text-xs text-blue-600 hover:underline">今日</button>
           <button onClick={downloadMonthlyCSV} className="btn-secondary text-sm">📥 月間CSV</button>
+          {canEdit && (
+            <button
+              onClick={() => suggestMutation.mutate(surveyFilter === 'available')}
+              disabled={suggestMutation.isPending}
+              className="btn-primary text-sm disabled:opacity-50 flex items-center gap-1"
+              title="距離・相性・資格を元に最適な配置を提案"
+            >
+              {suggestMutation.isPending ? '計算中...' : '🤖 自動配置サジェスト'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -496,6 +646,17 @@ export default function SchedulePage() {
             )}
           </div>
         </div>
+      )}
+
+      {/* ─── サジェストモーダル ─── */}
+      {suggestResult && (
+        <SuggestModal
+          result={suggestResult}
+          date={dateStr}
+          onClose={() => setSuggestResult(null)}
+          onApply={assignments => applyMutation.mutate(assignments)}
+          isApplying={applyMutation.isPending}
+        />
       )}
 
       {/* ─── 配員確認モーダル ─── */}

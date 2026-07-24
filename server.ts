@@ -5933,7 +5933,7 @@ function calculateAssignmentScore(
 // POST /api/dispatch/optimize - 最適人材配置
 app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { date, siteIds, guardIds, mode = 'balanced' } = req.body
+  const { date, siteIds, guardIds, mode = 'balanced', respectSurvey = false } = req.body
 
   if (!date) { res.status(400).json({ error: 'date は必須です' }); return }
 
@@ -5986,7 +5986,26 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     select: { guardId: true },
   })
   const busyGuardIds = new Set(busyGuardSchedules.map((s) => s.guardId))
-  const availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+  let availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+
+  // 2.5. シフト調査連動フィルタ（respectSurvey=trueの場合、出勤可の隊員のみ）
+  if (respectSurvey) {
+    const survey = await prisma.shiftSurvey.findFirst({
+      where: { companyId, startDate: { lte: targetDate }, endDate: { gte: targetDate } },
+      include: { responses: { select: { guardId: true, answers: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (survey) {
+      const dateStr = date as string
+      const surveyAvailableIds = new Set<string>()
+      for (const resp of survey.responses) {
+        const answers = resp.answers as Array<{ date: string; available: boolean }>
+        const ans = answers.find(a => a.date === dateStr)
+        if (ans?.available) surveyAvailableIds.add(resp.guardId)
+      }
+      availableGuards = availableGuards.filter(g => surveyAvailableIds.has(g.id))
+    }
+  }
 
   // 3. 過去の配置回数を集計（各隊員×各現場）
   const pastSchedules = await prisma.schedule.findMany({
