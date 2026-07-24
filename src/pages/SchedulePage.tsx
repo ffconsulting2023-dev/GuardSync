@@ -222,7 +222,7 @@ function GuardCardHorizontal({ guard, onDragStart }: { guard: any; onDragStart: 
         e.dataTransfer.effectAllowed = 'copy'
         onDragStart(guard)
       }}
-      className={`flex flex-col items-center gap-1 px-2 py-2 rounded-xl cursor-grab active:cursor-grabbing border transition-all select-none w-full
+      className={`flex flex-col items-center gap-1 px-2 py-2 rounded-xl cursor-grab active:cursor-grabbing border transition-all select-none flex-shrink-0 w-20
         ${guard.isAssigned
           ? 'bg-gray-50 border-gray-100 opacity-50'
           : hasCert
@@ -623,7 +623,7 @@ export default function SchedulePage() {
         <div className="flex flex-col flex-1 overflow-hidden">
 
           {/* ─── 上段：隊員一覧（横スクロール）─── */}
-          <div className="flex-shrink-0 border-b border-gray-200 bg-gray-50 max-h-[40vh] overflow-y-auto">
+          <div className="flex-shrink-0 border-b border-gray-200 bg-gray-50">
             {/* 上段ヘッダー */}
             <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-100 bg-white">
               <p className="text-xs font-semibold text-gray-600 whitespace-nowrap">隊員一覧</p>
@@ -646,7 +646,7 @@ export default function SchedulePage() {
             </div>
 
             {/* 隊員カード横スクロール */}
-            <div className="grid gap-2 px-3 py-2.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))' }}>
+            <div className="flex gap-2 px-3 py-2.5 overflow-x-auto">
               {filteredGuards.length === 0 ? (
                 <p className="text-xs text-gray-300 py-4 px-2">表示する隊員がいません</p>
               ) : (
