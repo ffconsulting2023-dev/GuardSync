@@ -1142,9 +1142,31 @@ app.delete('/api/schedules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), 
 // 出退勤 API
 // ─────────────────────────────────────────────
 
+// HH:mm 文字列 + 基準日 → Date
+function buildDateTime(dateBase: Date, timeStr: string, allowNextDay = false, referenceAt?: Date): Date {
+  const [h, m] = timeStr.split(':').map(Number)
+  const dt = new Date(dateBase)
+  dt.setHours(h, m, 0, 0)
+  if (allowNextDay && referenceAt && dt <= referenceAt) {
+    dt.setDate(dt.getDate() + 1)
+  }
+  return dt
+}
+
+// HH:mm → 分数
+function timeToMin(t: string): number {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+// Date → HH:mm
+function dateToHHMM(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 app.post('/api/attendance/clock-in', authenticate, async (req, res) => {
-  const { userId, companyId } = (req as any).user as JwtPayload
-  const { scheduleId } = req.body
+  const { companyId } = (req as any).user as JwtPayload
+  const { scheduleId, clockInTime } = req.body  // clockInTime: "HH:mm"（省略時は現在時刻）
   if (!scheduleId) { res.status(400).json({ error: 'scheduleIdは必須です' }); return }
 
   const schedule = await prisma.schedule.findFirst({ where: { id: scheduleId, companyId } })
@@ -1153,24 +1175,46 @@ app.post('/api/attendance/clock-in', authenticate, async (req, res) => {
   const existing = await prisma.attendance.findUnique({ where: { scheduleId } })
   if (existing?.clockInAt) { res.status(409).json({ error: '既に出勤打刻済みです' }); return }
 
+  const actualClockInAt = clockInTime
+    ? buildDateTime(schedule.date, clockInTime)
+    : new Date()
+
+  // 早出残業 = 予定開始より前に出勤した分
+  const earlyOvertimeMin = Math.max(0, timeToMin(schedule.startTime) - timeToMin(dateToHHMM(actualClockInAt)))
+
   const attendance = existing
-    ? await prisma.attendance.update({ where: { scheduleId }, data: { clockInAt: new Date(), status: 'CLOCKED_IN' } })
-    : await prisma.attendance.create({ data: { companyId, guardId: schedule.guardId, scheduleId, clockInAt: new Date(), status: 'CLOCKED_IN' } })
+    ? await prisma.attendance.update({ where: { scheduleId }, data: { clockInAt: actualClockInAt, earlyOvertimeMin, status: 'CLOCKED_IN' } })
+    : await prisma.attendance.create({ data: { companyId, guardId: schedule.guardId, scheduleId, clockInAt: actualClockInAt, earlyOvertimeMin, status: 'CLOCKED_IN' } })
 
   res.json(attendance)
 })
 
 app.post('/api/attendance/clock-out', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { scheduleId, breakMinutes } = req.body
+  const { scheduleId, breakMinutes, clockOutTime } = req.body  // clockOutTime: "HH:mm"（省略時は現在時刻）
   if (!scheduleId) { res.status(400).json({ error: 'scheduleIdは必須です' }); return }
 
-  const attendance = await prisma.attendance.findFirst({ where: { scheduleId, companyId } })
+  const attendance = await prisma.attendance.findFirst({
+    where: { scheduleId, companyId },
+    include: { schedule: true },
+  })
   if (!attendance?.clockInAt) { res.status(400).json({ error: '出勤打刻がありません' }); return }
+
+  const actualClockOutAt = clockOutTime
+    ? buildDateTime(attendance.schedule.date, clockOutTime, true, attendance.clockInAt)
+    : new Date()
+
+  // 遅出残業 = 予定終了より後まで勤務した分
+  const lateOvertimeMin = Math.max(0, timeToMin(dateToHHMM(actualClockOutAt)) - timeToMin(attendance.schedule.endTime))
 
   const updated = await prisma.attendance.update({
     where: { id: attendance.id },
-    data: { clockOutAt: new Date(), breakMinutes: Number(breakMinutes) || 0, status: 'COMPLETED' },
+    data: {
+      clockOutAt: actualClockOutAt,
+      breakMinutes: Number(breakMinutes) || 0,
+      lateOvertimeMin,
+      status: 'COMPLETED',
+    },
   })
   res.json(updated)
 })
