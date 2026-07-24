@@ -169,196 +169,133 @@ export default function AttendancePage() {
       {isLoading ? (
         <div className="text-center py-12 text-gray-400">読み込み中...</div>
       ) : (
-        <div className="space-y-3">
+        <>
           {schedules.length === 0 ? (
             <div className="card text-center py-12 text-gray-400">この日の出動予定はありません</div>
           ) : (
-            schedules.map((s: any) => {
-              const { label, className, canClockIn, canClockOut } = getStatusInfo(s)
-              const ts = timeStates[s.id] ?? { clockInTime: s.startTime ?? '', clockOutTime: s.endTime ?? '', breakMinutes: '60' }
-              const overtime = calcOvertime(s, ts)
+            <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>
+              {schedules.map((s: any) => {
+                const { label, className, canClockIn, canClockOut } = getStatusInfo(s)
+                const ts = timeStates[s.id] ?? { clockInTime: s.startTime ?? '', clockOutTime: s.endTime ?? '', breakMinutes: '60' }
+                const overtime = calcOvertime(s, ts)
+                const aid = s.attendance?.id
 
-              return (
-                <div key={s.id} className="card space-y-3">
-                  {/* 上段：隊員・現場・ステータス */}
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className="font-medium text-gray-800">{s.guard?.name}</p>
-                        <span className={`badge ${className}`}>{label}</span>
-                      </div>
-                      <p className="text-sm text-gray-500 mt-0.5">{s.site?.name}</p>
-                      {/* 依頼時間 */}
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        依頼時間: <span className="font-mono font-medium text-gray-600">{s.startTime}〜{s.endTime}</span>
-                      </p>
+                return (
+                  <div key={s.id} className="card p-3 space-y-2 text-xs">
+
+                    {/* ── 行1: 名前 / 現場 / ステータス / 依頼時間 ── */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm text-gray-800">{s.guard?.name}</span>
+                      <span className={`badge ${className}`}>{label}</span>
+                      <span className="text-gray-400 truncate">{s.site?.name}</span>
+                      <span className="ml-auto font-mono text-gray-500 shrink-0">{s.startTime}〜{s.endTime}</span>
                     </div>
-                    {/* 実打刻表示＋修正ボタン */}
+
+                    {/* ── 行2: 実打刻（打刻済みの場合）── */}
                     {s.attendance?.clockInAt && (
-                      <div className="text-right text-xs shrink-0 space-y-1.5">
+                      <div className="flex items-center gap-3 flex-wrap border-t border-gray-50 pt-2">
                         {/* 出勤 */}
-                        {editMode[s.attendance.id] === 'in' ? (
-                          <div className="flex items-center gap-1 justify-end">
-                            <input
-                              type="time"
-                              value={editTimes[`${s.attendance.id}_in`] ?? ''}
-                              onChange={e => setEditTimes(prev => ({ ...prev, [`${s.attendance.id}_in`]: e.target.value }))}
-                              className="form-input w-28 text-xs font-mono py-1"
-                              autoFocus
-                            />
-                            <button
-                              onClick={() => submitEdit(s.attendance.id, 'in')}
-                              disabled={updateAttendanceMutation.isPending}
-                              className="bg-blue-600 text-white px-2 py-1 rounded text-[10px] disabled:opacity-50"
-                            >保存</button>
-                            <button onClick={() => cancelEdit(s.attendance.id)} className="text-gray-400 hover:text-gray-600 px-1">✕</button>
+                        {editMode[aid] === 'in' ? (
+                          <div className="flex items-center gap-1">
+                            <span className="text-gray-400 w-8 shrink-0">出勤</span>
+                            <input type="time" value={editTimes[`${aid}_in`] ?? ''} autoFocus
+                              onChange={e => setEditTimes(prev => ({ ...prev, [`${aid}_in`]: e.target.value }))}
+                              className="form-input py-0.5 w-24 text-xs font-mono" />
+                            <button onClick={() => submitEdit(aid, 'in')} disabled={updateAttendanceMutation.isPending}
+                              className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px] disabled:opacity-50">保存</button>
+                            <button onClick={() => cancelEdit(aid)} className="text-gray-300 hover:text-gray-500">✕</button>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-1.5 justify-end">
-                            <span className="text-blue-600">
-                              出勤 <span className="font-mono font-semibold">{format(new Date(s.attendance.clockInAt), 'HH:mm')}</span>
-                            </span>
+                          <div className="flex items-center gap-1">
+                            <span className="text-gray-400">出勤</span>
+                            <span className="font-mono font-semibold text-blue-600">{format(new Date(s.attendance.clockInAt), 'HH:mm')}</span>
                             {canEdit && (
-                              <button
-                                onClick={() => openEdit(s.attendance.id, 'in', format(new Date(s.attendance.clockInAt), 'HH:mm'))}
-                                className="text-gray-300 hover:text-blue-500 text-[10px] transition-colors"
-                                title="出勤時刻を修正"
-                              >✏️</button>
+                              <button onClick={() => openEdit(aid, 'in', format(new Date(s.attendance.clockInAt), 'HH:mm'))}
+                                className="text-gray-300 hover:text-blue-400" title="修正">✏️</button>
                             )}
                           </div>
                         )}
                         {/* 退勤 */}
                         {s.attendance.clockOutAt && (
-                          editMode[s.attendance.id] === 'out' ? (
-                            <div className="flex items-center gap-1 justify-end">
-                              <input
-                                type="time"
-                                value={editTimes[`${s.attendance.id}_out`] ?? ''}
-                                onChange={e => setEditTimes(prev => ({ ...prev, [`${s.attendance.id}_out`]: e.target.value }))}
-                                className="form-input w-28 text-xs font-mono py-1"
-                                autoFocus
-                              />
-                              <button
-                                onClick={() => submitEdit(s.attendance.id, 'out')}
-                                disabled={updateAttendanceMutation.isPending}
-                                className="bg-green-600 text-white px-2 py-1 rounded text-[10px] disabled:opacity-50"
-                              >保存</button>
-                              <button onClick={() => cancelEdit(s.attendance.id)} className="text-gray-400 hover:text-gray-600 px-1">✕</button>
+                          editMode[aid] === 'out' ? (
+                            <div className="flex items-center gap-1">
+                              <span className="text-gray-400 w-8 shrink-0">退勤</span>
+                              <input type="time" value={editTimes[`${aid}_out`] ?? ''} autoFocus
+                                onChange={e => setEditTimes(prev => ({ ...prev, [`${aid}_out`]: e.target.value }))}
+                                className="form-input py-0.5 w-24 text-xs font-mono" />
+                              <button onClick={() => submitEdit(aid, 'out')} disabled={updateAttendanceMutation.isPending}
+                                className="bg-green-600 text-white px-2 py-0.5 rounded text-[10px] disabled:opacity-50">保存</button>
+                              <button onClick={() => cancelEdit(aid)} className="text-gray-300 hover:text-gray-500">✕</button>
                             </div>
                           ) : (
-                            <div className="flex items-center gap-1.5 justify-end">
-                              <span className="text-green-600">
-                                退勤 <span className="font-mono font-semibold">{format(new Date(s.attendance.clockOutAt), 'HH:mm')}</span>
-                              </span>
+                            <div className="flex items-center gap-1">
+                              <span className="text-gray-400">退勤</span>
+                              <span className="font-mono font-semibold text-green-600">{format(new Date(s.attendance.clockOutAt), 'HH:mm')}</span>
                               {canEdit && (
-                                <button
-                                  onClick={() => openEdit(s.attendance.id, 'out', format(new Date(s.attendance.clockOutAt), 'HH:mm'))}
-                                  className="text-gray-300 hover:text-green-500 text-[10px] transition-colors"
-                                  title="退勤時刻を修正"
-                                >✏️</button>
+                                <button onClick={() => openEdit(aid, 'out', format(new Date(s.attendance.clockOutAt), 'HH:mm'))}
+                                  className="text-gray-300 hover:text-green-400" title="修正">✏️</button>
                               )}
                             </div>
                           )
                         )}
+                        {/* 時間外インライン表示 */}
+                        {overtime && overtime.totalOT > 0 && (
+                          <span className="ml-auto text-red-500 font-semibold shrink-0">時間外 {minToHHMM(overtime.totalOT)}</span>
+                        )}
+                        {overtime && overtime.totalOT === 0 && (
+                          <span className="ml-auto text-gray-300 shrink-0">実働 {minToHHMM(overtime.actualWorkMin)}</span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* ── 打刻フォーム ── */}
+                    {canEdit && (canClockIn || canClockOut) && (
+                      <div className="flex items-center gap-2 flex-wrap border-t border-gray-50 pt-2">
+                        <input type="time"
+                          value={canClockIn ? ts.clockInTime : ts.clockOutTime}
+                          onChange={e => setField(s.id, canClockIn ? 'clockInTime' : 'clockOutTime', e.target.value)}
+                          className="form-input py-1 w-24 text-xs font-mono" />
+                        {canClockOut && (
+                          <>
+                            <span className="text-gray-400">休憩</span>
+                            <input type="number" value={ts.breakMinutes}
+                              onChange={e => setField(s.id, 'breakMinutes', e.target.value)}
+                              className="form-input py-1 w-14 text-xs" min="0" step="15" />
+                            <span className="text-gray-400">分</span>
+                          </>
+                        )}
+                        {canClockIn && (
+                          <button onClick={() => clockInMutation.mutate({ scheduleId: s.id, clockInTime: ts.clockInTime })}
+                            disabled={clockInMutation.isPending}
+                            className="bg-blue-600 text-white text-xs px-3 py-1 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
+                            出勤打刻
+                          </button>
+                        )}
+                        {canClockOut && (
+                          <button onClick={() => clockOutMutation.mutate({ scheduleId: s.id, clockOutTime: ts.clockOutTime, breakMinutes: Number(ts.breakMinutes) || 0 })}
+                            disabled={clockOutMutation.isPending}
+                            className="bg-green-600 text-white text-xs px-3 py-1 rounded-lg hover:bg-green-700 disabled:opacity-50 whitespace-nowrap">
+                            退勤打刻
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* ── 時間外詳細（退勤済み・時間外あり）── */}
+                    {overtime && overtime.totalOT > 0 && (
+                      <div className="flex gap-2 flex-wrap border-t border-gray-50 pt-2">
+                        <span className="bg-gray-50 rounded px-2 py-0.5 text-gray-500">実働 {minToHHMM(overtime.actualWorkMin)}</span>
+                        <span className="bg-gray-50 rounded px-2 py-0.5 text-gray-500">所定 {minToHHMM(overtime.scheduledWorkMin)}</span>
+                        {overtime.earlyOT > 0 && <span className="bg-orange-50 rounded px-2 py-0.5 text-orange-600">早出 {minToHHMM(overtime.earlyOT)}</span>}
+                        {overtime.lateOT > 0 && <span className="bg-red-50 rounded px-2 py-0.5 text-red-600">遅出 {minToHHMM(overtime.lateOT)}</span>}
                       </div>
                     )}
                   </div>
-
-                  {/* 打刻フォーム */}
-                  {canEdit && (canClockIn || canClockOut) && (
-                    <div className="border-t border-gray-100 pt-3">
-                      {canClockIn && (
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs text-gray-500 w-16 shrink-0">出勤時刻</span>
-                          <input
-                            type="time"
-                            value={ts.clockInTime}
-                            onChange={e => setField(s.id, 'clockInTime', e.target.value)}
-                            className="form-input w-32 text-sm font-mono"
-                          />
-                          <button
-                            onClick={() => clockInMutation.mutate({ scheduleId: s.id, clockInTime: ts.clockInTime })}
-                            disabled={clockInMutation.isPending}
-                            className="bg-blue-600 text-white text-xs px-4 py-1.5 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-                          >
-                            出勤打刻
-                          </button>
-                        </div>
-                      )}
-                      {canClockOut && (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs text-gray-500 w-16 shrink-0">退勤時刻</span>
-                            <input
-                              type="time"
-                              value={ts.clockOutTime}
-                              onChange={e => setField(s.id, 'clockOutTime', e.target.value)}
-                              className="form-input w-32 text-sm font-mono"
-                            />
-                            <span className="text-xs text-gray-500">休憩</span>
-                            <input
-                              type="number"
-                              value={ts.breakMinutes}
-                              onChange={e => setField(s.id, 'breakMinutes', e.target.value)}
-                              className="form-input w-20 text-sm"
-                              min="0"
-                              step="15"
-                              placeholder="60"
-                            />
-                            <span className="text-xs text-gray-400">分</span>
-                            <button
-                              onClick={() => clockOutMutation.mutate({
-                                scheduleId: s.id,
-                                clockOutTime: ts.clockOutTime,
-                                breakMinutes: Number(ts.breakMinutes) || 0,
-                              })}
-                              disabled={clockOutMutation.isPending}
-                              className="bg-green-600 text-white text-xs px-4 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50 whitespace-nowrap"
-                            >
-                              退勤打刻
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* 時間外労働サマリー（退勤済み） */}
-                  {overtime && (
-                    <div className="border-t border-gray-100 pt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                      <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                        <p className="text-gray-400">実労働時間</p>
-                        <p className="font-semibold text-gray-700">{minToHHMM(overtime.actualWorkMin)}</p>
-                      </div>
-                      <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                        <p className="text-gray-400">所定時間</p>
-                        <p className="font-semibold text-gray-700">{minToHHMM(overtime.scheduledWorkMin)}</p>
-                      </div>
-                      <div className={`rounded-lg px-3 py-2 text-center ${overtime.earlyOT > 0 ? 'bg-orange-50' : 'bg-gray-50'}`}>
-                        <p className="text-gray-400">早出残業</p>
-                        <p className={`font-semibold ${overtime.earlyOT > 0 ? 'text-orange-600' : 'text-gray-400'}`}>
-                          {overtime.earlyOT > 0 ? minToHHMM(overtime.earlyOT) : '—'}
-                        </p>
-                      </div>
-                      <div className={`rounded-lg px-3 py-2 text-center ${overtime.lateOT > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
-                        <p className="text-gray-400">遅出残業</p>
-                        <p className={`font-semibold ${overtime.lateOT > 0 ? 'text-red-600' : 'text-gray-400'}`}>
-                          {overtime.lateOT > 0 ? minToHHMM(overtime.lateOT) : '—'}
-                        </p>
-                      </div>
-                      {overtime.totalOT > 0 && (
-                        <div className="col-span-2 md:col-span-4 bg-red-50 border border-red-100 rounded-lg px-3 py-2 flex items-center justify-between">
-                          <span className="text-red-600 font-medium">合計時間外労働</span>
-                          <span className="text-red-700 font-bold">{minToHHMM(overtime.totalOT)}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            })
+                )
+              })}
+            </div>
           )}
-        </div>
+        </>
       )}
     </div>
   )
