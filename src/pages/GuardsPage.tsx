@@ -442,7 +442,7 @@ export default function GuardsPage() {
                     </div>
                   </div>
                   <div>
-                    <label className="form-label">保有資格</label>
+                    <label className="form-label">警備保有資格</label>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-1">
                       {[
                         '交通誘導警備業務検定1級', '交通誘導警備業務検定2級',
