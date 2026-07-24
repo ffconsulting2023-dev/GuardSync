@@ -744,12 +744,43 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   res.json(guard)
 })
 
+// アーカイブ（論理削除）
 app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
-  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false } })
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false, leftAt: new Date() } })
+  res.json({ success: true })
+})
+
+// アーカイブ一覧取得
+app.get('/api/guards/archived', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: false },
+    orderBy: { leftAt: 'desc' },
+  })
+  res.json(guards)
+})
+
+// 復元
+app.put('/api/guards/:id/restore', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: true, leftAt: null } })
+  res.json({ success: true })
+})
+
+// 完全削除（ADMIN のみ）
+app.delete('/api/guards/:id/permanent', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId, isActive: false } })
+  if (!existing) { res.status(404).json({ error: 'アーカイブ済み隊員が見つかりません' }); return }
+
+  await prisma.guard.delete({ where: { id: req.params.id } })
   res.json({ success: true })
 })
 
@@ -1103,6 +1134,16 @@ app.post('/api/schedules', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERAT
   const { guardId, siteId, date, startTime, endTime, notes, contractId } = req.body
   if (!guardId || !siteId || !date || !startTime || !endTime) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  // 同日同一隊員の重複チェック（CANCELLED除く）
+  const duplicate = await prisma.schedule.findFirst({
+    where: { companyId, guardId, date: new Date(date), status: { not: 'CANCELLED' } },
+    include: { site: { select: { name: true } } },
+  })
+  if (duplicate) {
+    res.status(409).json({ error: `この隊員はすでに「${duplicate.site?.name ?? '別現場'}」に配員済みです` })
+    return
   }
 
   const schedule = await prisma.schedule.create({
@@ -5980,7 +6021,7 @@ function calculateAssignmentScore(
 // POST /api/dispatch/optimize - 最適人材配置
 app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { date, siteIds, guardIds, mode = 'balanced' } = req.body
+  const { date, siteIds, guardIds, mode = 'balanced', respectSurvey = false } = req.body
 
   if (!date) { res.status(400).json({ error: 'date は必須です' }); return }
 
@@ -6033,7 +6074,26 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     select: { guardId: true },
   })
   const busyGuardIds = new Set(busyGuardSchedules.map((s) => s.guardId))
-  const availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+  let availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+
+  // 2.5. シフト調査連動フィルタ（respectSurvey=trueの場合、出勤可の隊員のみ）
+  if (respectSurvey) {
+    const survey = await prisma.shiftSurvey.findFirst({
+      where: { companyId, startDate: { lte: targetDate }, endDate: { gte: targetDate } },
+      include: { responses: { select: { guardId: true, answers: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (survey) {
+      const dateStr = date as string
+      const surveyAvailableIds = new Set<string>()
+      for (const resp of survey.responses) {
+        const answers = resp.answers as Array<{ date: string; available: boolean }>
+        const ans = answers.find(a => a.date === dateStr)
+        if (ans?.available) surveyAvailableIds.add(resp.guardId)
+      }
+      availableGuards = availableGuards.filter(g => surveyAvailableIds.has(g.id))
+    }
+  }
 
   // 3. 過去の配置回数を集計（各隊員×各現場）
   const pastSchedules = await prisma.schedule.findMany({
