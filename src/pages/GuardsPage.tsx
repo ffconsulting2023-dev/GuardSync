@@ -12,9 +12,33 @@ const EMPLOYMENT_LABELS = EMPLOYMENT_TYPE
 const GENDER_LABELS = GENDER
 const PAY_TYPES = PAY_TYPE
 
+// 警備保有資格（チェックボックス）
+const SECURITY_CERTS = [
+  '交通誘導警備業務検定1級', '交通誘導警備業務検定2級',
+  '雑踏警備業務検定1級',    '雑踏警備業務検定2級',
+  '施設警備業務検定1級',    '施設警備業務検定2級',
+  '空港保安警備業務検定1級', '空港保安警備業務検定2級',
+  '貴重品運搬警備業務検定1級', '貴重品運搬警備業務検定2級',
+]
+
+// 運転免許証（チェックボックス）
+const DRIVER_LICENSE_OPTIONS = [
+  '普通自動車免許（AT限定）',
+  '普通自動車免許',
+  '準中型自動車免許',
+  '中型自動車免許',
+  '大型自動車免許',
+  '普通二輪免許（AT限定）',
+  '普通二輪免許',
+  '大型二輪免許',
+]
+
+// チェックボックス管理の全資格（その他保有資格の残余抽出に使用）
+const ALL_CHECKBOX_CERTS = new Set([...SECURITY_CERTS, ...DRIVER_LICENSE_OPTIONS])
+
 interface GuardFormData {
   employeeNumber: string; name: string; nameKana: string; birthDate: string; gender: string
-  phone: string; email: string; address: string; employmentType: string; certifications: string[]
+  phone: string; email: string; address: string; employmentType: string; certifications: string[]; otherCertText: string
   dailyPayEnabled: boolean; lineWorksId: string
   // 基本情報拡張
   guardClass: string; skills: string[]; nationality: string; financialIssues: boolean
@@ -48,7 +72,7 @@ interface GuardFormData {
 
 const EMPTY_FORM: GuardFormData = {
   employeeNumber: '', name: '', nameKana: '', birthDate: '', gender: 'MALE',
-  phone: '', email: '', address: '', employmentType: 'PART_TIME', certifications: [], dailyPayEnabled: false,
+  phone: '', email: '', address: '', employmentType: 'PART_TIME', certifications: [], otherCertText: '', dailyPayEnabled: false,
   lineWorksId: '',
   guardClass: '', skills: [], nationality: '', financialIssues: false, mbti: '', dormitory: '', notes: '',
   postalCode: '', prefecture: '', city: '', addressDetail: '', buildingName: '',
@@ -168,7 +192,9 @@ export default function GuardsPage() {
       employeeNumber: guard.employeeNumber, name: guard.name, nameKana: guard.nameKana,
       birthDate: guard.birthDate ? guard.birthDate.split('T')[0] : '', gender: guard.gender || 'MALE',
       phone: guard.phone || '', email: guard.email || '', address: guard.address || '',
-      employmentType: guard.employmentType, certifications: guard.certifications || [],
+      employmentType: guard.employmentType,
+      certifications: (guard.certifications || []).filter((c: string) => ALL_CHECKBOX_CERTS.has(c)),
+      otherCertText: (guard.certifications || []).filter((c: string) => !ALL_CHECKBOX_CERTS.has(c)).join('、'),
       dailyPayEnabled: guard.dailyPayEnabled, lineWorksId: guard.lineWorksId || '',
       guardClass: guard.guardClass || '', skills: guard.skills || [], nationality: guard.nationality || '',
       financialIssues: guard.financialIssues || false, mbti: guard.mbti || '',
@@ -212,9 +238,11 @@ export default function GuardsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const { bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder, ...rest } = form
+    const { bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder, otherCertText, ...rest } = form
+    const otherCerts = otherCertText ? otherCertText.split(/[,、\n]/).map(s => s.trim()).filter(Boolean) : []
     const data: any = {
       ...rest,
+      certifications: [...rest.certifications, ...otherCerts],
       bankAccount: bankName ? { bank: bankName, branch: bankBranch, type: bankAccountType, number: bankAccountNumber, holder: bankAccountHolder } : undefined,
       ngGuardIds: form.ngGuardIds.length > 0 ? form.ngGuardIds : undefined,
       ngCompanies: form.ngCompanies.length > 0 ? form.ngCompanies : undefined,
@@ -441,16 +469,11 @@ export default function GuardsPage() {
                       ))}
                     </div>
                   </div>
+                  {/* 警備保有資格 */}
                   <div>
                     <label className="form-label">警備保有資格</label>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-1">
-                      {[
-                        '交通誘導警備業務検定1級', '交通誘導警備業務検定2級',
-                        '雑踏警備業務検定1級',    '雑踏警備業務検定2級',
-                        '施設警備業務検定1級',    '施設警備業務検定2級',
-                        '空港保安警備業務検定1級', '空港保安警備業務検定2級',
-                        '貴重品運搬警備業務検定1級', '貴重品運搬警備業務検定2級',
-                      ].map(cert => (
+                      {SECURITY_CERTS.map(cert => (
                         <label key={cert} className="flex items-center gap-2 cursor-pointer select-none">
                           <input
                             type="checkbox"
@@ -467,6 +490,41 @@ export default function GuardsPage() {
                         </label>
                       ))}
                     </div>
+                  </div>
+
+                  {/* 運転免許証 */}
+                  <div>
+                    <label className="form-label">運転免許証</label>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-1">
+                      {DRIVER_LICENSE_OPTIONS.map(lic => (
+                        <label key={lic} className="flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={form.certifications.includes(lic)}
+                            onChange={e => {
+                              const next = e.target.checked
+                                ? [...form.certifications, lic]
+                                : form.certifications.filter(c => c !== lic)
+                              setForm(f => ({ ...f, certifications: next }))
+                            }}
+                            className="w-4 h-4 accent-[#1e3a5f] flex-shrink-0"
+                          />
+                          <span className="text-sm text-gray-700">{lic}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* その他保有資格 */}
+                  <div>
+                    <label className="form-label">その他保有資格</label>
+                    <input
+                      type="text"
+                      value={form.otherCertText}
+                      onChange={e => setForm(f => ({ ...f, otherCertText: e.target.value }))}
+                      className="form-input"
+                      placeholder="例: 危険物取扱者乙種4類、フォークリフト（読点・カンマ区切りで複数入力）"
+                    />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
