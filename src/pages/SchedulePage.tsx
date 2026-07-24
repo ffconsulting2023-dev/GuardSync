@@ -161,6 +161,41 @@ function GuardCard({ guard, onDragStart }: { guard: any; onDragStart: (g: any) =
   )
 }
 
+// ─── 隊員カード・横並び版（上段用）─────────────────────────
+function GuardCardHorizontal({ guard, onDragStart }: { guard: any; onDragStart: (g: any) => void }) {
+  const surveyDot = guard.surveyAvailable === true
+    ? <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" title="勤務可" />
+    : guard.surveyAvailable === false
+    ? <span className="w-2 h-2 rounded-full bg-red-400 flex-shrink-0" title="勤務不可" />
+    : <span className="w-2 h-2 rounded-full bg-gray-200 flex-shrink-0" title="未回答" />
+
+  return (
+    <div
+      draggable
+      onDragStart={e => {
+        e.dataTransfer.setData('guardId', guard.id)
+        e.dataTransfer.effectAllowed = 'copy'
+        onDragStart(guard)
+      }}
+      className={`flex flex-col items-center gap-1.5 px-2 py-2 rounded-xl cursor-grab active:cursor-grabbing border transition-all select-none flex-shrink-0 w-20
+        ${guard.isAssigned
+          ? 'bg-gray-50 border-gray-100 opacity-50'
+          : 'bg-white border-gray-200 hover:border-[#1e3a5f]/40 hover:shadow-md'
+        }`}
+    >
+      <div className="relative">
+        <GuardAvatar guardId={guard.id} name={guard.name} hasPhoto={guard.hasPhoto} size="lg" />
+        <span className="absolute -bottom-0.5 -right-0.5">{surveyDot}</span>
+      </div>
+      <p className="text-xs font-medium text-gray-700 text-center leading-tight line-clamp-2 w-full">{guard.name}</p>
+      {guard.nearestStation1 && (
+        <p className="text-[10px] text-gray-400 text-center leading-tight truncate w-full">{guard.nearestStation1}駅</p>
+      )}
+      {guard.isAssigned && <span className="text-[10px] text-blue-500">配員済</span>}
+    </div>
+  )
+}
+
 // ─── 現場カード（ドロップ対象）──────────────────────────────
 function SiteDropZone({
   site, onDrop, onCancelSchedule, canEdit,
@@ -343,74 +378,66 @@ export default function SchedulePage() {
         </div>
       </div>
 
-      {/* ─── メインコンテンツ（左右分割）─── */}
+      {/* ─── メインコンテンツ（上下分割）─── */}
       {isLoading ? (
         <div className="flex-1 flex items-center justify-center text-gray-400">読み込み中...</div>
       ) : (
-        <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-col flex-1 overflow-hidden">
 
-          {/* ─── 左パネル：隊員リスト ─── */}
-          <div className="w-64 flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50">
-            <div className="px-3 py-2.5 border-b border-gray-100 bg-white">
-              <div className="flex items-center justify-between mb-1.5">
-                <p className="text-xs font-semibold text-gray-600">隊員一覧</p>
-                <span className="text-xs text-gray-400">{filteredGuards.length}名</span>
-              </div>
-              {hasSurvey && (
+          {/* ─── 上段：隊員一覧（横スクロール）─── */}
+          <div className="flex-shrink-0 border-b border-gray-200 bg-gray-50">
+            {/* 上段ヘッダー */}
+            <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-100 bg-white">
+              <p className="text-xs font-semibold text-gray-600 whitespace-nowrap">隊員一覧</p>
+              <span className="text-xs text-gray-400 whitespace-nowrap">{filteredGuards.length}名</span>
+              {hasSurvey ? (
                 <select
                   value={surveyFilter}
                   onChange={e => setSurveyFilter(e.target.value as any)}
-                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-gray-600 focus:outline-none focus:border-[#1e3a5f]"
+                  className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white text-gray-600 focus:outline-none focus:border-[#1e3a5f]"
                 >
                   <option value="all">シフト調査：全員</option>
                   <option value="available">◎ 勤務可のみ</option>
                   <option value="unavailable">✕ 勤務不可のみ</option>
                   <option value="noAnswer">— 未回答のみ</option>
                 </select>
+              ) : (
+                <span className="text-xs text-gray-300">この日のシフト調査なし</span>
               )}
-              {!hasSurvey && (
-                <p className="text-xs text-gray-300">この日のシフト調査なし</p>
-              )}
+              <span className="ml-auto text-xs text-gray-300">← カードをドラッグして下の現場へ配員 →</span>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+            {/* 隊員カード横スクロール */}
+            <div className="flex gap-2 px-3 py-2.5 overflow-x-auto">
               {filteredGuards.length === 0 ? (
-                <p className="text-xs text-gray-300 text-center py-8">隊員なし</p>
+                <p className="text-xs text-gray-300 py-4 px-2">表示する隊員がいません</p>
               ) : (
                 filteredGuards.map(g => (
-                  <GuardCard key={g.id} guard={g} onDragStart={setDraggedGuard} />
+                  <GuardCardHorizontal key={g.id} guard={g} onDragStart={setDraggedGuard} />
                 ))
               )}
             </div>
-
-            {/* 凡例 */}
-            <div className="px-3 py-2 border-t border-gray-100 bg-white">
-              <p className="text-xs text-gray-400 mb-1">カードをドラッグして現場へ配員</p>
-              <div className="space-y-0.5">
-                <p className="text-xs text-green-600">◎ 勤務可（シフト調査回答）</p>
-                <p className="text-xs text-red-400">✕ 勤務不可</p>
-                <p className="text-xs text-gray-300">— 未回答 / 調査対象外</p>
-              </div>
-            </div>
           </div>
 
-          {/* ─── 右パネル：配員ボード ─── */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {/* ─── 下段：配員ボード（現場ドロップゾーン）─── */}
+          <div className="flex-1 overflow-y-auto p-4">
             {sites.length === 0 ? (
               <div className="text-center py-20 text-gray-300">
                 <p className="text-4xl mb-3">📋</p>
                 <p className="text-sm">現場が登録されていません</p>
               </div>
             ) : (
-              sites.map(site => (
-                <SiteDropZone
-                  key={site.id}
-                  site={site}
-                  onDrop={handleDrop}
-                  onCancelSchedule={id => cancelMutation.mutate(id)}
-                  canEdit={canEdit}
-                />
-              ))
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {sites.map(site => (
+                  <SiteDropZone
+                    key={site.id}
+                    site={site}
+                    onDrop={handleDrop}
+                    onCancelSchedule={id => cancelMutation.mutate(id)}
+                    canEdit={canEdit}
+                  />
+                ))}
+              </div>
             )}
           </div>
         </div>
