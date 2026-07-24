@@ -34,6 +34,10 @@ export default function AttendancePage() {
   const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'))
   // scheduleId → 時刻入力state
   const [timeStates, setTimeStates] = useState<Record<string, TimeState>>({})
+  // attendanceId → 'in' | 'out' | null（修正モード管理）
+  const [editMode, setEditMode] = useState<Record<string, 'in' | 'out' | null>>({})
+  // 修正用時刻入力（attendanceId → HH:mm）
+  const [editTimes, setEditTimes] = useState<Record<string, string>>({})
 
   const { data: schedules = [], isLoading } = useQuery({
     queryKey: ['schedules', date],
@@ -76,6 +80,34 @@ export default function AttendancePage() {
       api.post('/attendance/clock-out', { scheduleId, clockOutTime, breakMinutes }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
   })
+
+  const updateAttendanceMutation = useMutation({
+    mutationFn: ({ attendanceId, clockInTime, clockOutTime }: { attendanceId: string; clockInTime?: string; clockOutTime?: string }) =>
+      api.put(`/attendance/${attendanceId}`, { clockInTime, clockOutTime }),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ['schedules'] })
+      setEditMode(prev => ({ ...prev, [vars.attendanceId]: null }))
+    },
+  })
+
+  const openEdit = (attendanceId: string, type: 'in' | 'out', currentTime: string) => {
+    setEditMode(prev => ({ ...prev, [attendanceId]: type }))
+    setEditTimes(prev => ({ ...prev, [`${attendanceId}_${type}`]: currentTime }))
+  }
+
+  const cancelEdit = (attendanceId: string) => {
+    setEditMode(prev => ({ ...prev, [attendanceId]: null }))
+  }
+
+  const submitEdit = (attendanceId: string, type: 'in' | 'out') => {
+    const time = editTimes[`${attendanceId}_${type}`]
+    if (!time) return
+    updateAttendanceMutation.mutate({
+      attendanceId,
+      clockInTime: type === 'in' ? time : undefined,
+      clockOutTime: type === 'out' ? time : undefined,
+    })
+  }
 
   const getStatusInfo = (s: any) => {
     if (!s.attendance) return { label: '未出勤', className: 'badge-gray', canClockIn: true, canClockOut: false }
@@ -161,16 +193,72 @@ export default function AttendancePage() {
                         依頼時間: <span className="font-mono font-medium text-gray-600">{s.startTime}〜{s.endTime}</span>
                       </p>
                     </div>
-                    {/* 実打刻表示（完了後） */}
+                    {/* 実打刻表示＋修正ボタン */}
                     {s.attendance?.clockInAt && (
-                      <div className="text-right text-xs shrink-0">
-                        <p className="text-blue-600">
-                          出勤 <span className="font-mono font-semibold">{format(new Date(s.attendance.clockInAt), 'HH:mm')}</span>
-                        </p>
+                      <div className="text-right text-xs shrink-0 space-y-1.5">
+                        {/* 出勤 */}
+                        {editMode[s.attendance.id] === 'in' ? (
+                          <div className="flex items-center gap-1 justify-end">
+                            <input
+                              type="time"
+                              value={editTimes[`${s.attendance.id}_in`] ?? ''}
+                              onChange={e => setEditTimes(prev => ({ ...prev, [`${s.attendance.id}_in`]: e.target.value }))}
+                              className="form-input w-28 text-xs font-mono py-1"
+                              autoFocus
+                            />
+                            <button
+                              onClick={() => submitEdit(s.attendance.id, 'in')}
+                              disabled={updateAttendanceMutation.isPending}
+                              className="bg-blue-600 text-white px-2 py-1 rounded text-[10px] disabled:opacity-50"
+                            >保存</button>
+                            <button onClick={() => cancelEdit(s.attendance.id)} className="text-gray-400 hover:text-gray-600 px-1">✕</button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5 justify-end">
+                            <span className="text-blue-600">
+                              出勤 <span className="font-mono font-semibold">{format(new Date(s.attendance.clockInAt), 'HH:mm')}</span>
+                            </span>
+                            {canEdit && (
+                              <button
+                                onClick={() => openEdit(s.attendance.id, 'in', format(new Date(s.attendance.clockInAt), 'HH:mm'))}
+                                className="text-gray-300 hover:text-blue-500 text-[10px] transition-colors"
+                                title="出勤時刻を修正"
+                              >✏️</button>
+                            )}
+                          </div>
+                        )}
+                        {/* 退勤 */}
                         {s.attendance.clockOutAt && (
-                          <p className="text-green-600">
-                            退勤 <span className="font-mono font-semibold">{format(new Date(s.attendance.clockOutAt), 'HH:mm')}</span>
-                          </p>
+                          editMode[s.attendance.id] === 'out' ? (
+                            <div className="flex items-center gap-1 justify-end">
+                              <input
+                                type="time"
+                                value={editTimes[`${s.attendance.id}_out`] ?? ''}
+                                onChange={e => setEditTimes(prev => ({ ...prev, [`${s.attendance.id}_out`]: e.target.value }))}
+                                className="form-input w-28 text-xs font-mono py-1"
+                                autoFocus
+                              />
+                              <button
+                                onClick={() => submitEdit(s.attendance.id, 'out')}
+                                disabled={updateAttendanceMutation.isPending}
+                                className="bg-green-600 text-white px-2 py-1 rounded text-[10px] disabled:opacity-50"
+                              >保存</button>
+                              <button onClick={() => cancelEdit(s.attendance.id)} className="text-gray-400 hover:text-gray-600 px-1">✕</button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-1.5 justify-end">
+                              <span className="text-green-600">
+                                退勤 <span className="font-mono font-semibold">{format(new Date(s.attendance.clockOutAt), 'HH:mm')}</span>
+                              </span>
+                              {canEdit && (
+                                <button
+                                  onClick={() => openEdit(s.attendance.id, 'out', format(new Date(s.attendance.clockOutAt), 'HH:mm'))}
+                                  className="text-gray-300 hover:text-green-500 text-[10px] transition-colors"
+                                  title="退勤時刻を修正"
+                                >✏️</button>
+                              )}
+                            </div>
+                          )
                         )}
                       </div>
                     )}

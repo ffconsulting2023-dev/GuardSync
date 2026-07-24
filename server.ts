@@ -1219,6 +1219,40 @@ app.post('/api/attendance/clock-out', authenticate, async (req, res) => {
   res.json(updated)
 })
 
+// 打刻時刻の修正（出勤・退勤どちらも更新可）
+app.put('/api/attendance/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { clockInTime, clockOutTime, breakMinutes } = req.body
+
+  const attendance = await prisma.attendance.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { schedule: true },
+  })
+  if (!attendance) { res.status(404).json({ error: '打刻データが見つかりません' }); return }
+
+  const update: Record<string, unknown> = {}
+
+  if (clockInTime) {
+    const actualClockInAt = buildDateTime(attendance.schedule.date, clockInTime)
+    update.clockInAt = actualClockInAt
+    update.earlyOvertimeMin = Math.max(0, timeToMin(attendance.schedule.startTime) - timeToMin(dateToHHMM(actualClockInAt)))
+  }
+
+  if (clockOutTime) {
+    const base = update.clockInAt instanceof Date ? update.clockInAt : attendance.clockInAt ?? new Date()
+    const actualClockOutAt = buildDateTime(attendance.schedule.date, clockOutTime, true, base)
+    update.clockOutAt = actualClockOutAt
+    update.lateOvertimeMin = Math.max(0, timeToMin(dateToHHMM(actualClockOutAt)) - timeToMin(attendance.schedule.endTime))
+  }
+
+  if (breakMinutes !== undefined) {
+    update.breakMinutes = Number(breakMinutes) || 0
+  }
+
+  const updated = await prisma.attendance.update({ where: { id: req.params.id }, data: update })
+  res.json(updated)
+})
+
 // ─────────────────────────────────────────────
 // 請求 API
 // ─────────────────────────────────────────────
