@@ -40,6 +40,8 @@ interface GuardFormData {
   employeeNumber: string; name: string; nameKana: string; birthDate: string; gender: string
   phone: string; email: string; address: string; employmentType: string; certifications: string[]; otherCertText: string
   dailyPayEnabled: boolean; lineWorksId: string
+  // 入退社
+  joinedAt: string; leftAt: string
   // 基本情報拡張
   guardClass: string; skills: string[]; nationality: string; financialIssues: boolean
   mbti: string; dormitory: string; notes: string
@@ -74,6 +76,7 @@ const EMPTY_FORM: GuardFormData = {
   employeeNumber: '', name: '', nameKana: '', birthDate: '', gender: 'MALE',
   phone: '', email: '', address: '', employmentType: 'PART_TIME', certifications: [], otherCertText: '', dailyPayEnabled: false,
   lineWorksId: '',
+  joinedAt: '', leftAt: '',
   guardClass: '', skills: [], nationality: '', financialIssues: false, mbti: '', dormitory: '', notes: '',
   postalCode: '', prefecture: '', city: '', addressDetail: '', buildingName: '',
   nearestStation1: '', line1: '', nearestStation2: '', line2: '', birthplace: '', medicalHistory: '',
@@ -196,6 +199,7 @@ export default function GuardsPage() {
       certifications: (guard.certifications || []).filter((c: string) => ALL_CHECKBOX_CERTS.has(c)),
       otherCertText: (guard.certifications || []).filter((c: string) => !ALL_CHECKBOX_CERTS.has(c)).join('、'),
       dailyPayEnabled: guard.dailyPayEnabled, lineWorksId: guard.lineWorksId || '',
+      joinedAt: guard.joinedAt ? guard.joinedAt.split('T')[0] : '', leftAt: guard.leftAt ? guard.leftAt.split('T')[0] : '',
       guardClass: guard.guardClass || '', skills: guard.skills || [], nationality: guard.nationality || '',
       financialIssues: guard.financialIssues || false, mbti: guard.mbti || '',
       dormitory: guard.dormitory || '', notes: guard.notes || '',
@@ -454,6 +458,16 @@ export default function GuardsPage() {
                     <div>
                       <label className="form-label">国籍</label>
                       <input type="text" value={form.nationality} onChange={e => setForm(f => ({ ...f, nationality: e.target.value }))} className="form-input" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label">入社年月日</label>
+                      <input type="date" value={form.joinedAt} onChange={e => setForm(f => ({ ...f, joinedAt: e.target.value }))} className="form-input" />
+                    </div>
+                    <div>
+                      <label className="form-label">退社年月日</label>
+                      <input type="date" value={form.leftAt} onChange={e => setForm(f => ({ ...f, leftAt: e.target.value }))} className="form-input" />
                     </div>
                   </div>
                   <div>
