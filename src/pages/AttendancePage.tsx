@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
-import { format } from 'date-fns'
+import { format, addDays, subDays } from 'date-fns'
+import { ja } from 'date-fns/locale'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
@@ -31,7 +32,8 @@ export default function AttendancePage() {
   const qc = useQueryClient()
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER', 'OPERATOR')
 
-  const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'))
+  const [viewDate, setViewDate] = useState(new Date())
+  const date = format(viewDate, 'yyyy-MM-dd')
   // scheduleId → 時刻入力state
   const [timeStates, setTimeStates] = useState<Record<string, TimeState>>({})
   // attendanceId → 'in' | 'out' | null（修正モード管理）
@@ -139,15 +141,23 @@ export default function AttendancePage() {
   return (
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <h1 className="text-xl font-bold text-gray-800">出退勤管理</h1>
-        <div className="flex items-center gap-2">
-          <a
-            href={`${import.meta.env.VITE_API_URL || ''}/api/export/attendance?from=${date}&to=${date}`}
-            download
-            className="btn-secondary text-sm"
-          >⬇ CSV</a>
-          <input type="date" value={date} onChange={e => setDate(e.target.value)} className="form-input w-auto" />
+        {/* タイトル＋日付ナビ */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <h1 className="text-xl font-bold text-gray-800">出退勤管理</h1>
+          <button onClick={() => setViewDate(d => subDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">◀</button>
+          <span className="text-sm font-medium text-gray-700 whitespace-nowrap">
+            {format(viewDate, 'yyyy年M月d日(E)', { locale: ja })}
+          </span>
+          <button onClick={() => setViewDate(d => addDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">▶</button>
+          <button onClick={() => setViewDate(new Date())} className="text-xs text-blue-600 hover:underline">今日</button>
+          <input type="date" value={date} onChange={e => setViewDate(new Date(e.target.value))} className="form-input w-auto text-sm" />
         </div>
+        {/* 右側アクション */}
+        <a
+          href={`${import.meta.env.VITE_API_URL || ''}/api/export/attendance?from=${date}&to=${date}`}
+          download
+          className="btn-secondary text-sm"
+        >⬇ CSV</a>
       </div>
 
       {/* サマリー */}
