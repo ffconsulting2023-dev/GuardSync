@@ -744,12 +744,43 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   res.json(guard)
 })
 
+// アーカイブ（論理削除）
 app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
-  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false } })
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false, leftAt: new Date() } })
+  res.json({ success: true })
+})
+
+// アーカイブ一覧取得
+app.get('/api/guards/archived', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: false },
+    orderBy: { leftAt: 'desc' },
+  })
+  res.json(guards)
+})
+
+// 復元
+app.put('/api/guards/:id/restore', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: true, leftAt: null } })
+  res.json({ success: true })
+})
+
+// 完全削除（ADMIN のみ）
+app.delete('/api/guards/:id/permanent', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId, isActive: false } })
+  if (!existing) { res.status(404).json({ error: 'アーカイブ済み隊員が見つかりません' }); return }
+
+  await prisma.guard.delete({ where: { id: req.params.id } })
   res.json({ success: true })
 })
 
