@@ -665,7 +665,7 @@ export default function SchedulePage() {
                 <p className="text-sm">現場が登録されていません</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
                 {sites.map(site => (
                   <SiteDropZone
                     key={site.id}
