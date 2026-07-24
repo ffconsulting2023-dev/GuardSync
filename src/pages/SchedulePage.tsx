@@ -593,7 +593,17 @@ export default function SchedulePage() {
     <div className="flex flex-col h-full" style={{ height: 'calc(100vh - 56px)' }}>
       {/* ─── ヘッダー ─── */}
       <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-3 bg-white border-b border-gray-100">
-        <h1 className="text-lg font-bold text-gray-800">管制・配員ボード</h1>
+        {/* タイトル＋日付ナビ */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <h1 className="text-lg font-bold text-gray-800">管制・配員ボード</h1>
+          <button onClick={() => setViewDate(d => subDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">◀</button>
+          <span className="text-sm font-medium text-gray-700 min-w-32 text-center">
+            {format(viewDate, 'yyyy年M月d日(E)', { locale: ja })}
+          </span>
+          <button onClick={() => setViewDate(d => addDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">▶</button>
+          <button onClick={() => setViewDate(new Date())} className="text-xs text-blue-600 hover:underline">今日</button>
+        </div>
+        {/* 右側アクション */}
         <div className="flex items-center gap-2 flex-wrap">
           {canEdit && (
             <button
@@ -605,13 +615,6 @@ export default function SchedulePage() {
               {suggestMutation.isPending ? '計算中...' : '🤖 自動配置サジェスト'}
             </button>
           )}
-          {/* 日付ナビ */}
-          <button onClick={() => setViewDate(d => subDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">◀</button>
-          <span className="text-sm font-medium text-gray-700 min-w-32 text-center">
-            {format(viewDate, 'yyyy年M月d日(E)', { locale: ja })}
-          </span>
-          <button onClick={() => setViewDate(d => addDays(d, 1))} className="btn-secondary px-2.5 py-1.5 text-sm">▶</button>
-          <button onClick={() => setViewDate(new Date())} className="text-xs text-blue-600 hover:underline">今日</button>
           <button onClick={downloadMonthlyCSV} className="btn-secondary text-sm">📥 月間CSV</button>
         </div>
       </div>
