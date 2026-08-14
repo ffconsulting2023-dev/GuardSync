@@ -22,6 +22,7 @@ const NAV_GROUPS: NavGroup[] = [
       { path: '/guards',    label: '隊員管理',   icon: '👷' },
       { path: '/partners',  label: '協力会社',   icon: '🤝' },
       { path: '/vehicles',  label: '車両管理',   icon: '🚗' },
+      { path: '/equipment', label: '備品管理',   icon: '📦' },
     ],
   },
   {

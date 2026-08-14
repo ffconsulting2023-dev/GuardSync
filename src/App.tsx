@@ -35,6 +35,7 @@ import InsuranceRatesPage from './pages/InsuranceRatesPage'
 import ResidentTaxPage from './pages/ResidentTaxPage'
 import SuspendedPage from './pages/SuspendedPage'
 import MyNumberPage from './pages/MyNumberPage'
+import EquipmentPage from './pages/EquipmentPage'
 import LoadingSpinner from './components/LoadingSpinner'
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string | null }> {
@@ -89,6 +90,7 @@ export default function App() {
                     <Route path="guards/*" element={<GuardsPage />} />
                     <Route path="partners/*" element={<PartnersPage />} />
                     <Route path="vehicles/*" element={<VehiclesPage />} />
+                    <Route path="equipment/*" element={<EquipmentPage />} />
 
                     {/* ── 勤怠管理モジュール ── */}
                     <Route path="schedule/*" element={<SchedulePage />} />
