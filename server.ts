@@ -1437,6 +1437,56 @@ async function generateSignedPdf(eContractId: string): Promise<{ path: string; h
   return { path: outPath, hash }
 }
 
+// 合意締結証明書PDFを生成し、保存パスを返す（立会人型の締結証跡）
+async function generateCertificatePdf(eContractId: string): Promise<string> {
+  const ec = await prisma.electronicContract.findUnique({
+    where: { id: eContractId },
+    include: { signatures: true },
+  })
+  if (!ec) throw new Error('電子契約が見つかりません')
+
+  const outPath = path.join(ECONTRACT_DIR, `certificate-${eContractId}.pdf`)
+  const doc = new PDFDocument({ size: 'A4', margin: 50 })
+  const stream = fs.createWriteStream(outPath)
+  doc.pipe(stream)
+
+  // 日本語フォント（無ければ英語ラベルにフォールバック）
+  const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+  let jp = false
+  try {
+    if (fs.existsSync(fontPath)) { doc.registerFont('JP', fontPath); doc.font('JP'); jp = true }
+  } catch { /* フォールバック */ }
+  if (!jp) doc.font('Helvetica')
+  const L = (ja: string, en: string) => (jp ? ja : en)
+
+  doc.fontSize(18).text(L('合意締結証明書', 'Agreement Completion Certificate'), { align: 'center' })
+  doc.moveDown(1)
+  doc.fontSize(11)
+  doc.text(`${L('契約書名', 'Title')}: ${ec.title}`)
+  doc.text(`${L('電子契約ID', 'Contract ID')}: ${ec.id}`)
+  doc.text(`${L('締結日時', 'Completed at')}: ${new Date().toLocaleString('ja-JP')}`)
+  doc.moveDown(0.5)
+  if (ec.sourcePdfHash) doc.fontSize(8).text(`${L('原本SHA-256', 'Source SHA-256')}: ${ec.sourcePdfHash}`)
+  if (ec.signedPdfHash) doc.fontSize(8).text(`${L('署名済SHA-256', 'Signed SHA-256')}: ${ec.signedPdfHash}`)
+  doc.moveDown(1)
+
+  doc.fontSize(13).text(L('署名者', 'Signers'))
+  doc.moveDown(0.3)
+  for (const s of ec.signatures) {
+    doc.fontSize(10).fillColor('#000').text(`- ${s.signerName} <${s.signerEmail}>`)
+    doc.fontSize(8).fillColor('#555').text(`   ${L('署名日時', 'Signed')}: ${s.signedAt ? new Date(s.signedAt).toLocaleString('ja-JP') : '-'}   IP: ${s.ipAddress || '-'}`)
+  }
+  doc.moveDown(1)
+  doc.fontSize(8).fillColor('#888').text(
+    L('本証明書は立会人型（メール認証）の電子契約における締結の証跡を記録したものです。',
+      'This certificate records the completion trail of an email-based (witness-type) electronic contract.'),
+  )
+
+  doc.end()
+  await new Promise<void>((resolve, reject) => { stream.on('finish', () => resolve()); stream.on('error', reject) })
+  return outPath
+}
+
 app.get('/api/e-contracts', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const eContracts = await prisma.electronicContract.findMany({
@@ -1561,6 +1611,15 @@ app.get('/api/e-contracts/:id/signed-pdf', authenticate, async (req, res) => {
   res.sendFile(path.resolve(ec.signedPdfPath))
 })
 
+// 合意締結証明書を取得
+app.get('/api/e-contracts/:id/certificate', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec?.certificatePath || !fs.existsSync(ec.certificatePath)) { res.status(404).json({ error: '証明書がありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(ec.certificatePath))
+})
+
 // 電子契約の取消
 app.post('/api/e-contracts/:id/cancel', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
@@ -1683,6 +1742,11 @@ app.post('/api/e-contracts/sign/:token', async (req, res) => {
         auditLog: { push: { action: 'ALL_SIGNED', at: now.toISOString() } },
       },
     })
+    // 合意締結証明書を生成（signedPdfHash 反映後に生成）
+    try {
+      const certPath = await generateCertificatePdf(sig.eContractId)
+      await prisma.electronicContract.update({ where: { id: sig.eContractId }, data: { certificatePath: certPath } })
+    } catch (e) { logger.error('合意締結証明書の生成に失敗', e, { eContractId: sig.eContractId }) }
   } else {
     await prisma.electronicContract.update({
       where: { id: sig.eContractId },

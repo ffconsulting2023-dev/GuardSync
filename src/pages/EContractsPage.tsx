@@ -104,6 +104,9 @@ export default function EContractsPage() {
                 {selected.signedPdfPath && (
                   <button onClick={() => viewPdf(`/e-contracts/${selected.id}/signed-pdf`)} className="btn-primary text-xs">署名済みPDFを表示</button>
                 )}
+                {selected.certificatePath && (
+                  <button onClick={() => viewPdf(`/e-contracts/${selected.id}/certificate`)} className="btn-secondary text-xs">合意締結証明書</button>
+                )}
               </div>
 
               {selected.content && (
