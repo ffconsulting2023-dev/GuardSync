@@ -34,7 +34,8 @@ export default function SignaturePadModal({ title = '署名を描いてくださ
   }
 
   const handleUpload = (f: File) => {
-    if (!f.type.startsWith('image/')) return
+    // 署名済みPDFへの埋め込みは PNG/JPEG のみ対応
+    if (f.type !== 'image/png' && f.type !== 'image/jpeg') { alert('PNGまたはJPEG画像を選択してください'); return }
     const reader = new FileReader()
     reader.onload = () => onConfirm(String(reader.result))
     reader.readAsDataURL(f)
@@ -51,7 +52,7 @@ export default function SignaturePadModal({ title = '署名を描いてくださ
         {allowUpload && (
           <label className="block text-center text-xs text-blue-600 cursor-pointer">
             画像ファイルをアップロード（印影など）
-            <input type="file" accept="image/*" className="hidden" onChange={e => e.target.files?.[0] && handleUpload(e.target.files[0])} />
+            <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => e.target.files?.[0] && handleUpload(e.target.files[0])} />
           </label>
         )}
         <div className="flex gap-2">
