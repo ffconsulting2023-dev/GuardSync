@@ -9,14 +9,7 @@ import { hasRole } from '../lib/auth'
 // 定数・型定義
 // ─────────────────────────────────────────────
 
-export const CATEGORIES: Record<string, { label: string; color: string }> = {
-  GOVERNMENT:   { label: '官公庁',     color: 'bg-purple-100 text-purple-700' },
-  PRIVATE:      { label: '民間企業',   color: 'bg-blue-100 text-blue-700' },
-  CONSTRUCTION: { label: '建設・工事', color: 'bg-orange-100 text-orange-700' },
-  COMMERCIAL:   { label: '商業施設',   color: 'bg-green-100 text-green-700' },
-  INDIVIDUAL:   { label: '個人',       color: 'bg-gray-100 text-gray-600' },
-  OTHER:        { label: 'その他',     color: 'bg-gray-100 text-gray-500' },
-}
+import { CLIENT_CATEGORY } from '../lib/constants'
 
 export const EMPTY_CLIENT_FORM = {
   name: '', nameKana: '', category: 'OTHER', positionTitle: '', contactName: '',
@@ -286,7 +279,7 @@ export default function ClientsPage() {
   })
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
-  const CATEGORY_TABS = [{ key: 'ALL', label: '全て' }, ...Object.entries(CATEGORIES).map(([k, v]) => ({ key: k, label: v.label }))]
+  const CATEGORY_TABS = [{ key: 'ALL', label: '全て' }, ...Object.entries(CLIENT_CATEGORY).map(([k, v]) => ({ key: k, label: v.label }))]
 
   // 表示カラム（NO.と操作列は固定）
   const visibleCols = columns.filter(c => c.visible)
@@ -302,7 +295,7 @@ export default function ClientsPage() {
       case 'clientCode':    return <span className="font-mono text-xs text-gray-500">{client.clientCode || '—'}</span>
       case 'name':          return <span className="font-semibold text-[#1e3a5f]">{client.name}</span>
       case 'nameKana':      return <span className="text-gray-500 text-xs">{client.nameKana || ''}</span>
-      case 'category':      return client.category ? <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${CATEGORIES[client.category]?.color}`}>{CATEGORIES[client.category]?.label}</span> : null
+      case 'category':      return client.category ? <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${CLIENT_CATEGORY[client.category]?.color}`}>{CLIENT_CATEGORY[client.category]?.label}</span> : null
       case 'prefecture':    return <span className="text-gray-600 text-xs">{client.prefecture || ''}</span>
       case 'city':          return <span className="text-gray-600 text-xs">{client.city || ''}</span>
       case 'contactName':   return <span className="text-gray-700 text-xs">{client.contactName || ''}</span>

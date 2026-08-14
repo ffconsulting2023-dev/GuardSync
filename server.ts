@@ -316,7 +316,8 @@ function authenticate(req: express.Request, res: express.Response, next: express
   try {
     const payload = jwt.verify(auth.slice(7), JWT_SECRET) as JwtPayload
     ;(req as any).user = payload
-    next()
+    // テナント利用停止チェックを合成（停止会社は全APIを403で拒否、super-adminは除外）
+    checkCompanyActive(req, res, next)
   } catch {
     res.status(401).json({ error: 'トークンが無効です' })
   }
@@ -381,26 +382,27 @@ async function checkCompanyActive(req: express.Request, res: express.Response, n
     next(); return
   }
 
-  const company = await prisma.company.findUnique({
-    where: { id: user.companyId },
-    select: { isActive: true, subscriptionStatus: true },
-  })
-  companyStatusCache.set(user.companyId, {
-    isActive: company?.isActive ?? false,
-    status: company?.subscriptionStatus ?? 'TRIAL',
-    expiresAt: Date.now() + 60_000,
-  })
+  try {
+    const company = await prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { isActive: true, subscriptionStatus: true },
+    })
+    companyStatusCache.set(user.companyId, {
+      isActive: company?.isActive ?? false,
+      status: company?.subscriptionStatus ?? 'TRIAL',
+      expiresAt: Date.now() + 60_000,
+    })
 
-  if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
-    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
-    return
+    if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
+      res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+      return
+    }
+    next()
+  } catch (err) {
+    // DB一時障害で全リクエストを止めないよう fail-open（アクセスは許可）
+    logger.error('会社停止チェックに失敗（fail-open）', err, { context: 'checkCompanyActive' })
+    next()
   }
-  next()
-}
-
-// authenticateとテナントチェックを合成したミドルウェア
-function authenticateAndCheck(req: express.Request, res: express.Response, next: express.NextFunction) {
-  authenticate(req, res, () => checkCompanyActive(req, res, next))
 }
 
 // ─────────────────────────────────────────────
@@ -434,6 +436,12 @@ app.post('/api/auth/login', async (req, res) => {
 
   const valid = await bcrypt.compare(password, user.password)
   if (!valid) { res.status(401).json({ error: 'メールアドレスまたはパスワードが違います' }); return }
+
+  // 会社が利用停止中の場合はログインを拒否（super-adminは除外）
+  if (!user.isSuperAdmin && (!user.company.isActive || user.company.subscriptionStatus === 'SUSPENDED')) {
+    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+    return
+  }
 
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } })
 
@@ -744,12 +752,43 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   res.json(guard)
 })
 
+// アーカイブ（論理削除）
 app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
-  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false } })
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false, leftAt: new Date() } })
+  res.json({ success: true })
+})
+
+// アーカイブ一覧取得
+app.get('/api/guards/archived', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: false },
+    orderBy: { leftAt: 'desc' },
+  })
+  res.json(guards)
+})
+
+// 復元
+app.put('/api/guards/:id/restore', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: true, leftAt: null } })
+  res.json({ success: true })
+})
+
+// 完全削除（ADMIN のみ）
+app.delete('/api/guards/:id/permanent', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId, isActive: false } })
+  if (!existing) { res.status(404).json({ error: 'アーカイブ済み隊員が見つかりません' }); return }
+
+  await prisma.guard.delete({ where: { id: req.params.id } })
   res.json({ success: true })
 })
 
@@ -1105,6 +1144,16 @@ app.post('/api/schedules', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERAT
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
+  // 同日同一隊員の重複チェック（CANCELLED除く）
+  const duplicate = await prisma.schedule.findFirst({
+    where: { companyId, guardId, date: new Date(date), status: { not: 'CANCELLED' } },
+    include: { site: { select: { name: true } } },
+  })
+  if (duplicate) {
+    res.status(409).json({ error: `この隊員はすでに「${duplicate.site?.name ?? '別現場'}」に配員済みです` })
+    return
+  }
+
   const schedule = await prisma.schedule.create({
     data: { companyId, guardId, siteId, date: new Date(date), startTime, endTime, notes,
       contractId: contractId || null },
@@ -1142,9 +1191,31 @@ app.delete('/api/schedules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), 
 // 出退勤 API
 // ─────────────────────────────────────────────
 
+// HH:mm 文字列 + 基準日 → Date
+function buildDateTime(dateBase: Date, timeStr: string, allowNextDay = false, referenceAt?: Date): Date {
+  const [h, m] = timeStr.split(':').map(Number)
+  const dt = new Date(dateBase)
+  dt.setHours(h, m, 0, 0)
+  if (allowNextDay && referenceAt && dt <= referenceAt) {
+    dt.setDate(dt.getDate() + 1)
+  }
+  return dt
+}
+
+// HH:mm → 分数
+function timeToMin(t: string): number {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+// Date → HH:mm
+function dateToHHMM(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 app.post('/api/attendance/clock-in', authenticate, async (req, res) => {
-  const { userId, companyId } = (req as any).user as JwtPayload
-  const { scheduleId } = req.body
+  const { companyId } = (req as any).user as JwtPayload
+  const { scheduleId, clockInTime } = req.body  // clockInTime: "HH:mm"（省略時は現在時刻）
   if (!scheduleId) { res.status(400).json({ error: 'scheduleIdは必須です' }); return }
 
   const schedule = await prisma.schedule.findFirst({ where: { id: scheduleId, companyId } })
@@ -1153,25 +1224,81 @@ app.post('/api/attendance/clock-in', authenticate, async (req, res) => {
   const existing = await prisma.attendance.findUnique({ where: { scheduleId } })
   if (existing?.clockInAt) { res.status(409).json({ error: '既に出勤打刻済みです' }); return }
 
+  const actualClockInAt = clockInTime
+    ? buildDateTime(schedule.date, clockInTime)
+    : new Date()
+
+  // 早出残業 = 予定開始より前に出勤した分
+  const earlyOvertimeMin = Math.max(0, timeToMin(schedule.startTime) - timeToMin(dateToHHMM(actualClockInAt)))
+
   const attendance = existing
-    ? await prisma.attendance.update({ where: { scheduleId }, data: { clockInAt: new Date(), status: 'CLOCKED_IN' } })
-    : await prisma.attendance.create({ data: { companyId, guardId: schedule.guardId, scheduleId, clockInAt: new Date(), status: 'CLOCKED_IN' } })
+    ? await prisma.attendance.update({ where: { scheduleId }, data: { clockInAt: actualClockInAt, earlyOvertimeMin, status: 'CLOCKED_IN' } })
+    : await prisma.attendance.create({ data: { companyId, guardId: schedule.guardId, scheduleId, clockInAt: actualClockInAt, earlyOvertimeMin, status: 'CLOCKED_IN' } })
 
   res.json(attendance)
 })
 
 app.post('/api/attendance/clock-out', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { scheduleId, breakMinutes } = req.body
+  const { scheduleId, breakMinutes, clockOutTime } = req.body  // clockOutTime: "HH:mm"（省略時は現在時刻）
   if (!scheduleId) { res.status(400).json({ error: 'scheduleIdは必須です' }); return }
 
-  const attendance = await prisma.attendance.findFirst({ where: { scheduleId, companyId } })
+  const attendance = await prisma.attendance.findFirst({
+    where: { scheduleId, companyId },
+    include: { schedule: true },
+  })
   if (!attendance?.clockInAt) { res.status(400).json({ error: '出勤打刻がありません' }); return }
+
+  const actualClockOutAt = clockOutTime
+    ? buildDateTime(attendance.schedule.date, clockOutTime, true, attendance.clockInAt)
+    : new Date()
+
+  // 遅出残業 = 予定終了より後まで勤務した分
+  const lateOvertimeMin = Math.max(0, timeToMin(dateToHHMM(actualClockOutAt)) - timeToMin(attendance.schedule.endTime))
 
   const updated = await prisma.attendance.update({
     where: { id: attendance.id },
-    data: { clockOutAt: new Date(), breakMinutes: Number(breakMinutes) || 0, status: 'COMPLETED' },
+    data: {
+      clockOutAt: actualClockOutAt,
+      breakMinutes: Number(breakMinutes) || 0,
+      lateOvertimeMin,
+      status: 'COMPLETED',
+    },
   })
+  res.json(updated)
+})
+
+// 打刻時刻の修正（出勤・退勤どちらも更新可）
+app.put('/api/attendance/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { clockInTime, clockOutTime, breakMinutes } = req.body
+
+  const attendance = await prisma.attendance.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { schedule: true },
+  })
+  if (!attendance) { res.status(404).json({ error: '打刻データが見つかりません' }); return }
+
+  const update: Record<string, unknown> = {}
+
+  if (clockInTime) {
+    const actualClockInAt = buildDateTime(attendance.schedule.date, clockInTime)
+    update.clockInAt = actualClockInAt
+    update.earlyOvertimeMin = Math.max(0, timeToMin(attendance.schedule.startTime) - timeToMin(dateToHHMM(actualClockInAt)))
+  }
+
+  if (clockOutTime) {
+    const base = update.clockInAt instanceof Date ? update.clockInAt : attendance.clockInAt ?? new Date()
+    const actualClockOutAt = buildDateTime(attendance.schedule.date, clockOutTime, true, base)
+    update.clockOutAt = actualClockOutAt
+    update.lateOvertimeMin = Math.max(0, timeToMin(dateToHHMM(actualClockOutAt)) - timeToMin(attendance.schedule.endTime))
+  }
+
+  if (breakMinutes !== undefined) {
+    update.breakMinutes = Number(breakMinutes) || 0
+  }
+
+  const updated = await prisma.attendance.update({ where: { id: req.params.id }, data: update })
   res.json(updated)
 })
 
@@ -5902,7 +6029,7 @@ function calculateAssignmentScore(
 // POST /api/dispatch/optimize - 最適人材配置
 app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { date, siteIds, guardIds, mode = 'balanced' } = req.body
+  const { date, siteIds, guardIds, mode = 'balanced', respectSurvey = false } = req.body
 
   if (!date) { res.status(400).json({ error: 'date は必須です' }); return }
 
@@ -5955,7 +6082,26 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     select: { guardId: true },
   })
   const busyGuardIds = new Set(busyGuardSchedules.map((s) => s.guardId))
-  const availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+  let availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+
+  // 2.5. シフト調査連動フィルタ（respectSurvey=trueの場合、出勤可の隊員のみ）
+  if (respectSurvey) {
+    const survey = await prisma.shiftSurvey.findFirst({
+      where: { companyId, startDate: { lte: targetDate }, endDate: { gte: targetDate } },
+      include: { responses: { select: { guardId: true, answers: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (survey) {
+      const dateStr = date as string
+      const surveyAvailableIds = new Set<string>()
+      for (const resp of survey.responses) {
+        const answers = resp.answers as Array<{ date: string; available: boolean }>
+        const ans = answers.find(a => a.date === dateStr)
+        if (ans?.available) surveyAvailableIds.add(resp.guardId)
+      }
+      availableGuards = availableGuards.filter(g => surveyAvailableIds.has(g.id))
+    }
+  }
 
   // 3. 過去の配置回数を集計（各隊員×各現場）
   const pastSchedules = await prisma.schedule.findMany({
@@ -6739,22 +6885,25 @@ app.get('/api/equipment/site-shortage', authenticate, async (req, res) => {
       const deployed = eq.assignments
         .filter((a) => a.siteId === site.id)
         .reduce((sum, a) => sum + a.quantity, 0)
-      // 基本的な必要数: トランシーバー→隊員数分、その他→1セットを基準
-      const needed = eq.category === 'RADIO' ? site.requiredCount : (deployed > 0 ? deployed : 0)
+      // 必要数を算出できるのはトランシーバー(RADIO)のみ（隊員数=requiredCount基準）。
+      // それ以外のカテゴリは現場ごとの必要数の基準が無いため過不足判定は行わず、配備数のみ表示する。
+      const trackShortage = eq.category === 'RADIO'
       return {
         equipmentId: eq.id,
         equipmentName: eq.name,
         category: eq.category,
         deployed,
-        needed: eq.category === 'RADIO' ? site.requiredCount : deployed,
-        shortage: eq.category === 'RADIO' ? Math.max(0, site.requiredCount - deployed) : 0,
+        trackShortage,
+        needed: trackShortage ? site.requiredCount : null,
+        shortage: trackShortage ? Math.max(0, site.requiredCount - deployed) : null,
       }
     })
     return {
       siteId: site.id,
       siteName: site.name,
       requiredGuards: site.requiredCount,
-      items: items.filter((i) => i.deployed > 0 || i.needed > 0),
+      // RADIOは必要数がある限り表示、その他は配備済みのもののみ表示
+      items: items.filter((i) => i.deployed > 0 || (i.needed ?? 0) > 0),
     }
   })
 

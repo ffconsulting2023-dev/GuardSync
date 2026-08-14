@@ -14,13 +14,16 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// 401エラー時に自動ログアウト
+// 401/403エラー処理
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
       window.location.href = '/login'
+    }
+    if (error.response?.status === 403 && error.response?.data?.code === 'COMPANY_SUSPENDED') {
+      window.location.href = '/suspended'
     }
     return Promise.reject(error)
   }

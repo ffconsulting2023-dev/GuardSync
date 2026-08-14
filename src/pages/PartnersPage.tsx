@@ -4,11 +4,9 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const TYPE_LABELS: Record<string, { label: string; className: string; desc: string }> = {
-  GROUP:     { label: 'グループ会社', className: 'badge-success', desc: '最優先で人員融通' },
-  PREFERRED: { label: '優先協力会社', className: 'badge-info', desc: '次優先で人員融通' },
-  GENERAL:   { label: '一般協力会社', className: 'badge-gray', desc: '通常の協力会社' },
-}
+import { PARTNER_TYPE } from '../lib/constants'
+
+const TYPE_LABELS = PARTNER_TYPE
 
 const EMPTY_FORM = { name: '', type: 'GENERAL', contactName: '', phone: '', email: '', priority: '0' }
 

@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "ts-node-dev --respawn --transpile-only server.ts",
+    "dev:server": "ts-node-dev --respawn --transpile-only --project tsconfig.server.json server.ts",
     "dev:client": "vite",
     "build": "tsc -p tsconfig.server.json && vite build && npm run obfuscate",
     "obfuscate": "javascript-obfuscator dist/server.js --output dist/server.js --compact true --string-array true --string-array-threshold 0.75 --identifier-names-generator hexadecimal --self-defending true",
