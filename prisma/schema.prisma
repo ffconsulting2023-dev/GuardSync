@@ -889,10 +889,25 @@ model SignatureField {
   width         Float               // 正規化幅（0-1）
   height        Float               // 正規化高さ（0-1）
   value         String?             // 署名画像(dataURL/パス) または テキスト値
+  autoSealPath  String?             // 会社印の自動押印用画像パス（署名者不要で締結時に適用）
   signedAt      DateTime?
 
   @@index([eContractId])
   @@index([signatureId])
+}
+
+// ─────────────────────────────────────────────
+// 会社印（角印・社印）: 事前登録して署名欄に自動押印
+// ─────────────────────────────────────────────
+
+model SealStamp {
+  id         String   @id @default(uuid())
+  companyId  String
+  name       String
+  imagePath  String   // 保存済み印影画像(PNG/JPEG)のパス
+  createdAt  DateTime @default(now())
+
+  @@index([companyId])
 }
 
 enum FieldType {

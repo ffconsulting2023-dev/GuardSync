@@ -1385,6 +1385,21 @@ const econtractUpload = multer({
   },
 })
 
+// 会社印画像の保存先とアップロード設定（PNG/JPEG・2MB）
+const SEAL_DIR = path.join(__dirname, 'uploads', 'seals')
+if (!fs.existsSync(SEAL_DIR)) { fs.mkdirSync(SEAL_DIR, { recursive: true }) }
+const sealUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, SEAL_DIR),
+    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname) || '.png'}`),
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'image/png' || file.mimetype === 'image/jpeg') { cb(null, true) }
+    else { cb(new Error('PNGまたはJPEG画像のみアップロード可能です')) }
+  },
+})
+
 // 署名を焼き込んだ署名済みPDFを生成し、保存パスとSHA-256を返す
 async function generateSignedPdf(eContractId: string): Promise<{ path: string; hash: string }> {
   const ec = await prisma.electronicContract.findUnique({
@@ -1400,7 +1415,8 @@ async function generateSignedPdf(eContractId: string): Promise<{ path: string; h
   const pages = pdfDoc.getPages()
 
   for (const f of ec.fields) {
-    if (!f.value) continue
+    // 会社印の自動押印欄は value を持たないため autoSealPath を使用
+    if (!f.value && !f.autoSealPath) continue
     const page = pages[f.page - 1]
     if (!page) continue
     const pw = page.getWidth()
@@ -1411,7 +1427,7 @@ async function generateSignedPdf(eContractId: string): Promise<{ path: string; h
     // 正規化座標は左上原点。pdf-libは左下原点のためY軸を反転
     const y = ph - (f.y * ph) - h
 
-    if ((f.type === 'SIGNATURE' || f.type === 'SEAL') && f.value.startsWith('data:image')) {
+    if ((f.type === 'SIGNATURE' || f.type === 'SEAL') && f.value?.startsWith('data:image')) {
       try {
         const b64 = f.value.split(',')[1]
         const imgBytes = Buffer.from(b64, 'base64')
@@ -1422,7 +1438,17 @@ async function generateSignedPdf(eContractId: string): Promise<{ path: string; h
       } catch (e) {
         logger.error('署名画像の埋め込みに失敗', e, { fieldId: f.id })
       }
-    } else if (f.type === 'DATE' || f.type === 'NAME' || f.type === 'TEXT') {
+    } else if (f.type === 'SEAL' && f.autoSealPath && fs.existsSync(f.autoSealPath)) {
+      try {
+        const imgBytes = fs.readFileSync(f.autoSealPath)
+        const img = f.autoSealPath.toLowerCase().endsWith('.png')
+          ? await pdfDoc.embedPng(imgBytes)
+          : await pdfDoc.embedJpg(imgBytes)
+        page.drawImage(img, { x, y, width: w, height: h })
+      } catch (e) {
+        logger.error('会社印の埋め込みに失敗', e, { fieldId: f.id })
+      }
+    } else if (f.value && (f.type === 'DATE' || f.type === 'NAME' || f.type === 'TEXT')) {
       // Helveticaは日本語不可。ASCII以外は描画をスキップ（MVP制約）
       try {
         page.drawText(f.value, { x, y: y + h / 3, size: Math.min(h * 0.6, 12), font: helv, color: rgb(0, 0, 0) })
@@ -1487,6 +1513,38 @@ async function generateCertificatePdf(eContractId: string): Promise<string> {
   return outPath
 }
 
+// 会社印（角印・社印）管理
+app.get('/api/seals', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const seals = await prisma.sealStamp.findMany({ where: { companyId }, orderBy: { createdAt: 'desc' } })
+  res.json(seals.map(s => ({ id: s.id, name: s.name, createdAt: s.createdAt })))
+})
+
+app.post('/api/seals', authenticate, requireRole('ADMIN', 'MANAGER'), sealUpload.single('file'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const file = req.file
+  if (!file) { res.status(400).json({ error: '印影画像が必要です' }); return }
+  const name = (req.body?.name as string)?.trim() || '会社印'
+  const seal = await prisma.sealStamp.create({ data: { companyId, name, imagePath: file.path } })
+  res.status(201).json({ id: seal.id, name: seal.name, createdAt: seal.createdAt })
+})
+
+app.get('/api/seals/:id/image', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const seal = await prisma.sealStamp.findFirst({ where: { id: req.params.id, companyId } })
+  if (!seal || !fs.existsSync(seal.imagePath)) { res.status(404).json({ error: '印影がありません' }); return }
+  res.sendFile(path.resolve(seal.imagePath))
+})
+
+app.delete('/api/seals/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const seal = await prisma.sealStamp.findFirst({ where: { id: req.params.id, companyId } })
+  if (!seal) { res.status(404).json({ error: '印影が見つかりません' }); return }
+  try { if (fs.existsSync(seal.imagePath)) fs.unlinkSync(seal.imagePath) } catch { /* ignore */ }
+  await prisma.sealStamp.delete({ where: { id: seal.id } })
+  res.json({ success: true })
+})
+
 app.get('/api/e-contracts', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const eContracts = await prisma.electronicContract.findMany({
@@ -1549,16 +1607,23 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
     include: { signatures: true },
   })
 
-  // 署名欄を作成（署名者メールで割り当て）
+  // 署名欄を作成（署名者メールで割り当て。sealId指定は会社印の自動押印欄）
   if (Array.isArray(fields) && fields.length) {
     const byEmail = new Map(eContract.signatures.map(s => [s.signerEmail, s.id]))
+    // 会社印の解決（自社のもののみ）
+    const sealIds = [...new Set(fields.map((f: any) => f.sealId).filter(Boolean))] as string[]
+    const seals = sealIds.length
+      ? await prisma.sealStamp.findMany({ where: { id: { in: sealIds }, companyId } })
+      : []
+    const sealById = new Map(seals.map(s => [s.id, s.imagePath]))
     await prisma.signatureField.createMany({
       data: fields.map((f: any) => ({
         eContractId: eContract.id,
-        signatureId: f.signerEmail ? (byEmail.get(f.signerEmail) ?? null) : null,
+        signatureId: f.sealId ? null : (f.signerEmail ? (byEmail.get(f.signerEmail) ?? null) : null),
         type: f.type,
         page: Number(f.page) || 1,
         x: Number(f.x), y: Number(f.y), width: Number(f.width), height: Number(f.height),
+        autoSealPath: f.sealId ? (sealById.get(f.sealId) ?? null) : null,
       })),
     })
   }

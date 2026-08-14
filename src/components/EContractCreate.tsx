@@ -4,9 +4,12 @@ import PdfViewer from './PdfViewer'
 
 interface Signer { email: string; name: string }
 type FieldType = 'SIGNATURE' | 'SEAL' | 'DATE' | 'NAME'
+type Tool = FieldType | 'COMPANY_SEAL'
+interface Seal { id: string; name: string }
 interface PlacedField {
   id: string
-  signerEmail: string
+  signerEmail?: string // 署名者割当（会社印欄はなし）
+  sealId?: string      // 会社印の自動押印欄
   type: FieldType
   page: number
   x: number; y: number; width: number; height: number // 正規化(0-1)
@@ -29,14 +32,46 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
   const [uploading, setUploading] = useState(false)
   const [fields, setFields] = useState<PlacedField[]>([])
   const [activeSigner, setActiveSigner] = useState(0)
-  const [activeType, setActiveType] = useState<FieldType>('SIGNATURE')
+  const [tool, setTool] = useState<Tool>('SIGNATURE')
+  const [seals, setSeals] = useState<Seal[]>([])
+  const [activeSealId, setActiveSealId] = useState('')
+  const [sealName, setSealName] = useState('')
+  const [sealUploading, setSealUploading] = useState(false)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const dragRef = useRef<{ id: string; startX: number; startY: number; ox: number; oy: number; pw: number; ph: number } | null>(null)
 
   useEffect(() => () => { if (pdfUrl) URL.revokeObjectURL(pdfUrl) }, [pdfUrl])
 
-  const signerColor = (email: string) => {
+  const loadSeals = async () => {
+    try { const { data } = await api.get('/seals'); setSeals(data) } catch { /* ignore */ }
+  }
+  useEffect(() => { loadSeals() }, [])
+
+  async function uploadSeal(f: File) {
+    if (f.type !== 'image/png' && f.type !== 'image/jpeg') { setError('印影はPNG/JPEG画像を選択してください'); return }
+    setSealUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      fd.append('name', sealName.trim() || '会社印')
+      const { data } = await api.post('/seals', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      setSeals(ss => [data, ...ss])
+      setActiveSealId(data.id)
+      setSealName('')
+    } catch (e: any) {
+      setError(e?.response?.data?.error || '印影の登録に失敗しました')
+    } finally {
+      setSealUploading(false)
+    }
+  }
+
+  async function deleteSeal(id: string) {
+    try { await api.delete(`/seals/${id}`); setSeals(ss => ss.filter(s => s.id !== id)); if (activeSealId === id) setActiveSealId('') } catch { /* ignore */ }
+  }
+
+  const signerColor = (email?: string) => {
+    if (!email) return '#334155' // 会社印など署名者なしの欄
     const idx = signers.findIndex(s => s.email === email)
     return SIGNER_COLORS[idx % SIGNER_COLORS.length] || '#666'
   }
@@ -63,16 +98,26 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
   }
 
   function placeField(page: number, size: { width: number; height: number }, clientX: number, clientY: number, target: HTMLElement) {
-    const signer = signers[activeSigner]
-    if (!signer?.email) { setError('先に署名者のメールアドレスを入力してください'); return }
+    const isCompanySeal = tool === 'COMPANY_SEAL'
+    const fieldType: FieldType = isCompanySeal ? 'SEAL' : tool
+    let signerEmail: string | undefined
+    let sealId: string | undefined
+    if (isCompanySeal) {
+      if (!activeSealId) { setError('会社印を選択してください'); return }
+      sealId = activeSealId
+    } else {
+      const signer = signers[activeSigner]
+      if (!signer?.email) { setError('先に署名者のメールアドレスを入力してください'); return }
+      signerEmail = signer.email
+    }
     const rect = target.getBoundingClientRect()
     const px = clientX - rect.left
     const py = clientY - rect.top
-    const def = DEFAULT_SIZE[activeType]
+    const def = DEFAULT_SIZE[fieldType]
     const x = Math.max(0, Math.min(1 - def.w / size.width, (px - def.w / 2) / size.width))
     const y = Math.max(0, Math.min(1 - def.h / size.height, (py - def.h / 2) / size.height))
     setFields(fs => [...fs, {
-      id: crypto.randomUUID(), signerEmail: signer.email, type: activeType, page,
+      id: crypto.randomUUID(), signerEmail, sealId, type: fieldType, page,
       x, y, width: def.w / size.width, height: def.h / size.height,
     }])
   }
@@ -107,7 +152,7 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
       await api.post('/e-contracts', {
         title, expiresAt: expiresAt || undefined, signers: validSigners, contractId,
         sourcePdfFilename: uploaded.filename, sourcePdfHash: uploaded.hash, pageCount: uploaded.pageCount,
-        fields: fields.map(({ signerEmail, type, page, x, y, width, height }) => ({ signerEmail, type, page, x, y, width, height })),
+        fields: fields.map(({ signerEmail, sealId, type, page, x, y, width, height }) => ({ signerEmail, sealId, type, page, x, y, width, height })),
       })
       onCreated()
     } catch (e: any) {
@@ -177,19 +222,42 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
           {/* 署名欄配置 */}
           {pdfUrl && (
             <div>
-              <div className="sticky top-0 z-10 bg-white/95 backdrop-blur py-2 border-y border-gray-100 flex flex-wrap items-center gap-2">
-                <span className="text-xs text-gray-500">配置する署名者:</span>
-                {signers.map((s, i) => (
-                  <button key={i} onClick={() => setActiveSigner(i)} className={`text-xs px-2 py-1 rounded-full border ${activeSigner === i ? 'text-white' : 'text-gray-700'}`}
-                    style={{ background: activeSigner === i ? SIGNER_COLORS[i % SIGNER_COLORS.length] : '#fff', borderColor: SIGNER_COLORS[i % SIGNER_COLORS.length] }}>
-                    {s.name || `署名者${i + 1}`}
-                  </button>
-                ))}
-                <span className="text-xs text-gray-300">|</span>
-                {(['SIGNATURE', 'SEAL', 'DATE', 'NAME'] as FieldType[]).map(t => (
-                  <button key={t} onClick={() => setActiveType(t)} className={`text-xs px-2 py-1 rounded border ${activeType === t ? 'bg-gray-800 text-white border-gray-800' : 'text-gray-600 border-gray-300'}`}>{TYPE_LABELS[t]}</button>
-                ))}
-                <span className="text-xs text-gray-400 ml-auto">PDF上をクリックで配置・ドラッグで移動</span>
+              <div className="sticky top-0 z-10 bg-white/95 backdrop-blur py-2 border-y border-gray-100 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-gray-500">署名者:</span>
+                  {signers.map((s, i) => (
+                    <button key={i} onClick={() => { setActiveSigner(i); if (tool === 'COMPANY_SEAL') setTool('SIGNATURE') }} className={`text-xs px-2 py-1 rounded-full border ${activeSigner === i && tool !== 'COMPANY_SEAL' ? 'text-white' : 'text-gray-700'}`}
+                      style={{ background: activeSigner === i && tool !== 'COMPANY_SEAL' ? SIGNER_COLORS[i % SIGNER_COLORS.length] : '#fff', borderColor: SIGNER_COLORS[i % SIGNER_COLORS.length] }}>
+                      {s.name || `署名者${i + 1}`}
+                    </button>
+                  ))}
+                  <span className="text-xs text-gray-300">|</span>
+                  {(['SIGNATURE', 'SEAL', 'DATE', 'NAME'] as FieldType[]).map(t => (
+                    <button key={t} onClick={() => setTool(t)} className={`text-xs px-2 py-1 rounded border ${tool === t ? 'bg-gray-800 text-white border-gray-800' : 'text-gray-600 border-gray-300'}`}>{TYPE_LABELS[t]}</button>
+                  ))}
+                  <button onClick={() => setTool('COMPANY_SEAL')} className={`text-xs px-2 py-1 rounded border ${tool === 'COMPANY_SEAL' ? 'bg-slate-700 text-white border-slate-700' : 'text-slate-600 border-slate-300'}`}>会社印(自動)</button>
+                  <span className="text-xs text-gray-400 ml-auto">PDF上をクリックで配置・ドラッグで移動</span>
+                </div>
+
+                {/* 会社印の選択・登録 */}
+                {tool === 'COMPANY_SEAL' && (
+                  <div className="flex flex-wrap items-center gap-2 bg-slate-50 rounded p-2">
+                    <span className="text-xs text-slate-600">押印する会社印:</span>
+                    {seals.length === 0 && <span className="text-xs text-gray-400">未登録</span>}
+                    {seals.map(s => (
+                      <span key={s.id} className={`text-xs px-2 py-1 rounded-full border flex items-center gap-1 ${activeSealId === s.id ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-700 border-slate-300'}`}>
+                        <button onClick={() => setActiveSealId(s.id)}>{s.name}</button>
+                        <button onClick={() => deleteSeal(s.id)} className="opacity-60 hover:opacity-100">✕</button>
+                      </span>
+                    ))}
+                    <span className="text-xs text-gray-300">|</span>
+                    <input value={sealName} onChange={e => setSealName(e.target.value)} placeholder="印影名" className="form-input !py-1 !text-xs w-24" />
+                    <label className="text-xs text-blue-600 cursor-pointer">
+                      {sealUploading ? '登録中...' : '+ 画像登録(PNG/JPEG)'}
+                      <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={e => e.target.files?.[0] && uploadSeal(e.target.files[0])} />
+                    </label>
+                  </div>
+                )}
               </div>
 
               <div className="bg-gray-100 p-3 rounded-lg overflow-auto max-h-[50vh]">
@@ -212,7 +280,7 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
                             border: `2px solid ${signerColor(f.signerEmail)}`, background: `${signerColor(f.signerEmail)}22`, color: signerColor(f.signerEmail),
                           }}
                         >
-                          {TYPE_LABELS[f.type]}
+                          {f.sealId ? '会社印' : TYPE_LABELS[f.type]}
                           <button onClick={e => { e.stopPropagation(); setFields(fs => fs.filter(x => x.id !== f.id)) }}
                             className="absolute -top-2 -right-2 bg-white border border-gray-300 rounded-full w-4 h-4 text-[9px] leading-none text-gray-500 hidden group-hover:flex items-center justify-center">✕</button>
                         </div>
