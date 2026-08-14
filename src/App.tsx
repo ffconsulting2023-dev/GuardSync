@@ -14,8 +14,9 @@ import DailyPayPage from './pages/DailyPayPage'
 import ClientsPage from './pages/ClientsPage'
 import ClientDetailPage from './pages/ClientDetailPage'
 import PartnersPage from './pages/PartnersPage'
-import EContractsPage from './pages/EContractsPage'
-import SignContractPage from './pages/SignContractPage'
+// PDF.js/署名描画を含む重量ページは遅延読み込み（初期バンドル・署名画面の軽量化）
+const EContractsPage = React.lazy(() => import('./pages/EContractsPage'))
+const SignContractPage = React.lazy(() => import('./pages/SignContractPage'))
 import RegisterPage from './pages/RegisterPage'
 import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
@@ -67,6 +68,7 @@ export default function App() {
       {auth.loading ? (
         <LoadingSpinner />
       ) : (
+        <React.Suspense fallback={<LoadingSpinner />}>
         <Routes>
           <Route path="/suspended" element={<SuspendedPage />} />
           <Route path="/payment-complete" element={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><p className="text-2xl mb-2">お支払いありがとうございます</p><p className="text-gray-500">サービスが有効化されました。<a href="/" className="text-blue-600 underline">ダッシュボードへ</a></p></div></div>} />
@@ -133,6 +135,7 @@ export default function App() {
             }
           />
         </Routes>
+        </React.Suspense>
       )}
     </AuthCtx.Provider>
   )
