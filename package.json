@@ -7,15 +7,18 @@
   },
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "ts-node-dev --respawn --transpile-only server.ts",
+    "dev:server": "ts-node-dev --respawn --transpile-only --project tsconfig.server.json server.ts",
     "dev:client": "vite",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "setup": "npm install && docker compose up -d && npm run db:push && npm run db:seed",
     "build": "tsc -p tsconfig.server.json && vite build && npm run obfuscate",
     "obfuscate": "javascript-obfuscator dist/server.js --output dist/server.js --compact true --string-array true --string-array-threshold 0.75 --identifier-names-generator hexadecimal --self-defending true",
     "start": "node dist/server.js",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "db:seed": "ts-node prisma/seed.ts",
+    "db:seed": "ts-node --project tsconfig.server.json prisma/seed.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {
