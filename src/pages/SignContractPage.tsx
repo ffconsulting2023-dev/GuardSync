@@ -114,7 +114,7 @@ export default function SignContractPage() {
                           {filled ? (
                             <img src={filled} alt="署名" className="w-full h-full object-contain" />
                           ) : (
-                            <span>{isSig ? 'タップして署名' : TYPE_LABELS[f.type]}</span>
+                            <span>{f.type === 'SEAL' ? 'タップして押印' : isSig ? 'タップして署名' : TYPE_LABELS[f.type]}</span>
                           )}
                         </div>
                       )
@@ -161,12 +161,18 @@ export default function SignContractPage() {
         </div>
       </div>
 
-      {activeField && (
-        <SignaturePadModal
-          onCancel={() => setActiveField(null)}
-          onConfirm={(dataUrl) => { setSigs(s => ({ ...s, [activeField]: dataUrl })); setActiveField(null) }}
-        />
-      )}
+      {activeField && (() => {
+        const af = (data.fields || []).find((f: SignField) => f.id === activeField)
+        const isSeal = af?.type === 'SEAL'
+        return (
+          <SignaturePadModal
+            title={isSeal ? '印影を押印してください' : '署名を描いてください'}
+            allowUpload={isSeal}
+            onCancel={() => setActiveField(null)}
+            onConfirm={(dataUrl) => { setSigs(s => ({ ...s, [activeField]: dataUrl })); setActiveField(null) }}
+          />
+        )
+      })()}
     </div>
   )
 }

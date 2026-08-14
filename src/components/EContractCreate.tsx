@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import PdfViewer from './PdfViewer'
 
 interface Signer { email: string; name: string }
-type FieldType = 'SIGNATURE' | 'DATE' | 'NAME'
+type FieldType = 'SIGNATURE' | 'SEAL' | 'DATE' | 'NAME'
 interface PlacedField {
   id: string
   signerEmail: string
@@ -13,10 +13,10 @@ interface PlacedField {
 }
 
 const SIGNER_COLORS = ['#2563eb', '#e67e22', '#16a34a', '#9333ea', '#dc2626']
-const TYPE_LABELS: Record<FieldType, string> = { SIGNATURE: '署名', DATE: '日付', NAME: '氏名' }
+const TYPE_LABELS: Record<FieldType, string> = { SIGNATURE: '署名', SEAL: '印影', DATE: '日付', NAME: '氏名' }
 // 既定サイズ(px)。配置時にページpxで正規化する
 const DEFAULT_SIZE: Record<FieldType, { w: number; h: number }> = {
-  SIGNATURE: { w: 170, h: 55 }, DATE: { w: 120, h: 28 }, NAME: { w: 140, h: 28 },
+  SIGNATURE: { w: 170, h: 55 }, SEAL: { w: 72, h: 72 }, DATE: { w: 120, h: 28 }, NAME: { w: 140, h: 28 },
 }
 
 export default function EContractCreate({ onClose, onCreated, initialTitle = '', contractId }: { onClose: () => void; onCreated: () => void; initialTitle?: string; contractId?: string }) {
@@ -97,9 +97,9 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
     const validSigners = signers.filter(s => s.name.trim() && s.email.trim())
     if (!validSigners.length) { setError('署名者を1名以上入力してください'); return }
     if (!uploaded) { setError('契約書PDFをアップロードしてください'); return }
-    const signersWithoutField = validSigners.filter(s => !fields.some(f => f.signerEmail === s.email && f.type === 'SIGNATURE'))
+    const signersWithoutField = validSigners.filter(s => !fields.some(f => f.signerEmail === s.email && (f.type === 'SIGNATURE' || f.type === 'SEAL')))
     if (signersWithoutField.length) {
-      setError(`署名欄が未配置の署名者がいます: ${signersWithoutField.map(s => s.name).join(', ')}`)
+      setError(`署名/印影欄が未配置の署名者がいます: ${signersWithoutField.map(s => s.name).join(', ')}`)
       return
     }
     setSubmitting(true)
@@ -186,7 +186,7 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
                   </button>
                 ))}
                 <span className="text-xs text-gray-300">|</span>
-                {(['SIGNATURE', 'DATE', 'NAME'] as FieldType[]).map(t => (
+                {(['SIGNATURE', 'SEAL', 'DATE', 'NAME'] as FieldType[]).map(t => (
                   <button key={t} onClick={() => setActiveType(t)} className={`text-xs px-2 py-1 rounded border ${activeType === t ? 'bg-gray-800 text-white border-gray-800' : 'text-gray-600 border-gray-300'}`}>{TYPE_LABELS[t]}</button>
                 ))}
                 <span className="text-xs text-gray-400 ml-auto">PDF上をクリックで配置・ドラッグで移動</span>
