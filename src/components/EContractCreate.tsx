@@ -19,8 +19,8 @@ const DEFAULT_SIZE: Record<FieldType, { w: number; h: number }> = {
   SIGNATURE: { w: 170, h: 55 }, DATE: { w: 120, h: 28 }, NAME: { w: 140, h: 28 },
 }
 
-export default function EContractCreate({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [title, setTitle] = useState('')
+export default function EContractCreate({ onClose, onCreated, initialTitle = '', contractId }: { onClose: () => void; onCreated: () => void; initialTitle?: string; contractId?: string }) {
+  const [title, setTitle] = useState(initialTitle)
   const [expiresAt, setExpiresAt] = useState('')
   const [signers, setSigners] = useState<Signer[]>([{ name: '', email: '' }])
   const [file, setFile] = useState<File | null>(null)
@@ -105,7 +105,7 @@ export default function EContractCreate({ onClose, onCreated }: { onClose: () =>
     setSubmitting(true)
     try {
       await api.post('/e-contracts', {
-        title, expiresAt: expiresAt || undefined, signers: validSigners,
+        title, expiresAt: expiresAt || undefined, signers: validSigners, contractId,
         sourcePdfFilename: uploaded.filename, sourcePdfHash: uploaded.hash, pageCount: uploaded.pageCount,
         fields: fields.map(({ signerEmail, type, page, x, y, width, height }) => ({ signerEmail, type, page, x, y, width, height })),
       })

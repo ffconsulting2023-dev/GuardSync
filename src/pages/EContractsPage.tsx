@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
@@ -18,8 +19,22 @@ const STATUS_LABELS: Record<string, { label: string; className: string }> = {
 export default function EContractsPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [showCreate, setShowCreate] = useState(false)
+  const [prefill, setPrefill] = useState<{ contractId?: string; title?: string } | null>(null)
   const [selected, setSelected] = useState<any>(null)
+
+  // 契約一覧から遷移してきた場合は作成フローを自動で開く
+  useEffect(() => {
+    const createFor = (location.state as any)?.createFor
+    if (createFor) {
+      setPrefill(createFor)
+      setShowCreate(true)
+      navigate(location.pathname, { replace: true, state: {} }) // stateを消費
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const { data: eContracts = [], isLoading } = useQuery({
     queryKey: ['e-contracts'],
@@ -161,8 +176,10 @@ export default function EContractsPage() {
       {/* 作成フロー */}
       {showCreate && (
         <EContractCreate
-          onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); qc.invalidateQueries({ queryKey: ['e-contracts'] }) }}
+          initialTitle={prefill?.title || ''}
+          contractId={prefill?.contractId}
+          onClose={() => { setShowCreate(false); setPrefill(null) }}
+          onCreated={() => { setShowCreate(false); setPrefill(null); qc.invalidateQueries({ queryKey: ['e-contracts'] }) }}
         />
       )}
     </div>
