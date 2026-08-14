@@ -14,6 +14,7 @@ import nodemailer from 'nodemailer'
 import crypto from 'crypto'
 import multer from 'multer'
 import fs from 'fs'
+import { PDFDocument as PDFLibDocument, StandardFonts, rgb } from 'pdf-lib'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1369,6 +1370,73 @@ app.put('/api/daily-pay/:id/approve', authenticate, requireRole('ADMIN', 'MANAGE
 // 電子契約 API
 // ─────────────────────────────────────────────
 
+// 電子契約の原本PDF保存先とアップロード設定（PDFのみ・10MB）
+const ECONTRACT_DIR = path.join(__dirname, 'uploads', 'econtracts')
+if (!fs.existsSync(ECONTRACT_DIR)) { fs.mkdirSync(ECONTRACT_DIR, { recursive: true }) }
+const econtractUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, ECONTRACT_DIR),
+    filename: (_req, _file, cb) => cb(null, `${crypto.randomUUID()}.pdf`),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'application/pdf') { cb(null, true) }
+    else { cb(new Error('PDFファイルのみアップロード可能です')) }
+  },
+})
+
+// 署名を焼き込んだ署名済みPDFを生成し、保存パスとSHA-256を返す
+async function generateSignedPdf(eContractId: string): Promise<{ path: string; hash: string }> {
+  const ec = await prisma.electronicContract.findUnique({
+    where: { id: eContractId },
+    include: { fields: true },
+  })
+  if (!ec?.sourcePdfPath || !fs.existsSync(ec.sourcePdfPath)) {
+    throw new Error('原本PDFが見つかりません')
+  }
+  const srcBytes = fs.readFileSync(ec.sourcePdfPath)
+  const pdfDoc = await PDFLibDocument.load(srcBytes)
+  const helv = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  const pages = pdfDoc.getPages()
+
+  for (const f of ec.fields) {
+    if (!f.value) continue
+    const page = pages[f.page - 1]
+    if (!page) continue
+    const pw = page.getWidth()
+    const ph = page.getHeight()
+    const x = f.x * pw
+    const w = f.width * pw
+    const h = f.height * ph
+    // 正規化座標は左上原点。pdf-libは左下原点のためY軸を反転
+    const y = ph - (f.y * ph) - h
+
+    if ((f.type === 'SIGNATURE' || f.type === 'SEAL') && f.value.startsWith('data:image')) {
+      try {
+        const b64 = f.value.split(',')[1]
+        const imgBytes = Buffer.from(b64, 'base64')
+        const img = f.value.includes('image/png')
+          ? await pdfDoc.embedPng(imgBytes)
+          : await pdfDoc.embedJpg(imgBytes)
+        page.drawImage(img, { x, y, width: w, height: h })
+      } catch (e) {
+        logger.error('署名画像の埋め込みに失敗', e, { fieldId: f.id })
+      }
+    } else if (f.type === 'DATE' || f.type === 'NAME' || f.type === 'TEXT') {
+      // Helveticaは日本語不可。ASCII以外は描画をスキップ（MVP制約）
+      try {
+        page.drawText(f.value, { x, y: y + h / 3, size: Math.min(h * 0.6, 12), font: helv, color: rgb(0, 0, 0) })
+      } catch { /* 日本語等でエンコード不可の場合はスキップ */ }
+    }
+  }
+
+  const outBytes = await pdfDoc.save()
+  const outPath = path.join(ECONTRACT_DIR, `signed-${eContractId}.pdf`)
+  fs.writeFileSync(outPath, outBytes)
+  const hash = crypto.createHash('sha256').update(outBytes).digest('hex')
+  return { path: outPath, hash }
+}
+
 app.get('/api/e-contracts', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const eContracts = await prisma.electronicContract.findMany({
@@ -1379,11 +1447,39 @@ app.get('/api/e-contracts', authenticate, async (req, res) => {
   res.json(eContracts)
 })
 
+// 契約書PDFのアップロード（原本）。SHA-256とページ数を返す
+app.post('/api/e-contracts/upload', authenticate, requireRole('ADMIN', 'MANAGER'), econtractUpload.single('file'), async (req, res) => {
+  const file = req.file
+  if (!file) { res.status(400).json({ error: 'PDFファイルが必要です' }); return }
+  const bytes = fs.readFileSync(file.path)
+  const hash = crypto.createHash('sha256').update(bytes).digest('hex')
+  let pageCount = 0
+  try {
+    const doc = await PDFLibDocument.load(bytes)
+    pageCount = doc.getPageCount()
+  } catch {
+    fs.unlinkSync(file.path)
+    res.status(400).json({ error: 'PDFの読み込みに失敗しました' }); return
+  }
+  res.json({ filename: path.basename(file.path), hash, pageCount, size: file.size })
+})
+
 app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { title, content, contractId, signers, expiresAt } = req.body
-  if (!title || !content || !signers?.length) {
+  const { title, content, contractId, signers, expiresAt, sourcePdfFilename, sourcePdfHash, pageCount, fields } = req.body
+  if (!title || !signers?.length) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  // 原本PDF（アップロード済み）を解決。PDFも本文も無ければエラー
+  let sourcePdfPath: string | null = null
+  if (sourcePdfFilename) {
+    const p = path.join(ECONTRACT_DIR, path.basename(String(sourcePdfFilename)))
+    if (!fs.existsSync(p)) { res.status(400).json({ error: 'アップロードされたPDFが見つかりません' }); return }
+    sourcePdfPath = p
+  }
+  if (!sourcePdfPath && !content) {
+    res.status(400).json({ error: '契約書PDFまたは本文が必要です' }); return
   }
 
   const company = await prisma.company.findUnique({ where: { id: companyId } })
@@ -1391,7 +1487,10 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
 
   const eContract = await prisma.electronicContract.create({
     data: {
-      companyId, title, content, contractId,
+      companyId, title, content: content || '', contractId: contractId || null,
+      sourcePdfPath,
+      sourcePdfHash: sourcePdfHash || null,
+      pageCount: pageCount != null ? Number(pageCount) : null,
       expiresAt: expiry,
       status: 'SENT',
       auditLog: [{ action: 'CREATED', at: new Date().toISOString(), by: companyId }],
@@ -1399,6 +1498,20 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
     },
     include: { signatures: true },
   })
+
+  // 署名欄を作成（署名者メールで割り当て）
+  if (Array.isArray(fields) && fields.length) {
+    const byEmail = new Map(eContract.signatures.map(s => [s.signerEmail, s.id]))
+    await prisma.signatureField.createMany({
+      data: fields.map((f: any) => ({
+        eContractId: eContract.id,
+        signatureId: f.signerEmail ? (byEmail.get(f.signerEmail) ?? null) : null,
+        type: f.type,
+        page: Number(f.page) || 1,
+        x: Number(f.x), y: Number(f.y), width: Number(f.width), height: Number(f.height),
+      })),
+    })
+  }
 
   // 署名依頼メール送信
   const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
@@ -1430,11 +1543,53 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
   res.status(201).json(eContract)
 })
 
+// 電子契約の原本PDFを取得（認証・所有チェック）
+app.get('/api/e-contracts/:id/pdf', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec?.sourcePdfPath || !fs.existsSync(ec.sourcePdfPath)) { res.status(404).json({ error: 'PDFがありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(ec.sourcePdfPath))
+})
+
+// 署名済みPDFを取得
+app.get('/api/e-contracts/:id/signed-pdf', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec?.signedPdfPath || !fs.existsSync(ec.signedPdfPath)) { res.status(404).json({ error: '署名済みPDFがありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(ec.signedPdfPath))
+})
+
+// 電子契約の取消
+app.post('/api/e-contracts/:id/cancel', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec) { res.status(404).json({ error: '電子契約が見つかりません' }); return }
+  if (ec.status === 'COMPLETED') { res.status(400).json({ error: '締結済みの契約は取消できません' }); return }
+  const updated = await prisma.electronicContract.update({
+    where: { id: ec.id },
+    data: { status: 'CANCELLED', auditLog: { push: { action: 'CANCELLED', at: new Date().toISOString(), by: companyId } } },
+  })
+  res.json(updated)
+})
+
+// 電子契約の詳細（署名者・署名欄込み）
+app.get('/api/e-contracts/:id', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { signatures: true, fields: true },
+  })
+  if (!ec) { res.status(404).json({ error: '電子契約が見つかりません' }); return }
+  res.json(ec)
+})
+
 // 署名URL経由でのアクセス（認証不要）
 app.get('/api/e-contracts/sign/:token', async (req, res) => {
   const sig = await prisma.eContractSignature.findUnique({
     where: { token: req.params.token },
-    include: { eContract: true },
+    include: { eContract: { include: { fields: true } } },
   })
   if (!sig) { res.status(404).json({ error: '署名リンクが見つかりません' }); return }
   if (sig.signedAt) { res.status(409).json({ error: '既に署名済みです' }); return }
@@ -1442,41 +1597,96 @@ app.get('/api/e-contracts/sign/:token', async (req, res) => {
     res.status(410).json({ error: '署名期限が切れています' }); return
   }
 
-  res.json({ title: sig.eContract.title, content: sig.eContract.content, signerName: sig.signerName })
+  // この署名者に割り当てられた署名欄のみ返す（他情報は最小限）
+  const myFields = sig.eContract.fields
+    .filter(f => f.signatureId === sig.id)
+    .map(f => ({ id: f.id, type: f.type, page: f.page, x: f.x, y: f.y, width: f.width, height: f.height }))
+
+  res.json({
+    id: sig.eContract.id,
+    title: sig.eContract.title,
+    content: sig.eContract.content,
+    signerName: sig.signerName,
+    hasPdf: !!sig.eContract.sourcePdfPath,
+    pageCount: sig.eContract.pageCount,
+    expiresAt: sig.eContract.expiresAt,
+    fields: myFields,
+  })
+})
+
+// 署名対象の原本PDFを取得（トークン経由・公開）
+app.get('/api/e-contracts/sign/:token/pdf', async (req, res) => {
+  const sig = await prisma.eContractSignature.findUnique({
+    where: { token: req.params.token },
+    include: { eContract: true },
+  })
+  if (!sig?.eContract.sourcePdfPath || !fs.existsSync(sig.eContract.sourcePdfPath)) { res.status(404).json({ error: 'PDFがありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(sig.eContract.sourcePdfPath))
 })
 
 app.post('/api/e-contracts/sign/:token', async (req, res) => {
+  const { fields: submitted, agreed } = req.body as { fields?: Array<{ fieldId: string; imageDataUrl?: string; value?: string }>; agreed?: boolean }
   const sig = await prisma.eContractSignature.findUnique({
     where: { token: req.params.token },
-    include: { eContract: { include: { signatures: true } } },
+    include: { eContract: { include: { signatures: true, fields: true } } },
   })
   if (!sig || sig.signedAt) { res.status(400).json({ error: '無効または署名済みです' }); return }
   if (sig.eContract.expiresAt && sig.eContract.expiresAt < new Date()) {
     res.status(410).json({ error: '署名期限が切れています' }); return
   }
+  if (!agreed) { res.status(400).json({ error: '契約内容への同意が必要です' }); return }
 
+  const now = new Date()
   const ipAddress = req.ip
   const userAgent = req.headers['user-agent']
 
+  // この署名者の署名欄を埋める
+  const myFields = sig.eContract.fields.filter(f => f.signatureId === sig.id)
+  for (const f of myFields) {
+    const sub = submitted?.find(x => x.fieldId === f.id)
+    let value: string | null = null
+    if (f.type === 'SIGNATURE' || f.type === 'SEAL') {
+      if (!sub?.imageDataUrl?.startsWith('data:image')) {
+        res.status(400).json({ error: '署名（手書きまたは印影）が必要です' }); return
+      }
+      value = sub.imageDataUrl
+    } else if (f.type === 'DATE') {
+      value = now.toLocaleDateString('ja-JP') // 例: 2026/8/14（Helveticaで描画可能）
+    } else if (f.type === 'NAME') {
+      value = sig.signerName
+    } else if (f.type === 'TEXT') {
+      value = sub?.value ?? ''
+    }
+    await prisma.signatureField.update({ where: { id: f.id }, data: { value, signedAt: now } })
+  }
+
   await prisma.eContractSignature.update({
     where: { id: sig.id },
-    data: { signedAt: new Date(), ipAddress, userAgent },
+    data: { signedAt: now, ipAddress, userAgent },
   })
 
   // 全員署名済みか確認
   const allSigned = sig.eContract.signatures.every(s => s.id === sig.id || s.signedAt)
   if (allSigned) {
+    // 原本PDFがあれば署名済みPDFを生成
+    let signedInfo: { path: string; hash: string } | null = null
+    if (sig.eContract.sourcePdfPath) {
+      try { signedInfo = await generateSignedPdf(sig.eContractId) }
+      catch (e) { logger.error('署名済みPDF生成に失敗', e, { eContractId: sig.eContractId }) }
+    }
     await prisma.electronicContract.update({
       where: { id: sig.eContractId },
       data: {
         status: 'COMPLETED',
-        auditLog: { push: { action: 'ALL_SIGNED', at: new Date().toISOString() } },
+        ...(signedInfo ? { signedPdfPath: signedInfo.path, signedPdfHash: signedInfo.hash } : {}),
+        auditLog: { push: { action: 'ALL_SIGNED', at: now.toISOString() } },
       },
     })
   } else {
     await prisma.electronicContract.update({
       where: { id: sig.eContractId },
-      data: { status: 'PARTIALLY_SIGNED', auditLog: { push: { action: 'SIGNED', by: sig.signerEmail, at: new Date().toISOString(), ip: ipAddress } } },
+      data: { status: 'PARTIALLY_SIGNED', auditLog: { push: { action: 'SIGNED', by: sig.signerEmail, at: now.toISOString(), ip: ipAddress } } },
     })
   }
 
