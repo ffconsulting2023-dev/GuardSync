@@ -5836,6 +5836,45 @@ cron.schedule('0 9 * * *', async () => {
   logger.info('請求リマインド 完了', { context: 'cron' })
 }, { timezone: 'Asia/Tokyo' })
 
+// 電子契約の期限切れ処理・署名リマインド（毎日 AM8:00）
+cron.schedule('0 8 * * *', async () => {
+  logger.info('電子契約 期限チェック 開始', { context: 'cron' })
+  const now = new Date()
+
+  // 1) 期限切れ → EXPIRED
+  const expired = await prisma.electronicContract.findMany({
+    where: { status: { in: ['SENT', 'PARTIALLY_SIGNED'] }, expiresAt: { lt: now } },
+    select: { id: true },
+  })
+  for (const ec of expired) {
+    await prisma.electronicContract.update({
+      where: { id: ec.id },
+      data: { status: 'EXPIRED', auditLog: { push: { action: 'EXPIRED', at: now.toISOString() } } },
+    })
+  }
+
+  // 2) 期限3日前以内 → 未署名者へリマインド送信
+  const soon = new Date(now.getTime() + 3 * 86400000)
+  const ending = await prisma.electronicContract.findMany({
+    where: { status: { in: ['SENT', 'PARTIALLY_SIGNED'] }, expiresAt: { gte: now, lte: soon } },
+    include: { signatures: true },
+  })
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  for (const ec of ending) {
+    for (const sig of ec.signatures) {
+      if (sig.signedAt) continue
+      const signUrl = `${baseUrl}/sign/${sig.token}`
+      await sendEmail(
+        sig.signerEmail,
+        `【署名リマインド】${ec.title}`,
+        `<p>${escapeHtml(sig.signerName)} 様</p><p>「${escapeHtml(ec.title)}」への電子署名がまだ完了していません。署名期限が近づいています（${ec.expiresAt ? ec.expiresAt.toLocaleDateString('ja-JP') : ''}）。</p><p><a href="${signUrl}">署名する</a></p>`
+      )
+    }
+  }
+
+  logger.info('電子契約 期限チェック 完了', { context: 'cron', expired: expired.length, reminded: ending.length })
+}, { timezone: 'Asia/Tokyo' })
+
 // ─────────────────────────────────────────────
 // マイナンバー管理 API
 // ─────────────────────────────────────────────
