@@ -316,7 +316,8 @@ function authenticate(req: express.Request, res: express.Response, next: express
   try {
     const payload = jwt.verify(auth.slice(7), JWT_SECRET) as JwtPayload
     ;(req as any).user = payload
-    next()
+    // テナント利用停止チェックを合成（停止会社は全APIを403で拒否、super-adminは除外）
+    checkCompanyActive(req, res, next)
   } catch {
     res.status(401).json({ error: 'トークンが無効です' })
   }
@@ -381,26 +382,27 @@ async function checkCompanyActive(req: express.Request, res: express.Response, n
     next(); return
   }
 
-  const company = await prisma.company.findUnique({
-    where: { id: user.companyId },
-    select: { isActive: true, subscriptionStatus: true },
-  })
-  companyStatusCache.set(user.companyId, {
-    isActive: company?.isActive ?? false,
-    status: company?.subscriptionStatus ?? 'TRIAL',
-    expiresAt: Date.now() + 60_000,
-  })
+  try {
+    const company = await prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { isActive: true, subscriptionStatus: true },
+    })
+    companyStatusCache.set(user.companyId, {
+      isActive: company?.isActive ?? false,
+      status: company?.subscriptionStatus ?? 'TRIAL',
+      expiresAt: Date.now() + 60_000,
+    })
 
-  if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
-    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
-    return
+    if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
+      res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+      return
+    }
+    next()
+  } catch (err) {
+    // DB一時障害で全リクエストを止めないよう fail-open（アクセスは許可）
+    logger.error('会社停止チェックに失敗（fail-open）', err, { context: 'checkCompanyActive' })
+    next()
   }
-  next()
-}
-
-// authenticateとテナントチェックを合成したミドルウェア
-function authenticateAndCheck(req: express.Request, res: express.Response, next: express.NextFunction) {
-  authenticate(req, res, () => checkCompanyActive(req, res, next))
 }
 
 // ─────────────────────────────────────────────
@@ -434,6 +436,12 @@ app.post('/api/auth/login', async (req, res) => {
 
   const valid = await bcrypt.compare(password, user.password)
   if (!valid) { res.status(401).json({ error: 'メールアドレスまたはパスワードが違います' }); return }
+
+  // 会社が利用停止中の場合はログインを拒否（super-adminは除外）
+  if (!user.isSuperAdmin && (!user.company.isActive || user.company.subscriptionStatus === 'SUSPENDED')) {
+    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+    return
+  }
 
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } })
 
@@ -6877,22 +6885,25 @@ app.get('/api/equipment/site-shortage', authenticate, async (req, res) => {
       const deployed = eq.assignments
         .filter((a) => a.siteId === site.id)
         .reduce((sum, a) => sum + a.quantity, 0)
-      // 基本的な必要数: トランシーバー→隊員数分、その他→1セットを基準
-      const needed = eq.category === 'RADIO' ? site.requiredCount : (deployed > 0 ? deployed : 0)
+      // 必要数を算出できるのはトランシーバー(RADIO)のみ（隊員数=requiredCount基準）。
+      // それ以外のカテゴリは現場ごとの必要数の基準が無いため過不足判定は行わず、配備数のみ表示する。
+      const trackShortage = eq.category === 'RADIO'
       return {
         equipmentId: eq.id,
         equipmentName: eq.name,
         category: eq.category,
         deployed,
-        needed: eq.category === 'RADIO' ? site.requiredCount : deployed,
-        shortage: eq.category === 'RADIO' ? Math.max(0, site.requiredCount - deployed) : 0,
+        trackShortage,
+        needed: trackShortage ? site.requiredCount : null,
+        shortage: trackShortage ? Math.max(0, site.requiredCount - deployed) : null,
       }
     })
     return {
       siteId: site.id,
       siteName: site.name,
       requiredGuards: site.requiredCount,
-      items: items.filter((i) => i.deployed > 0 || i.needed > 0),
+      // RADIOは必要数がある限り表示、その他は配備済みのもののみ表示
+      items: items.filter((i) => i.deployed > 0 || (i.needed ?? 0) > 0),
     }
   })
 
