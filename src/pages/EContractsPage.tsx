@@ -4,15 +4,9 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 import { format } from 'date-fns'
+import { E_CONTRACT_STATUS } from '../lib/constants'
 
-const STATUS_LABELS: Record<string, { label: string; className: string }> = {
-  DRAFT:             { label: '下書き',     className: 'badge-gray' },
-  SENT:              { label: '署名依頼中', className: 'badge-warning' },
-  PARTIALLY_SIGNED:  { label: '署名中',     className: 'badge-info' },
-  COMPLETED:         { label: '締結完了',   className: 'badge-success' },
-  EXPIRED:           { label: '期限切れ',   className: 'badge-danger' },
-  CANCELLED:         { label: 'キャンセル', className: 'badge-danger' },
-}
+const STATUS_LABELS = E_CONTRACT_STATUS
 
 interface Signer { email: string; name: string }
 
