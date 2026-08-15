@@ -830,6 +830,7 @@ model ElectronicContract {
   certificatePath String?         // 合意締結証明書PDFのパス
   pageCount       Int?            // 原本PDFのページ数
   status          EContractStatus @default(DRAFT)
+  sequential      Boolean         @default(false) // 署名順序を強制する（順番に回す）
   expiresAt       DateTime?       // 署名期限
   timestampToken  String?         // RFC3161 TSAトークン（Base64）
   timestampAt     DateTime?       // タイムスタンプ取得日時
@@ -862,6 +863,7 @@ model EContractSignature {
   userId          String?
   user            User?      @relation(fields: [userId], references: [id])
   token           String     @unique @default(uuid()) // 署名URLトークン
+  signOrder       Int        @default(0) // 署名順序（sequential時に使用。小さい順）
   signedAt        DateTime?
   ipAddress       String?
   userAgent       String?

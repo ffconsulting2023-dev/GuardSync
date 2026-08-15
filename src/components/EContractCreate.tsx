@@ -25,6 +25,7 @@ const DEFAULT_SIZE: Record<FieldType, { w: number; h: number }> = {
 export default function EContractCreate({ onClose, onCreated, initialTitle = '', contractId }: { onClose: () => void; onCreated: () => void; initialTitle?: string; contractId?: string }) {
   const [title, setTitle] = useState(initialTitle)
   const [expiresAt, setExpiresAt] = useState('')
+  const [sequential, setSequential] = useState(false)
   const [signers, setSigners] = useState<Signer[]>([{ name: '', email: '' }])
   const [file, setFile] = useState<File | null>(null)
   const [pdfUrl, setPdfUrl] = useState<string>('')
@@ -150,7 +151,7 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
     setSubmitting(true)
     try {
       await api.post('/e-contracts', {
-        title, expiresAt: expiresAt || undefined, signers: validSigners, contractId,
+        title, expiresAt: expiresAt || undefined, sequential, signers: validSigners, contractId,
         sourcePdfFilename: uploaded.filename, sourcePdfHash: uploaded.hash, pageCount: uploaded.pageCount,
         fields: fields.map(({ signerEmail, sealId, type, page, x, y, width, height }) => ({ signerEmail, sealId, type, page, x, y, width, height })),
       })
@@ -189,10 +190,14 @@ export default function EContractCreate({ onClose, onCreated, initialTitle = '',
               <label className="form-label mb-0">署名者 *</label>
               <button type="button" onClick={() => setSigners(ss => [...ss, { name: '', email: '' }])} className="text-blue-600 text-xs">+ 追加</button>
             </div>
+            <label className="flex items-center gap-2 mb-2 text-xs text-gray-600 cursor-pointer">
+              <input type="checkbox" checked={sequential} onChange={e => setSequential(e.target.checked)} className="w-4 h-4" />
+              上から順番に署名を回す（前の署名者が完了すると次の署名者へ依頼メールを送付）
+            </label>
             <div className="space-y-2">
               {signers.map((s, i) => (
                 <div key={i} className="grid grid-cols-[16px_1fr_1fr_24px] gap-2 items-center">
-                  <span className="w-3 h-3 rounded-full" style={{ background: SIGNER_COLORS[i % SIGNER_COLORS.length] }} />
+                  <span className="w-3 h-3 rounded-full flex items-center justify-center text-[8px] text-white" style={{ background: SIGNER_COLORS[i % SIGNER_COLORS.length] }}>{sequential ? i + 1 : ''}</span>
                   <input value={s.name} placeholder="氏名" onChange={e => setSigners(ss => ss.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} className="form-input" />
                   <input type="email" value={s.email} placeholder="メールアドレス" onChange={e => setSigners(ss => ss.map((x, j) => j === i ? { ...x, email: e.target.value } : x))} className="form-input" />
                   {signers.length > 1 && <button onClick={() => setSigners(ss => ss.filter((_, j) => j !== i))} className="text-gray-400 hover:text-red-500">✕</button>}

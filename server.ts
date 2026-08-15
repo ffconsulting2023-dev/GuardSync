@@ -1513,6 +1513,36 @@ async function generateCertificatePdf(eContractId: string): Promise<string> {
   return outPath
 }
 
+// 署名依頼/リマインドメールを送信
+async function sendSignRequestEmail(
+  sig: { signerEmail: string; signerName: string; token: string },
+  title: string, expiry: Date | null, companyName?: string, reminder = false,
+) {
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  const signUrl = `${baseUrl}/sign/${sig.token}`
+  const subject = `${reminder ? '【署名リマインド】' : '【署名依頼】'}${title}`
+  const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;font-size:18px">電子契約 署名依頼</h2>
+  </div>
+  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+    <p>${escapeHtml(sig.signerName)} 様</p>
+    <p>下記の契約書への電子署名をお願いします。</p>
+    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0">
+      <p style="margin:0;font-weight:bold">${escapeHtml(title)}</p>
+      ${expiry ? `<p style="margin:8px 0 0;font-size:13px;color:#666">署名期限: ${expiry.toLocaleDateString('ja-JP')}</p>` : ''}
+    </div>
+    <div style="text-align:center;margin:24px 0">
+      <a href="${signUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">署名する</a>
+    </div>
+    <p style="font-size:12px;color:#999">署名時のIPアドレス・ブラウザ情報が記録されます。</p>
+    <p style="font-size:12px;color:#999">${companyName || ''} | GuardSync</p>
+  </div>
+</div>`
+  await sendEmail(sig.signerEmail, subject, html)
+}
+
 // 会社印（角印・社印）管理
 app.get('/api/seals', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
@@ -1574,7 +1604,7 @@ app.post('/api/e-contracts/upload', authenticate, requireRole('ADMIN', 'MANAGER'
 
 app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { title, content, contractId, signers, expiresAt, sourcePdfFilename, sourcePdfHash, pageCount, fields } = req.body
+  const { title, content, contractId, signers, expiresAt, sourcePdfFilename, sourcePdfHash, pageCount, fields, sequential } = req.body
   if (!title || !signers?.length) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
@@ -1601,8 +1631,9 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
       pageCount: pageCount != null ? Number(pageCount) : null,
       expiresAt: expiry,
       status: 'SENT',
+      sequential: !!sequential,
       auditLog: [{ action: 'CREATED', at: new Date().toISOString(), by: companyId }],
-      signatures: { create: signers.map((s: any) => ({ signerEmail: s.email, signerName: s.name })) },
+      signatures: { create: signers.map((s: any, i: number) => ({ signerEmail: s.email, signerName: s.name, signOrder: i })) },
     },
     include: { signatures: true },
   })
@@ -1628,31 +1659,12 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
     })
   }
 
-  // 署名依頼メール送信
-  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
-  for (const sig of eContract.signatures) {
-    const signUrl = `${baseUrl}/sign/${sig.token}`
-    const subject = `【署名依頼】${title}`
-    const html = `
-<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
-  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0;font-size:18px">電子契約 署名依頼</h2>
-  </div>
-  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
-    <p>${escapeHtml(sig.signerName)} 様</p>
-    <p>下記の契約書への電子署名をお願いします。</p>
-    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0">
-      <p style="margin:0;font-weight:bold">${escapeHtml(title)}</p>
-      <p style="margin:8px 0 0;font-size:13px;color:#666">署名期限: ${expiry.toLocaleDateString('ja-JP')}</p>
-    </div>
-    <div style="text-align:center;margin:24px 0">
-      <a href="${signUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">署名する</a>
-    </div>
-    <p style="font-size:12px;color:#999">署名時のIPアドレス・ブラウザ情報が記録されます。</p>
-    <p style="font-size:12px;color:#999">${company?.name} | GuardSync</p>
-  </div>
-</div>`
-    await sendEmail(sig.signerEmail, subject, html)
+  // 署名依頼メール送信。順序指定時は先頭の署名者にのみ送付
+  const recipients = eContract.sequential
+    ? eContract.signatures.filter(s => s.signOrder === 0)
+    : eContract.signatures
+  for (const sig of recipients) {
+    await sendSignRequestEmail(sig, title, expiry, company?.name)
   }
 
   res.status(201).json(eContract)
@@ -1713,12 +1725,16 @@ app.get('/api/e-contracts/:id', authenticate, async (req, res) => {
 app.get('/api/e-contracts/sign/:token', async (req, res) => {
   const sig = await prisma.eContractSignature.findUnique({
     where: { token: req.params.token },
-    include: { eContract: { include: { fields: true } } },
+    include: { eContract: { include: { fields: true, signatures: true } } },
   })
   if (!sig) { res.status(404).json({ error: '署名リンクが見つかりません' }); return }
   if (sig.signedAt) { res.status(409).json({ error: '既に署名済みです' }); return }
   if (sig.eContract.expiresAt && sig.eContract.expiresAt < new Date()) {
     res.status(410).json({ error: '署名期限が切れています' }); return
+  }
+  // 順序指定時は自分の番までブロック
+  if (sig.eContract.sequential && sig.eContract.signatures.some(s => s.signOrder < sig.signOrder && !s.signedAt)) {
+    res.status(403).json({ error: '前の署名者の署名完了をお待ちください（順番制の契約です）', code: 'NOT_YOUR_TURN' }); return
   }
 
   // この署名者に割り当てられた署名欄のみ返す（他情報は最小限）
@@ -1760,6 +1776,10 @@ app.post('/api/e-contracts/sign/:token', async (req, res) => {
     res.status(410).json({ error: '署名期限が切れています' }); return
   }
   if (!agreed) { res.status(400).json({ error: '契約内容への同意が必要です' }); return }
+  // 順序指定時は自分の番までブロック
+  if (sig.eContract.sequential && sig.eContract.signatures.some(s => s.signOrder < sig.signOrder && !s.signedAt)) {
+    res.status(403).json({ error: '前の署名者の署名完了をお待ちください（順番制の契約です）', code: 'NOT_YOUR_TURN' }); return
+  }
 
   const now = new Date()
   const ipAddress = req.ip
@@ -1817,6 +1837,17 @@ app.post('/api/e-contracts/sign/:token', async (req, res) => {
       where: { id: sig.eContractId },
       data: { status: 'PARTIALLY_SIGNED', auditLog: { push: { action: 'SIGNED', by: sig.signerEmail, at: now.toISOString(), ip: ipAddress } } },
     })
+    // 順序指定時は次の未署名者へ署名依頼を送付
+    if (sig.eContract.sequential) {
+      const next = sig.eContract.signatures
+        .filter(s => !s.signedAt && s.id !== sig.id)
+        .sort((a, b) => a.signOrder - b.signOrder)[0]
+      if (next) {
+        const company = await prisma.company.findUnique({ where: { id: sig.eContract.companyId } })
+        try { await sendSignRequestEmail(next, sig.eContract.title, sig.eContract.expiresAt, company?.name) }
+        catch (e) { logger.error('次署名者への通知に失敗', e, { eContractId: sig.eContractId }) }
+      }
+    }
   }
 
   res.json({ success: true, message: '署名が完了しました' })
