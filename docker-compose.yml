@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: guardsync-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: guardsync
+      POSTGRES_PASSWORD: guardsync
+      POSTGRES_DB: guardsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - guardsync-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardsync -d guardsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  guardsync-db-data:

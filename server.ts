@@ -14,6 +14,7 @@ import nodemailer from 'nodemailer'
 import crypto from 'crypto'
 import multer from 'multer'
 import fs from 'fs'
+import { PDFDocument as PDFLibDocument, StandardFonts, rgb } from 'pdf-lib'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1369,6 +1370,219 @@ app.put('/api/daily-pay/:id/approve', authenticate, requireRole('ADMIN', 'MANAGE
 // 電子契約 API
 // ─────────────────────────────────────────────
 
+// 電子契約の原本PDF保存先とアップロード設定（PDFのみ・10MB）
+const ECONTRACT_DIR = path.join(__dirname, 'uploads', 'econtracts')
+if (!fs.existsSync(ECONTRACT_DIR)) { fs.mkdirSync(ECONTRACT_DIR, { recursive: true }) }
+const econtractUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, ECONTRACT_DIR),
+    filename: (_req, _file, cb) => cb(null, `${crypto.randomUUID()}.pdf`),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'application/pdf') { cb(null, true) }
+    else { cb(new Error('PDFファイルのみアップロード可能です')) }
+  },
+})
+
+// 会社印画像の保存先とアップロード設定（PNG/JPEG・2MB）
+const SEAL_DIR = path.join(__dirname, 'uploads', 'seals')
+if (!fs.existsSync(SEAL_DIR)) { fs.mkdirSync(SEAL_DIR, { recursive: true }) }
+const sealUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, SEAL_DIR),
+    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname) || '.png'}`),
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'image/png' || file.mimetype === 'image/jpeg') { cb(null, true) }
+    else { cb(new Error('PNGまたはJPEG画像のみアップロード可能です')) }
+  },
+})
+
+// 署名を焼き込んだ署名済みPDFを生成し、保存パスとSHA-256を返す
+async function generateSignedPdf(eContractId: string): Promise<{ path: string; hash: string }> {
+  const ec = await prisma.electronicContract.findUnique({
+    where: { id: eContractId },
+    include: { fields: true },
+  })
+  if (!ec?.sourcePdfPath || !fs.existsSync(ec.sourcePdfPath)) {
+    throw new Error('原本PDFが見つかりません')
+  }
+  const srcBytes = fs.readFileSync(ec.sourcePdfPath)
+  const pdfDoc = await PDFLibDocument.load(srcBytes)
+  const helv = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  const pages = pdfDoc.getPages()
+
+  for (const f of ec.fields) {
+    // 会社印の自動押印欄は value を持たないため autoSealPath を使用
+    if (!f.value && !f.autoSealPath) continue
+    const page = pages[f.page - 1]
+    if (!page) continue
+    const pw = page.getWidth()
+    const ph = page.getHeight()
+    const x = f.x * pw
+    const w = f.width * pw
+    const h = f.height * ph
+    // 正規化座標は左上原点。pdf-libは左下原点のためY軸を反転
+    const y = ph - (f.y * ph) - h
+
+    if ((f.type === 'SIGNATURE' || f.type === 'SEAL') && f.value?.startsWith('data:image')) {
+      try {
+        const b64 = f.value.split(',')[1]
+        const imgBytes = Buffer.from(b64, 'base64')
+        const img = f.value.includes('image/png')
+          ? await pdfDoc.embedPng(imgBytes)
+          : await pdfDoc.embedJpg(imgBytes)
+        page.drawImage(img, { x, y, width: w, height: h })
+      } catch (e) {
+        logger.error('署名画像の埋め込みに失敗', e, { fieldId: f.id })
+      }
+    } else if (f.type === 'SEAL' && f.autoSealPath && fs.existsSync(f.autoSealPath)) {
+      try {
+        const imgBytes = fs.readFileSync(f.autoSealPath)
+        const img = f.autoSealPath.toLowerCase().endsWith('.png')
+          ? await pdfDoc.embedPng(imgBytes)
+          : await pdfDoc.embedJpg(imgBytes)
+        page.drawImage(img, { x, y, width: w, height: h })
+      } catch (e) {
+        logger.error('会社印の埋め込みに失敗', e, { fieldId: f.id })
+      }
+    } else if (f.value && (f.type === 'DATE' || f.type === 'NAME' || f.type === 'TEXT')) {
+      // Helveticaは日本語不可。ASCII以外は描画をスキップ（MVP制約）
+      try {
+        page.drawText(f.value, { x, y: y + h / 3, size: Math.min(h * 0.6, 12), font: helv, color: rgb(0, 0, 0) })
+      } catch { /* 日本語等でエンコード不可の場合はスキップ */ }
+    }
+  }
+
+  const outBytes = await pdfDoc.save()
+  const outPath = path.join(ECONTRACT_DIR, `signed-${eContractId}.pdf`)
+  fs.writeFileSync(outPath, outBytes)
+  const hash = crypto.createHash('sha256').update(outBytes).digest('hex')
+  return { path: outPath, hash }
+}
+
+// サーバ発行タイムスタンプ（第三者TSAではなく、サーバがハッシュと時刻に
+// 対してHMAC署名する改ざん検知用の時刻証跡。将来的にRFC3161 TSAへ差し替え可能）
+function issueServerTimestamp(hashHex: string, at: Date): string {
+  const mac = crypto.createHmac('sha256', JWT_SECRET).update(`${hashHex}|${at.toISOString()}`).digest('hex')
+  return `srv:${at.toISOString()}:${mac}`
+}
+
+// 合意締結証明書PDFを生成し、保存パスを返す（立会人型の締結証跡）
+async function generateCertificatePdf(eContractId: string): Promise<string> {
+  const ec = await prisma.electronicContract.findUnique({
+    where: { id: eContractId },
+    include: { signatures: true },
+  })
+  if (!ec) throw new Error('電子契約が見つかりません')
+
+  const outPath = path.join(ECONTRACT_DIR, `certificate-${eContractId}.pdf`)
+  const doc = new PDFDocument({ size: 'A4', margin: 50 })
+  const stream = fs.createWriteStream(outPath)
+  doc.pipe(stream)
+
+  // 日本語フォント（環境変数で差し替え可。無ければ英語ラベルにフォールバック）
+  const fontPath = process.env.ESIGN_JP_FONT_PATH || path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+  let jp = false
+  try {
+    if (fs.existsSync(fontPath)) { doc.registerFont('JP', fontPath); doc.font('JP'); jp = true }
+  } catch { /* フォールバック */ }
+  if (!jp) doc.font('Helvetica')
+  const L = (ja: string, en: string) => (jp ? ja : en)
+
+  doc.fontSize(18).text(L('合意締結証明書', 'Agreement Completion Certificate'), { align: 'center' })
+  doc.moveDown(1)
+  doc.fontSize(11)
+  doc.text(`${L('契約書名', 'Title')}: ${ec.title}`)
+  doc.text(`${L('電子契約ID', 'Contract ID')}: ${ec.id}`)
+  doc.text(`${L('締結日時', 'Completed at')}: ${new Date().toLocaleString('ja-JP')}`)
+  doc.moveDown(0.5)
+  if (ec.sourcePdfHash) doc.fontSize(8).text(`${L('原本SHA-256', 'Source SHA-256')}: ${ec.sourcePdfHash}`)
+  if (ec.signedPdfHash) doc.fontSize(8).text(`${L('署名済SHA-256', 'Signed SHA-256')}: ${ec.signedPdfHash}`)
+  if (ec.timestampAt) doc.fontSize(8).text(`${L('サーバ発行タイムスタンプ', 'Server timestamp')}: ${new Date(ec.timestampAt).toLocaleString('ja-JP')}`)
+  doc.moveDown(1)
+
+  doc.fontSize(13).text(L('署名者', 'Signers'))
+  doc.moveDown(0.3)
+  for (const s of ec.signatures) {
+    doc.fontSize(10).fillColor('#000').text(`- ${s.signerName} <${s.signerEmail}>`)
+    doc.fontSize(8).fillColor('#555').text(`   ${L('署名日時', 'Signed')}: ${s.signedAt ? new Date(s.signedAt).toLocaleString('ja-JP') : '-'}   IP: ${s.ipAddress || '-'}`)
+  }
+  doc.moveDown(1)
+  doc.fontSize(8).fillColor('#888').text(
+    L('本証明書は立会人型（メール認証）の電子契約における締結の証跡を記録したものです。',
+      'This certificate records the completion trail of an email-based (witness-type) electronic contract.'),
+  )
+
+  doc.end()
+  await new Promise<void>((resolve, reject) => { stream.on('finish', () => resolve()); stream.on('error', reject) })
+  return outPath
+}
+
+// 署名依頼/リマインドメールを送信
+async function sendSignRequestEmail(
+  sig: { signerEmail: string; signerName: string; token: string },
+  title: string, expiry: Date | null, companyName?: string, reminder = false,
+) {
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  const signUrl = `${baseUrl}/sign/${sig.token}`
+  const subject = `${reminder ? '【署名リマインド】' : '【署名依頼】'}${title}`
+  const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
+    <h2 style="margin:0;font-size:18px">電子契約 署名依頼</h2>
+  </div>
+  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
+    <p>${escapeHtml(sig.signerName)} 様</p>
+    <p>下記の契約書への電子署名をお願いします。</p>
+    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0">
+      <p style="margin:0;font-weight:bold">${escapeHtml(title)}</p>
+      ${expiry ? `<p style="margin:8px 0 0;font-size:13px;color:#666">署名期限: ${expiry.toLocaleDateString('ja-JP')}</p>` : ''}
+    </div>
+    <div style="text-align:center;margin:24px 0">
+      <a href="${signUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">署名する</a>
+    </div>
+    <p style="font-size:12px;color:#999">署名時のIPアドレス・ブラウザ情報が記録されます。</p>
+    <p style="font-size:12px;color:#999">${companyName || ''} | GuardSync</p>
+  </div>
+</div>`
+  await sendEmail(sig.signerEmail, subject, html)
+}
+
+// 会社印（角印・社印）管理
+app.get('/api/seals', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const seals = await prisma.sealStamp.findMany({ where: { companyId }, orderBy: { createdAt: 'desc' } })
+  res.json(seals.map(s => ({ id: s.id, name: s.name, createdAt: s.createdAt })))
+})
+
+app.post('/api/seals', authenticate, requireRole('ADMIN', 'MANAGER'), sealUpload.single('file'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const file = req.file
+  if (!file) { res.status(400).json({ error: '印影画像が必要です' }); return }
+  const name = (req.body?.name as string)?.trim() || '会社印'
+  const seal = await prisma.sealStamp.create({ data: { companyId, name, imagePath: file.path } })
+  res.status(201).json({ id: seal.id, name: seal.name, createdAt: seal.createdAt })
+})
+
+app.get('/api/seals/:id/image', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const seal = await prisma.sealStamp.findFirst({ where: { id: req.params.id, companyId } })
+  if (!seal || !fs.existsSync(seal.imagePath)) { res.status(404).json({ error: '印影がありません' }); return }
+  res.sendFile(path.resolve(seal.imagePath))
+})
+
+app.delete('/api/seals/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const seal = await prisma.sealStamp.findFirst({ where: { id: req.params.id, companyId } })
+  if (!seal) { res.status(404).json({ error: '印影が見つかりません' }); return }
+  try { if (fs.existsSync(seal.imagePath)) fs.unlinkSync(seal.imagePath) } catch { /* ignore */ }
+  await prisma.sealStamp.delete({ where: { id: seal.id } })
+  res.json({ success: true })
+})
+
 app.get('/api/e-contracts', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const eContracts = await prisma.electronicContract.findMany({
@@ -1379,11 +1593,39 @@ app.get('/api/e-contracts', authenticate, async (req, res) => {
   res.json(eContracts)
 })
 
+// 契約書PDFのアップロード（原本）。SHA-256とページ数を返す
+app.post('/api/e-contracts/upload', authenticate, requireRole('ADMIN', 'MANAGER'), econtractUpload.single('file'), async (req, res) => {
+  const file = req.file
+  if (!file) { res.status(400).json({ error: 'PDFファイルが必要です' }); return }
+  const bytes = fs.readFileSync(file.path)
+  const hash = crypto.createHash('sha256').update(bytes).digest('hex')
+  let pageCount = 0
+  try {
+    const doc = await PDFLibDocument.load(bytes)
+    pageCount = doc.getPageCount()
+  } catch {
+    fs.unlinkSync(file.path)
+    res.status(400).json({ error: 'PDFの読み込みに失敗しました' }); return
+  }
+  res.json({ filename: path.basename(file.path), hash, pageCount, size: file.size })
+})
+
 app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { title, content, contractId, signers, expiresAt } = req.body
-  if (!title || !content || !signers?.length) {
+  const { title, content, contractId, signers, expiresAt, sourcePdfFilename, sourcePdfHash, pageCount, fields, sequential } = req.body
+  if (!title || !signers?.length) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
+  }
+
+  // 原本PDF（アップロード済み）を解決。PDFも本文も無ければエラー
+  let sourcePdfPath: string | null = null
+  if (sourcePdfFilename) {
+    const p = path.join(ECONTRACT_DIR, path.basename(String(sourcePdfFilename)))
+    if (!fs.existsSync(p)) { res.status(400).json({ error: 'アップロードされたPDFが見つかりません' }); return }
+    sourcePdfPath = p
+  }
+  if (!sourcePdfPath && !content) {
+    res.status(400).json({ error: '契約書PDFまたは本文が必要です' }); return
   }
 
   const company = await prisma.company.findUnique({ where: { id: companyId } })
@@ -1391,93 +1633,234 @@ app.post('/api/e-contracts', authenticate, requireRole('ADMIN', 'MANAGER'), asyn
 
   const eContract = await prisma.electronicContract.create({
     data: {
-      companyId, title, content, contractId,
+      companyId, title, content: content || '', contractId: contractId || null,
+      sourcePdfPath,
+      sourcePdfHash: sourcePdfHash || null,
+      pageCount: pageCount != null ? Number(pageCount) : null,
       expiresAt: expiry,
       status: 'SENT',
+      sequential: !!sequential,
       auditLog: [{ action: 'CREATED', at: new Date().toISOString(), by: companyId }],
-      signatures: { create: signers.map((s: any) => ({ signerEmail: s.email, signerName: s.name })) },
+      signatures: { create: signers.map((s: any, i: number) => ({ signerEmail: s.email, signerName: s.name, signOrder: i })) },
     },
     include: { signatures: true },
   })
 
-  // 署名依頼メール送信
-  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
-  for (const sig of eContract.signatures) {
-    const signUrl = `${baseUrl}/sign/${sig.token}`
-    const subject = `【署名依頼】${title}`
-    const html = `
-<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
-  <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0;font-size:18px">電子契約 署名依頼</h2>
-  </div>
-  <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
-    <p>${escapeHtml(sig.signerName)} 様</p>
-    <p>下記の契約書への電子署名をお願いします。</p>
-    <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0">
-      <p style="margin:0;font-weight:bold">${escapeHtml(title)}</p>
-      <p style="margin:8px 0 0;font-size:13px;color:#666">署名期限: ${expiry.toLocaleDateString('ja-JP')}</p>
-    </div>
-    <div style="text-align:center;margin:24px 0">
-      <a href="${signUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">署名する</a>
-    </div>
-    <p style="font-size:12px;color:#999">署名時のIPアドレス・ブラウザ情報が記録されます。</p>
-    <p style="font-size:12px;color:#999">${company?.name} | GuardSync</p>
-  </div>
-</div>`
-    await sendEmail(sig.signerEmail, subject, html)
+  // 署名欄を作成（署名者メールで割り当て。sealId指定は会社印の自動押印欄）
+  if (Array.isArray(fields) && fields.length) {
+    const byEmail = new Map(eContract.signatures.map(s => [s.signerEmail, s.id]))
+    // 会社印の解決（自社のもののみ）
+    const sealIds = [...new Set(fields.map((f: any) => f.sealId).filter(Boolean))] as string[]
+    const seals = sealIds.length
+      ? await prisma.sealStamp.findMany({ where: { id: { in: sealIds }, companyId } })
+      : []
+    const sealById = new Map(seals.map(s => [s.id, s.imagePath]))
+    await prisma.signatureField.createMany({
+      data: fields.map((f: any) => ({
+        eContractId: eContract.id,
+        signatureId: f.sealId ? null : (f.signerEmail ? (byEmail.get(f.signerEmail) ?? null) : null),
+        type: f.type,
+        page: Number(f.page) || 1,
+        x: Number(f.x), y: Number(f.y), width: Number(f.width), height: Number(f.height),
+        autoSealPath: f.sealId ? (sealById.get(f.sealId) ?? null) : null,
+      })),
+    })
+  }
+
+  // 署名依頼メール送信。順序指定時は先頭の署名者にのみ送付
+  const recipients = eContract.sequential
+    ? eContract.signatures.filter(s => s.signOrder === 0)
+    : eContract.signatures
+  for (const sig of recipients) {
+    await sendSignRequestEmail(sig, title, expiry, company?.name)
   }
 
   res.status(201).json(eContract)
+})
+
+// 電子契約の原本PDFを取得（認証・所有チェック）
+app.get('/api/e-contracts/:id/pdf', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec?.sourcePdfPath || !fs.existsSync(ec.sourcePdfPath)) { res.status(404).json({ error: 'PDFがありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(ec.sourcePdfPath))
+})
+
+// 署名済みPDFを取得
+app.get('/api/e-contracts/:id/signed-pdf', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec?.signedPdfPath || !fs.existsSync(ec.signedPdfPath)) { res.status(404).json({ error: '署名済みPDFがありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(ec.signedPdfPath))
+})
+
+// 合意締結証明書を取得
+app.get('/api/e-contracts/:id/certificate', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec?.certificatePath || !fs.existsSync(ec.certificatePath)) { res.status(404).json({ error: '証明書がありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(ec.certificatePath))
+})
+
+// 電子契約の取消
+app.post('/api/e-contracts/:id/cancel', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({ where: { id: req.params.id, companyId } })
+  if (!ec) { res.status(404).json({ error: '電子契約が見つかりません' }); return }
+  if (ec.status === 'COMPLETED') { res.status(400).json({ error: '締結済みの契約は取消できません' }); return }
+  const updated = await prisma.electronicContract.update({
+    where: { id: ec.id },
+    data: { status: 'CANCELLED', auditLog: { push: { action: 'CANCELLED', at: new Date().toISOString(), by: companyId } } },
+  })
+  res.json(updated)
+})
+
+// 電子契約の詳細（署名者・署名欄込み）
+app.get('/api/e-contracts/:id', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const ec = await prisma.electronicContract.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { signatures: true, fields: true },
+  })
+  if (!ec) { res.status(404).json({ error: '電子契約が見つかりません' }); return }
+  res.json(ec)
 })
 
 // 署名URL経由でのアクセス（認証不要）
 app.get('/api/e-contracts/sign/:token', async (req, res) => {
   const sig = await prisma.eContractSignature.findUnique({
     where: { token: req.params.token },
-    include: { eContract: true },
+    include: { eContract: { include: { fields: true, signatures: true } } },
   })
   if (!sig) { res.status(404).json({ error: '署名リンクが見つかりません' }); return }
   if (sig.signedAt) { res.status(409).json({ error: '既に署名済みです' }); return }
   if (sig.eContract.expiresAt && sig.eContract.expiresAt < new Date()) {
     res.status(410).json({ error: '署名期限が切れています' }); return
   }
+  // 順序指定時は自分の番までブロック
+  if (sig.eContract.sequential && sig.eContract.signatures.some(s => s.signOrder < sig.signOrder && !s.signedAt)) {
+    res.status(403).json({ error: '前の署名者の署名完了をお待ちください（順番制の契約です）', code: 'NOT_YOUR_TURN' }); return
+  }
 
-  res.json({ title: sig.eContract.title, content: sig.eContract.content, signerName: sig.signerName })
+  // この署名者に割り当てられた署名欄のみ返す（他情報は最小限）
+  const myFields = sig.eContract.fields
+    .filter(f => f.signatureId === sig.id)
+    .map(f => ({ id: f.id, type: f.type, page: f.page, x: f.x, y: f.y, width: f.width, height: f.height }))
+
+  res.json({
+    id: sig.eContract.id,
+    title: sig.eContract.title,
+    content: sig.eContract.content,
+    signerName: sig.signerName,
+    hasPdf: !!sig.eContract.sourcePdfPath,
+    pageCount: sig.eContract.pageCount,
+    expiresAt: sig.eContract.expiresAt,
+    fields: myFields,
+  })
+})
+
+// 署名対象の原本PDFを取得（トークン経由・公開）
+app.get('/api/e-contracts/sign/:token/pdf', async (req, res) => {
+  const sig = await prisma.eContractSignature.findUnique({
+    where: { token: req.params.token },
+    include: { eContract: true },
+  })
+  if (!sig?.eContract.sourcePdfPath || !fs.existsSync(sig.eContract.sourcePdfPath)) { res.status(404).json({ error: 'PDFがありません' }); return }
+  res.setHeader('Content-Type', 'application/pdf')
+  res.sendFile(path.resolve(sig.eContract.sourcePdfPath))
 })
 
 app.post('/api/e-contracts/sign/:token', async (req, res) => {
+  const { fields: submitted, agreed } = req.body as { fields?: Array<{ fieldId: string; imageDataUrl?: string; value?: string }>; agreed?: boolean }
   const sig = await prisma.eContractSignature.findUnique({
     where: { token: req.params.token },
-    include: { eContract: { include: { signatures: true } } },
+    include: { eContract: { include: { signatures: true, fields: true } } },
   })
   if (!sig || sig.signedAt) { res.status(400).json({ error: '無効または署名済みです' }); return }
   if (sig.eContract.expiresAt && sig.eContract.expiresAt < new Date()) {
     res.status(410).json({ error: '署名期限が切れています' }); return
   }
+  if (!agreed) { res.status(400).json({ error: '契約内容への同意が必要です' }); return }
+  // 順序指定時は自分の番までブロック
+  if (sig.eContract.sequential && sig.eContract.signatures.some(s => s.signOrder < sig.signOrder && !s.signedAt)) {
+    res.status(403).json({ error: '前の署名者の署名完了をお待ちください（順番制の契約です）', code: 'NOT_YOUR_TURN' }); return
+  }
 
+  const now = new Date()
   const ipAddress = req.ip
   const userAgent = req.headers['user-agent']
 
+  // この署名者の署名欄を埋める
+  const myFields = sig.eContract.fields.filter(f => f.signatureId === sig.id)
+  for (const f of myFields) {
+    const sub = submitted?.find(x => x.fieldId === f.id)
+    let value: string | null = null
+    if (f.type === 'SIGNATURE' || f.type === 'SEAL') {
+      if (!sub?.imageDataUrl?.startsWith('data:image')) {
+        res.status(400).json({ error: '署名（手書きまたは印影）が必要です' }); return
+      }
+      value = sub.imageDataUrl
+    } else if (f.type === 'DATE') {
+      value = now.toLocaleDateString('ja-JP') // 例: 2026/8/14（Helveticaで描画可能）
+    } else if (f.type === 'NAME') {
+      value = sig.signerName
+    } else if (f.type === 'TEXT') {
+      value = sub?.value ?? ''
+    }
+    await prisma.signatureField.update({ where: { id: f.id }, data: { value, signedAt: now } })
+  }
+
   await prisma.eContractSignature.update({
     where: { id: sig.id },
-    data: { signedAt: new Date(), ipAddress, userAgent },
+    data: { signedAt: now, ipAddress, userAgent },
   })
 
   // 全員署名済みか確認
   const allSigned = sig.eContract.signatures.every(s => s.id === sig.id || s.signedAt)
   if (allSigned) {
+    // 原本PDFがあれば署名済みPDFを生成
+    let signedInfo: { path: string; hash: string } | null = null
+    if (sig.eContract.sourcePdfPath) {
+      try { signedInfo = await generateSignedPdf(sig.eContractId) }
+      catch (e) { logger.error('署名済みPDF生成に失敗', e, { eContractId: sig.eContractId }) }
+    }
     await prisma.electronicContract.update({
       where: { id: sig.eContractId },
       data: {
         status: 'COMPLETED',
-        auditLog: { push: { action: 'ALL_SIGNED', at: new Date().toISOString() } },
+        ...(signedInfo ? {
+          signedPdfPath: signedInfo.path,
+          signedPdfHash: signedInfo.hash,
+          timestampAt: now,
+          timestampToken: issueServerTimestamp(signedInfo.hash, now),
+        } : {}),
+        auditLog: { push: { action: 'ALL_SIGNED', at: now.toISOString() } },
       },
     })
+    // 合意締結証明書を生成（signedPdfHash 反映後に生成）
+    try {
+      const certPath = await generateCertificatePdf(sig.eContractId)
+      await prisma.electronicContract.update({ where: { id: sig.eContractId }, data: { certificatePath: certPath } })
+    } catch (e) { logger.error('合意締結証明書の生成に失敗', e, { eContractId: sig.eContractId }) }
   } else {
     await prisma.electronicContract.update({
       where: { id: sig.eContractId },
-      data: { status: 'PARTIALLY_SIGNED', auditLog: { push: { action: 'SIGNED', by: sig.signerEmail, at: new Date().toISOString(), ip: ipAddress } } },
+      data: { status: 'PARTIALLY_SIGNED', auditLog: { push: { action: 'SIGNED', by: sig.signerEmail, at: now.toISOString(), ip: ipAddress } } },
     })
+    // 順序指定時は次の未署名者へ署名依頼を送付
+    if (sig.eContract.sequential) {
+      const next = sig.eContract.signatures
+        .filter(s => !s.signedAt && s.id !== sig.id)
+        .sort((a, b) => a.signOrder - b.signOrder)[0]
+      if (next) {
+        const company = await prisma.company.findUnique({ where: { id: sig.eContract.companyId } })
+        try { await sendSignRequestEmail(next, sig.eContract.title, sig.eContract.expiresAt, company?.name) }
+        catch (e) { logger.error('次署名者への通知に失敗', e, { eContractId: sig.eContractId }) }
+      }
+    }
   }
 
   res.json({ success: true, message: '署名が完了しました' })
@@ -5495,6 +5878,45 @@ cron.schedule('0 9 * * *', async () => {
   }
 
   logger.info('請求リマインド 完了', { context: 'cron' })
+}, { timezone: 'Asia/Tokyo' })
+
+// 電子契約の期限切れ処理・署名リマインド（毎日 AM8:00）
+cron.schedule('0 8 * * *', async () => {
+  logger.info('電子契約 期限チェック 開始', { context: 'cron' })
+  const now = new Date()
+
+  // 1) 期限切れ → EXPIRED
+  const expired = await prisma.electronicContract.findMany({
+    where: { status: { in: ['SENT', 'PARTIALLY_SIGNED'] }, expiresAt: { lt: now } },
+    select: { id: true },
+  })
+  for (const ec of expired) {
+    await prisma.electronicContract.update({
+      where: { id: ec.id },
+      data: { status: 'EXPIRED', auditLog: { push: { action: 'EXPIRED', at: now.toISOString() } } },
+    })
+  }
+
+  // 2) 期限3日前以内 → 未署名者へリマインド送信
+  const soon = new Date(now.getTime() + 3 * 86400000)
+  const ending = await prisma.electronicContract.findMany({
+    where: { status: { in: ['SENT', 'PARTIALLY_SIGNED'] }, expiresAt: { gte: now, lte: soon } },
+    include: { signatures: true },
+  })
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  for (const ec of ending) {
+    for (const sig of ec.signatures) {
+      if (sig.signedAt) continue
+      const signUrl = `${baseUrl}/sign/${sig.token}`
+      await sendEmail(
+        sig.signerEmail,
+        `【署名リマインド】${ec.title}`,
+        `<p>${escapeHtml(sig.signerName)} 様</p><p>「${escapeHtml(ec.title)}」への電子署名がまだ完了していません。署名期限が近づいています（${ec.expiresAt ? ec.expiresAt.toLocaleDateString('ja-JP') : ''}）。</p><p><a href="${signUrl}">署名する</a></p>`
+      )
+    }
+  }
+
+  logger.info('電子契約 期限チェック 完了', { context: 'cron', expired: expired.length, reminded: ending.length })
 }, { timezone: 'Asia/Tokyo' })
 
 // ─────────────────────────────────────────────

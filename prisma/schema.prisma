@@ -821,9 +821,16 @@ model ElectronicContract {
   contractId      String?
   contract        Contract?       @relation(fields: [contractId], references: [id])
   title           String
-  content         String          // 契約文書テキスト
-  pdfPath         String?         // 生成されたPDFパス
+  content         String          @default("") // 契約文書テキスト（後方互換。PDF主体の新方式では任意）
+  pdfPath         String?         // 生成されたPDFパス（旧方式）
+  sourcePdfPath   String?         // アップロードした原本PDFのパス
+  sourcePdfHash   String?         // 原本PDFのSHA-256（改ざん検知）
+  signedPdfPath   String?         // 署名を焼き込んだ署名済みPDFのパス
+  signedPdfHash   String?         // 署名済みPDFのSHA-256
+  certificatePath String?         // 合意締結証明書PDFのパス
+  pageCount       Int?            // 原本PDFのページ数
   status          EContractStatus @default(DRAFT)
+  sequential      Boolean         @default(false) // 署名順序を強制する（順番に回す）
   expiresAt       DateTime?       // 署名期限
   timestampToken  String?         // RFC3161 TSAトークン（Base64）
   timestampAt     DateTime?       // タイムスタンプ取得日時
@@ -832,6 +839,7 @@ model ElectronicContract {
   updatedAt       DateTime        @updatedAt
 
   signatures      EContractSignature[]
+  fields          SignatureField[]
 
   @@index([companyId])
   @@index([contractId])
@@ -855,12 +863,61 @@ model EContractSignature {
   userId          String?
   user            User?      @relation(fields: [userId], references: [id])
   token           String     @unique @default(uuid()) // 署名URLトークン
+  signOrder       Int        @default(0) // 署名順序（sequential時に使用。小さい順）
   signedAt        DateTime?
   ipAddress       String?
   userAgent       String?
   createdAt       DateTime   @default(now())
 
+  fields          SignatureField[]
+
   @@index([eContractId])
+}
+
+// ─────────────────────────────────────────────
+// 署名欄（PDF書面上に配置する署名/印影/日付/氏名フィールド）
+// ─────────────────────────────────────────────
+
+model SignatureField {
+  id            String              @id @default(uuid())
+  eContractId   String
+  eContract     ElectronicContract  @relation(fields: [eContractId], references: [id], onDelete: Cascade)
+  signatureId   String?             // どの署名者の欄か（EContractSignature.id）
+  signature     EContractSignature? @relation(fields: [signatureId], references: [id], onDelete: SetNull)
+  type          FieldType
+  page          Int                 // 1始まりのページ番号
+  x             Float               // 正規化座標（0-1, ページ左上基準）
+  y             Float
+  width         Float               // 正規化幅（0-1）
+  height        Float               // 正規化高さ（0-1）
+  value         String?             // 署名画像(dataURL/パス) または テキスト値
+  autoSealPath  String?             // 会社印の自動押印用画像パス（署名者不要で締結時に適用）
+  signedAt      DateTime?
+
+  @@index([eContractId])
+  @@index([signatureId])
+}
+
+// ─────────────────────────────────────────────
+// 会社印（角印・社印）: 事前登録して署名欄に自動押印
+// ─────────────────────────────────────────────
+
+model SealStamp {
+  id         String   @id @default(uuid())
+  companyId  String
+  name       String
+  imagePath  String   // 保存済み印影画像(PNG/JPEG)のパス
+  createdAt  DateTime @default(now())
+
+  @@index([companyId])
+}
+
+enum FieldType {
+  SIGNATURE  // 手書きサイン
+  SEAL       // 印影
+  DATE       // 日付（署名時にサーバが確定）
+  NAME       // 氏名
+  TEXT       // 任意テキスト
 }
 
 // ─────────────────────────────────────────────
