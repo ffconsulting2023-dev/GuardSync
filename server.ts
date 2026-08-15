@@ -1463,6 +1463,13 @@ async function generateSignedPdf(eContractId: string): Promise<{ path: string; h
   return { path: outPath, hash }
 }
 
+// サーバ発行タイムスタンプ（第三者TSAではなく、サーバがハッシュと時刻に
+// 対してHMAC署名する改ざん検知用の時刻証跡。将来的にRFC3161 TSAへ差し替え可能）
+function issueServerTimestamp(hashHex: string, at: Date): string {
+  const mac = crypto.createHmac('sha256', JWT_SECRET).update(`${hashHex}|${at.toISOString()}`).digest('hex')
+  return `srv:${at.toISOString()}:${mac}`
+}
+
 // 合意締結証明書PDFを生成し、保存パスを返す（立会人型の締結証跡）
 async function generateCertificatePdf(eContractId: string): Promise<string> {
   const ec = await prisma.electronicContract.findUnique({
@@ -1476,8 +1483,8 @@ async function generateCertificatePdf(eContractId: string): Promise<string> {
   const stream = fs.createWriteStream(outPath)
   doc.pipe(stream)
 
-  // 日本語フォント（無ければ英語ラベルにフォールバック）
-  const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+  // 日本語フォント（環境変数で差し替え可。無ければ英語ラベルにフォールバック）
+  const fontPath = process.env.ESIGN_JP_FONT_PATH || path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
   let jp = false
   try {
     if (fs.existsSync(fontPath)) { doc.registerFont('JP', fontPath); doc.font('JP'); jp = true }
@@ -1494,6 +1501,7 @@ async function generateCertificatePdf(eContractId: string): Promise<string> {
   doc.moveDown(0.5)
   if (ec.sourcePdfHash) doc.fontSize(8).text(`${L('原本SHA-256', 'Source SHA-256')}: ${ec.sourcePdfHash}`)
   if (ec.signedPdfHash) doc.fontSize(8).text(`${L('署名済SHA-256', 'Signed SHA-256')}: ${ec.signedPdfHash}`)
+  if (ec.timestampAt) doc.fontSize(8).text(`${L('サーバ発行タイムスタンプ', 'Server timestamp')}: ${new Date(ec.timestampAt).toLocaleString('ja-JP')}`)
   doc.moveDown(1)
 
   doc.fontSize(13).text(L('署名者', 'Signers'))
@@ -1823,7 +1831,12 @@ app.post('/api/e-contracts/sign/:token', async (req, res) => {
       where: { id: sig.eContractId },
       data: {
         status: 'COMPLETED',
-        ...(signedInfo ? { signedPdfPath: signedInfo.path, signedPdfHash: signedInfo.hash } : {}),
+        ...(signedInfo ? {
+          signedPdfPath: signedInfo.path,
+          signedPdfHash: signedInfo.hash,
+          timestampAt: now,
+          timestampToken: issueServerTimestamp(signedInfo.hash, now),
+        } : {}),
         auditLog: { push: { action: 'ALL_SIGNED', at: now.toISOString() } },
       },
     })

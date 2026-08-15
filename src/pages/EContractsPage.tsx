@@ -109,6 +109,8 @@ export default function EContractsPage() {
             <div className="p-6 space-y-4">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className={`badge ${STATUS_LABELS[selected.status]?.className}`}>{STATUS_LABELS[selected.status]?.label}</span>
+                {selected.sequential && <span className="badge badge-gray text-xs">順番制</span>}
+                {selected.timestampAt && <span className="badge badge-info text-xs">🕒 {format(new Date(selected.timestampAt), 'yyyy/M/d HH:mm')} 時刻証跡</span>}
               </div>
 
               {/* PDF操作 */}
