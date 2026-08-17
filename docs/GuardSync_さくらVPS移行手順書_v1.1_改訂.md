@@ -73,15 +73,38 @@
 - 一方 v1.0（§6.4／§9）と `railway.toml` は `prisma migrate deploy` に依存 → **空振り**（何も適用されない）。
   初回移行はDBダンプ復元でスキーマが入るため露見しにくいが、**将来デプロイでスキーマ差分が反映されない**。
 
-**方針（どちらかを選択）**
-- **推奨: マイグレーション運用へ移行** — `.gitignore` から `prisma/migrations/` を除外（本改訂で対応済み）。
-  ローカルで `npx prisma migrate dev --name init` を実行して初期マイグレーションを作成・コミット →
-  以降 `migrate deploy` が正しく機能する。
-- **db push を継続** — Dockerfile/compose/CI（§6.4, §9）の `prisma migrate deploy` を **`prisma db push`** に置換する。
-  ロールバック履歴は持てない点に留意。
+**方針決定: マイグレーション運用へ移行（採用）**
 
-> 初回カットオーバー（§13）はRailwayダンプ復元でスキーマが入るため、上記いずれでも成立する。
-> ただし**運用開始後の継続デプロイ**のために、移行前にどちらかを確定させること。
+本番の警備業務データ（マイナンバー含む）を扱うため、スキーマ変更履歴とロールバック手段を残せる
+migrate 運用を採用する。手順書・`railway.toml`・CI が既に `migrate deploy` 前提のため整合性も良い。
+
+**本改訂で実施済み**
+- `.gitignore` から `prisma/migrations/` を除外（管理対象化）。
+- 初期マイグレーション **`prisma/migrations/0_init/`** を生成・コミット
+  （`prisma migrate diff --from-empty --to-schema-datamodel` で schema から生成。全42テーブル）。
+- `prisma/migrations/migration_lock.toml`（provider = postgresql）を追加。
+
+**カットオーバー時の baselining（重要・1回だけ）**
+既存DB（Railwayダンプ）を復元した本番DBには**すでにスキーマが存在する**ため、
+そのまま `migrate deploy` を実行すると 0_init が「テーブル重複」で失敗する。
+復元直後に一度だけ 0_init を「適用済み」としてマークする（baseline）:
+
+```bash
+# §6.3 のダンプ復元が完了した後、初回のみ実行
+docker compose run --rm app npx prisma migrate resolve --applied 0_init
+docker compose run --rm app npx prisma migrate status   # "Database schema is up to date" を確認
+```
+
+以降は CI（§9）の `migrate deploy` が正しく機能する（初回は no-op、スキーマ変更時のみ適用）。
+
+**新規DB（ダンプ無し）で立ち上げる場合**は baseline 不要で、`migrate deploy` が 0_init を適用する。
+
+**今後のスキーマ変更フロー**
+- ローカル: `npx prisma migrate dev --name <変更名>` で新マイグレーションを作成・コミット。
+- 本番: CI の `migrate deploy` が自動適用。`db push` は本番で使わない。
+
+> 補足: 本環境ではシャドウDBが無いため 0_init の適用検証（`migrate status`）は未実施。
+> ステージング/シャドウDBに対し一度 `migrate status` を通してから本番カットオーバーすること。
 
 ---
 
