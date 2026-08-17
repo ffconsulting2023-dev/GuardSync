@@ -4,4 +4,7 @@ dist/
 .env.local
 .DS_Store
 *.log
-prisma/migrations/
+
+# 注意: prisma/migrations/ はコミット対象とする。
+# `prisma migrate deploy`（Docker/CI）が参照するため、Gitで管理しないと本番でスキーマが適用されない。
+# db push 運用を続ける場合はこの限りではない（手順書 §6.4 を参照）。
