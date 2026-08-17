@@ -1,0 +1,49 @@
+name: Deploy to Sakura VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx prisma generate
+
+      - name: Build (frontend + server + fonts + obfuscate)
+        env:
+          # ★ フロントのビルド時埋め込み値は実装が読む名前に合わせること。
+          #    実装は import.meta.env.VITE_API_URL / VITE_GOOGLE_MAPS_API_KEY を参照。
+          VITE_API_URL: https://guardsync.jp
+          VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
+        run: npm run build   # tsc → vite build → copy:assets → obfuscate
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p 22022 -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Sync artifacts
+        run: |
+          rsync -az --delete -e "ssh -p 22022" \
+            dist package.json package-lock.json prisma Dockerfile \
+            deploy@${{ secrets.VPS_HOST }}:/opt/guardsync/current/
+
+      - name: Build image, run migrations, restart
+        run: |
+          ssh -p 22022 deploy@${{ secrets.VPS_HOST }} '
+            cd /opt/guardsync &&
+            docker compose build app &&
+            docker compose run --rm app npx prisma migrate deploy &&
+            docker compose up -d app &&
+            sleep 5 && curl -fsS http://127.0.0.1:3000/api/health'

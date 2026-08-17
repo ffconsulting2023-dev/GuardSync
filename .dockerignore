@@ -1,0 +1,14 @@
+node_modules
+.git
+.github
+src
+public
+*.py
+*.md
+!fonts/README.md
+20260518_GuardSync_*
+.env
+.env.*
+*.log
+context
+scripts

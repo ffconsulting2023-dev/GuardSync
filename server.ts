@@ -26,7 +26,9 @@ const isProduction = process.env.NODE_ENV === 'production'
 // ─────────────────────────────────────────────
 // ファイルアップロード設定（multer）
 // ─────────────────────────────────────────────
-const UPLOAD_DIR = path.join(__dirname, 'uploads', 'documents')
+// 保存先は UPLOAD_DIR 環境変数で上書き可能（本番はコンテナ外のボリュームを指す）。
+// 未設定時は従来どおり実行ディレクトリ配下（dist/uploads/documents）。
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads', 'documents')
 if (!fs.existsSync(UPLOAD_DIR)) { fs.mkdirSync(UPLOAD_DIR, { recursive: true }) }
 
 const docUpload = multer({
@@ -236,6 +238,10 @@ async function sendLineWorksMessage(botId: string, userId: string, accessToken: 
 }
 
 const app = express()
+
+// リバースプロキシ（Nginx等）配下で動作するため、X-Forwarded-* を信頼する。
+// これがないと express-rate-limit が全リクエストを同一IPとして扱い、レート制限が誤作動する。
+app.set('trust proxy', 1)
 const prisma = new PrismaClient({
   log: process.env.NODE_ENV === 'production' ? ['warn', 'error'] : ['warn', 'error'],
 })
@@ -250,11 +256,13 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],   // Viteのインラインスクリプト対応
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'", 'https://www.worksapis.com', 'https://auth.worksmobile.com'],
-      fontSrc: ["'self'"],
+      // Google Maps JavaScript API のローダー（maps.googleapis.com）を許可
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://maps.googleapis.com'],   // Viteのインラインスクリプト対応
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      // 地図タイル・ピン画像（maps.gstatic.com / chart.googleapis.com 等）を許可
+      imgSrc: ["'self'", 'data:', 'blob:', 'https://maps.googleapis.com', 'https://maps.gstatic.com', 'https://chart.googleapis.com', 'https://*.googleapis.com', 'https://*.gstatic.com'],
+      connectSrc: ["'self'", 'https://www.worksapis.com', 'https://auth.worksmobile.com', 'https://maps.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
     },
@@ -3965,7 +3973,7 @@ app.get('/api/payroll/withholding-slip/:guardId/:year', authenticate, requireRol
   doc.pipe(res)
 
   // フォント設定（日本語対応）
-  const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+  const fontPath = path.join(process.env.FONT_DIR || path.join(__dirname, 'fonts'), 'NotoSansJP-Regular.ttf')
   let fontRegistered = false
   try {
     const fs = require('fs')
@@ -4350,7 +4358,7 @@ app.get('/api/payroll/withholding-slip-full/:guardId/:year', authenticate, requi
     doc.pipe(res)
 
     // フォント設定（日本語対応）
-    const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+    const fontPath = path.join(process.env.FONT_DIR || path.join(__dirname, 'fonts'), 'NotoSansJP-Regular.ttf')
     let fontRegistered = false
     try {
       const fs = require('fs')
@@ -4681,7 +4689,7 @@ app.get('/api/bonus-payroll/:id/pdf', authenticate, requireRole('ADMIN', 'MANAGE
     res.setHeader('Content-Disposition', `inline; filename=bonus_${bonus.bonusType}_${bonus.guardId}.pdf`)
     doc.pipe(res)
 
-    const fontPath = path.join(__dirname, 'fonts', 'NotoSansJP-Regular.ttf')
+    const fontPath = path.join(process.env.FONT_DIR || path.join(__dirname, 'fonts'), 'NotoSansJP-Regular.ttf')
     let fontRegistered = false
     try {
       const fs = require('fs')

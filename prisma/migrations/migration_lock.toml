@@ -1,0 +1,2 @@
+# Prisma migration lock. このファイルはコミット対象。
+provider = "postgresql"
