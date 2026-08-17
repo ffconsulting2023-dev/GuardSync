@@ -22,7 +22,7 @@ jobs:
         env:
           # ★ フロントのビルド時埋め込み値は実装が読む名前に合わせること。
           #    実装は import.meta.env.VITE_API_URL / VITE_GOOGLE_MAPS_API_KEY を参照。
-          VITE_API_URL: https://guardsync.example.jp
+          VITE_API_URL: https://guardsync.jp
           VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
         run: npm run build   # tsc → vite build → copy:assets → obfuscate
 
