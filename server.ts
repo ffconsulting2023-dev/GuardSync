@@ -1660,7 +1660,33 @@ app.post('/api/super-admin/invite', authenticate, requireSuperAdmin, async (req,
 
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
   const invitation = await prisma.invitation.create({ data: { email, expiresAt } })
-  res.json({ token: invitation.token, registrationUrl: `/register?token=${invitation.token}` })
+
+  // 招待リンク（相対パスはフロント表示用に維持、絶対URLはメール本文用）
+  const registrationPath = `/register?token=${invitation.token}`
+  const baseUrl = (process.env.APP_URL || 'https://guardsync.jp').replace(/\/+$/, '')
+  const inviteUrl = `${baseUrl}${registrationPath}`
+  const expiresLabel = expiresAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+
+  // 招待メール送信（SMTP未設定時は sendEmail 内でスキップし false を返す）
+  const subject = 'GuardSync 会社アカウント登録のご案内'
+  const html = `
+    <div style="font-family:sans-serif;line-height:1.7;color:#1f2937">
+      <p>GuardSync への会社アカウント登録のご案内です。</p>
+      <p>以下のボタンから、貴社の管理者アカウントを登録してください。</p>
+      <p style="margin:24px 0">
+        <a href="${inviteUrl}" style="background:#e67e22;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:bold">アカウント登録を開始する</a>
+      </p>
+      <p>ボタンが開けない場合は、次のURLをブラウザに貼り付けてください:</p>
+      <p style="word-break:break-all"><a href="${inviteUrl}">${inviteUrl}</a></p>
+      <p style="color:#6b7280;font-size:13px">この招待リンクの有効期限は ${expiresLabel}（7日間）です。心当たりがない場合は破棄してください。</p>
+      <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">
+      <p style="color:#9ca3af;font-size:12px">GuardSync 警備会社向け統合管理システム</p>
+    </div>`
+  const text = `GuardSync 会社アカウント登録のご案内\n\n以下のURLから貴社の管理者アカウントを登録してください:\n${inviteUrl}\n\n有効期限: ${expiresLabel}（7日間）`
+
+  const emailSent = await sendEmail(email, subject, html, text)
+
+  res.json({ token: invitation.token, registrationUrl: registrationPath, inviteUrl, email, emailSent })
 })
 
 // ─────────────────────────────────────────────

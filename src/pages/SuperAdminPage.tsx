@@ -395,6 +395,11 @@ function CompaniesTab() {
             <p className="text-green-800 font-medium">招待リンク生成完了</p>
             <p className="text-green-600 mt-1 break-all">{window.location.origin}{inviteResult.registrationUrl}</p>
             <p className="text-xs text-green-500 mt-1">このURLを新規会社の担当者に送付してください（7日間有効）</p>
+            {inviteResult.emailSent ? (
+              <p className="text-green-700 mt-2 font-medium">✉️ 招待メールを {inviteResult.email} に送信しました</p>
+            ) : (
+              <p className="text-amber-600 mt-2">⚠️ メール未送信（SMTP未設定）。上記URLを担当者へ手動で送付してください。</p>
+            )}
           </div>
         )}
       </div>
