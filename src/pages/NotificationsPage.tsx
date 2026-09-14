@@ -5,12 +5,9 @@ import { format } from 'date-fns'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const TYPE_LABELS: Record<string, { label: string; icon: string; color: string }> = {
-  SCHEDULE_REMINDER: { label: 'シフト確認', icon: '📅', color: 'badge-blue' },
-  DAILY_PAY_PROCESSED: { label: '日払い処理', icon: '💴', color: 'badge-success' },
-  INVOICE_SENT: { label: '請求書送付', icon: '📄', color: 'badge-warning' },
-  GENERAL: { label: 'お知らせ', icon: '🔔', color: 'badge-gray' },
-}
+import { NOTIFICATION_TYPE, USER_ROLES } from '../lib/constants'
+
+const TYPE_LABELS = NOTIFICATION_TYPE
 
 export default function NotificationsPage() {
   const { user } = useAuth()
@@ -94,10 +91,9 @@ export default function NotificationsPage() {
                 <label className="form-label">対象ロール（空欄=全員）</label>
                 <select value={form.targetRole} onChange={e => setForm(f => ({ ...f, targetRole: e.target.value }))} className="form-input">
                   <option value="">全員</option>
-                  <option value="ADMIN">管理者</option>
-                  <option value="MANAGER">マネージャー</option>
-                  <option value="OPERATOR">オペレーター</option>
-                  <option value="VIEWER">閲覧者</option>
+                  {Object.entries(USER_ROLES).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
                 </select>
               </div>
               <div>

@@ -4,7 +4,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
-import { CATEGORIES, EMPTY_CLIENT_FORM } from './ClientsPage'
+import { EMPTY_CLIENT_FORM } from './ClientsPage'
+import { CLIENT_CATEGORY } from '../lib/constants'
 
 const LOG_TYPES: Record<string, { label: string; icon: string }> = {
   NOTE:    { label: 'メモ',   icon: '📝' },
@@ -110,7 +111,7 @@ export default function ClientDetailPage() {
   }
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
-  const cat = CATEGORIES[form.category] || CATEGORIES.OTHER
+  const cat = CLIENT_CATEGORY[form.category] || CLIENT_CATEGORY.OTHER
 
   if (!isNew && isLoading) return <div className="flex items-center justify-center h-full text-gray-400">読み込み中...</div>
 
@@ -270,7 +271,7 @@ export default function ClientDetailPage() {
                       <div>
                         <FormField label="区分" edit={editMode}>
                           <select value={form.category} onChange={e => setForm((f: any) => ({ ...f, category: e.target.value }))} className="form-input">
-                            {Object.entries(CATEGORIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                            {Object.entries(CLIENT_CATEGORY).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                           </select>
                           <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${cat.color}`}>{cat.label}</span>
                         </FormField>

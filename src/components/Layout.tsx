@@ -22,6 +22,7 @@ const NAV_GROUPS: NavGroup[] = [
       { path: '/guards',    label: '隊員管理',   icon: '👷' },
       { path: '/partners',  label: '協力会社',   icon: '🤝' },
       { path: '/vehicles',  label: '車両管理',   icon: '🚗' },
+      { path: '/equipment', label: '備品管理',   icon: '📦' },
     ],
   },
   {
@@ -113,6 +114,20 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         {/* ナビゲーション */}
         <nav className="flex-1 overflow-y-auto py-2">
+          {user?.isSuperAdmin && (
+            <NavLink
+              to="/super-admin"
+              onClick={() => setSidebarOpen(false)}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors mb-1 border-b border-[#2d5282] ${
+                  isActive ? 'bg-red-800 text-white font-medium' : 'text-red-300 hover:bg-red-900/30 hover:text-white'
+                }`
+              }
+            >
+              <span className="text-base">🔒</span>
+              スーパー管理者
+            </NavLink>
+          )}
           {NAV_GROUPS.map((group, groupIndex) => (
             <div key={group.moduleKey}>
               {groupIndex > 0 && <div className="border-t border-[#2d5282] my-1" />}
@@ -139,20 +154,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               ))}
             </div>
           ))}
-          {user?.isSuperAdmin && (
-            <NavLink
-              to="/super-admin"
-              onClick={() => setSidebarOpen(false)}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors mt-2 border-t border-[#2d5282] ${
-                  isActive ? 'bg-red-800 text-white font-medium' : 'text-red-300 hover:bg-red-900/30 hover:text-white'
-                }`
-              }
-            >
-              <span className="text-base">🔒</span>
-              スーパー管理者
-            </NavLink>
-          )}
         </nav>
 
         {/* ユーザー情報 */}

@@ -4,15 +4,11 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const STATUS_LABELS: Record<string, string> = {
-  PENDING: '未受領', RECEIVED: '受領済', PAID: '支払済',
-}
-const STATUS_COLORS: Record<string, string> = {
-  PENDING: 'bg-gray-100 text-gray-600', RECEIVED: 'bg-yellow-100 text-yellow-700', PAID: 'bg-green-100 text-green-700',
-}
-const NEXT_STATUS: Record<string, string> = {
-  PENDING: 'RECEIVED', RECEIVED: 'PAID',
-}
+import { SUBPAY_STATUS, SUBPAY_NEXT_STATUS } from '../lib/constants'
+
+const STATUS_LABELS = Object.fromEntries(Object.entries(SUBPAY_STATUS).map(([k, v]) => [k, v.label]))
+const STATUS_COLORS = Object.fromEntries(Object.entries(SUBPAY_STATUS).map(([k, v]) => [k, v.className]))
+const NEXT_STATUS = SUBPAY_NEXT_STATUS
 
 interface PaymentData {
   id: string; companyId: string; partnerId: string | null

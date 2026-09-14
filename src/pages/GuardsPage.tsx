@@ -97,6 +97,7 @@ export default function GuardsPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
+  const [showArchive, setShowArchive] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editTarget, setEditTarget] = useState<any>(null)
   const [form, setForm] = useState<GuardFormData>(EMPTY_FORM)
@@ -122,9 +123,25 @@ export default function GuardsPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['guards'] }); setShowForm(false); setEditTarget(null) },
   })
 
-  const deleteMutation = useMutation({
+  const { data: archivedGuards = [] } = useQuery({
+    queryKey: ['guards-archived'],
+    queryFn: () => api.get('/guards/archived').then(r => r.data),
+    enabled: showArchive,
+  })
+
+  const archiveMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/guards/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['guards'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['guards'] }); qc.invalidateQueries({ queryKey: ['guards-archived'] }) },
+  })
+
+  const restoreMutation = useMutation({
+    mutationFn: (id: string) => api.put(`/guards/${id}/restore`, {}),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['guards'] }); qc.invalidateQueries({ queryKey: ['guards-archived'] }) },
+  })
+
+  const permanentDeleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/guards/${id}/permanent`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['guards-archived'] }),
   })
 
   // 相性データ
@@ -255,6 +272,7 @@ export default function GuardsPage() {
   }
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
+  const isAdmin = hasRole(user, 'ADMIN')
 
   const sections = [
     { label: '基本情報', icon: '1' },
@@ -307,7 +325,12 @@ export default function GuardsPage() {
         <h1 className="text-xl font-bold text-gray-800">隊員管理</h1>
         <div className="flex gap-2">
           <a href={`${import.meta.env.VITE_API_URL || ''}/api/export/guards`} download className="btn-secondary text-sm">CSV</a>
-          {canEdit && (
+          {isAdmin && (
+            <button onClick={() => setShowArchive(v => !v)} className={`btn-secondary text-sm ${showArchive ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}>
+              {showArchive ? '▶ 有効隊員を表示' : '📦 アーカイブ'}
+            </button>
+          )}
+          {canEdit && !showArchive && (
             <button onClick={() => { setEditTarget(null); setForm(EMPTY_FORM); setActiveSection(0); setShowForm(true) }} className="btn-primary text-sm">
               + 隊員登録
             </button>
@@ -315,12 +338,73 @@ export default function GuardsPage() {
         </div>
       </div>
 
-      <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
-        className="form-input" placeholder="名前・読み・社員番号で検索..." />
+      {!showArchive && (
+        <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+          className="form-input" placeholder="名前・読み・社員番号で検索..." />
+      )}
 
-      {isLoading ? (
+      {showArchive ? (
+        /* ── アーカイブビュー ── */
+        <div className="card overflow-x-auto p-0">
+          <div className="px-4 py-3 bg-yellow-50 border-b border-yellow-100">
+            <p className="text-sm text-yellow-700 font-medium">📦 アーカイブ済み隊員（管理者のみ表示）</p>
+            <p className="text-xs text-yellow-600 mt-0.5">復元または完全削除が可能です。完全削除は取り消せません。</p>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50">
+              <tr className="border-b border-gray-100">
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">社員番号</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">名前</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">雇用形態</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">電話番号</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden lg:table-cell">アーカイブ日</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {archivedGuards.length === 0 ? (
+                <tr><td colSpan={6} className="text-center py-12 text-gray-400">アーカイブ済み隊員はいません</td></tr>
+              ) : (
+                archivedGuards.map((g: any) => (
+                  <tr key={g.id} className="hover:bg-yellow-50 opacity-75">
+                    <td className="px-4 py-3 text-gray-600">{g.employeeNumber}</td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p className="font-medium text-gray-500">{g.name}</p>
+                        <p className="text-xs text-gray-400">{g.nameKana}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 hidden md:table-cell">
+                      <span className="badge badge-gray">{EMPLOYMENT_LABELS[g.employmentType]}</span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-500 hidden md:table-cell">{g.phone || '-'}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs hidden lg:table-cell">
+                      {g.leftAt ? new Date(g.leftAt).toLocaleDateString('ja-JP') : '-'}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => { if (window.confirm(`${g.name}を復元しますか？`)) restoreMutation.mutate(g.id) }}
+                          disabled={restoreMutation.isPending}
+                          className="text-green-600 hover:text-green-800 text-xs disabled:opacity-50"
+                        >復元</button>
+                        <button
+                          onClick={() => { if (window.confirm(`${g.name}を完全削除しますか？\nこの操作は取り消せません。`)) permanentDeleteMutation.mutate(g.id) }}
+                          disabled={permanentDeleteMutation.isPending}
+                          className="text-red-500 hover:text-red-700 text-xs disabled:opacity-50"
+                        >完全削除</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : isLoading ? (
         <div className="text-center py-12 text-gray-400">読み込み中...</div>
       ) : (
+        /* ── 通常の有効隊員リスト ── */
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
@@ -361,7 +445,7 @@ export default function GuardsPage() {
                       {canEdit && (
                         <div className="flex items-center justify-end gap-2">
                           <button onClick={() => openEdit(g)} className="text-blue-600 hover:text-blue-800 text-xs">編集</button>
-                          <button onClick={() => { if (window.confirm(`${g.name}を無効化しますか？`)) deleteMutation.mutate(g.id) }} className="text-red-500 hover:text-red-700 text-xs">削除</button>
+                          <button onClick={() => { if (window.confirm(`${g.name}をアーカイブしますか？\n（後から復元できます）`)) archiveMutation.mutate(g.id) }} className="text-yellow-600 hover:text-yellow-800 text-xs">アーカイブ</button>
                         </div>
                       )}
                     </td>
