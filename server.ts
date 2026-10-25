@@ -29,18 +29,44 @@ const isProduction = process.env.NODE_ENV === 'production'
 const UPLOAD_DIR = path.join(__dirname, 'uploads', 'documents')
 if (!fs.existsSync(UPLOAD_DIR)) { fs.mkdirSync(UPLOAD_DIR, { recursive: true }) }
 
+// 拡張子はクライアント申告のファイル名ではなく、許可MIMEから決定する
+const UPLOAD_EXT_BY_MIME: Record<string, string> = {
+  'application/pdf': '.pdf',
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+}
+
+// ファイル先頭バイト（マジックナンバー）が申告MIMEと一致するか検証
+function matchesMagicBytes(filePath: string, mime: string): boolean {
+  let head: Buffer
+  try {
+    const fd = fs.openSync(filePath, 'r')
+    head = Buffer.alloc(12)
+    fs.readSync(fd, head, 0, 12, 0)
+    fs.closeSync(fd)
+  } catch { return false }
+  switch (mime) {
+    case 'application/pdf': return head.subarray(0, 5).toString('latin1') === '%PDF-'
+    case 'image/jpeg': return head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff
+    case 'image/png': return head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    case 'image/gif': return ['GIF87a', 'GIF89a'].includes(head.subarray(0, 6).toString('latin1'))
+    case 'image/webp': return head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP'
+    default: return false
+  }
+}
+
 const docUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
     filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname)
-      cb(null, `${crypto.randomUUID()}${ext}`)
+      cb(null, `${crypto.randomUUID()}${UPLOAD_EXT_BY_MIME[file.mimetype] || ''}`)
     },
   }),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (_req, file, cb) => {
-    const allowed = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']
-    if (allowed.includes(file.mimetype)) { cb(null, true) }
+    if (UPLOAD_EXT_BY_MIME[file.mimetype]) { cb(null, true) }
     else { cb(new Error('PDF・画像ファイルのみアップロード可能です')) }
   },
 })
@@ -91,24 +117,50 @@ if (!JWT_SECRET_RAW || JWT_SECRET_RAW.length < 32) {
 const JWT_SECRET: string = JWT_SECRET_RAW
 
 // ─────────────────────────────────────────────
-// 暗号化ヘルパー（LINE Works機密情報用）
+// 暗号化ヘルパー（LINE Works機密情報・マイナンバー用）
 // ─────────────────────────────────────────────
+// 新形式: enc2:<iv>:<tag>:<ciphertext>（AES-256-GCM、鍵は64桁hexの32バイト）
+// 旧形式: enc:<iv>:<ciphertext>（AES-256-CBC、鍵は先頭32文字）… 復号のみ対応
+const ENCRYPTION_KEY_RAW = process.env.ENCRYPTION_KEY || ''
+if (isProduction && !/^[0-9a-fA-F]{64}$/.test(ENCRYPTION_KEY_RAW)) {
+  logger.error('ENCRYPTION_KEY が未設定または不正です（openssl rand -hex 32 で生成した64桁のhex文字列が必要）。サーバーを起動できません。')
+  process.exit(1)
+}
+
+function getEncryptionKey(): Buffer | null {
+  if (/^[0-9a-fA-F]{64}$/.test(ENCRYPTION_KEY_RAW)) return Buffer.from(ENCRYPTION_KEY_RAW, 'hex')
+  if (ENCRYPTION_KEY_RAW.length >= 32) return crypto.createHash('sha256').update(ENCRYPTION_KEY_RAW).digest()
+  return null
+}
+
 function encrypt(text: string): string {
-  const key = process.env.ENCRYPTION_KEY
-  if (!key || key.length < 32) return text // 未設定時はそのまま（開発環境）
-  const iv = crypto.randomBytes(16)
-  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(key.slice(0, 32)), iv)
+  const key = getEncryptionKey()
+  if (!key) return text // 未設定時はそのまま（開発環境のみ。本番は起動時に拒否）
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
   const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()])
-  return `enc:${iv.toString('hex')}:${encrypted.toString('hex')}`
+  const tag = cipher.getAuthTag()
+  return `enc2:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`
 }
 
 function decrypt(text: string): string {
-  if (!text?.startsWith('enc:')) return text // 未暗号化データはそのまま返す
-  const key = process.env.ENCRYPTION_KEY
-  if (!key || key.length < 32) return text
-  const [, ivHex, encHex] = text.split(':')
-  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key.slice(0, 32)), Buffer.from(ivHex, 'hex'))
-  return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString('utf8')
+  if (!text) return text
+  if (text.startsWith('enc2:')) {
+    const key = getEncryptionKey()
+    if (!key) throw new Error('ENCRYPTION_KEY が未設定のため復号できません')
+    const [, ivHex, tagHex, encHex] = text.split(':')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'))
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'))
+    return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString('utf8')
+  }
+  if (text.startsWith('enc:')) {
+    // 旧形式（互換用）
+    if (ENCRYPTION_KEY_RAW.length < 32) return text
+    const [, ivHex, encHex] = text.split(':')
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY_RAW.slice(0, 32)), Buffer.from(ivHex, 'hex'))
+    return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString('utf8')
+  }
+  return text // 未暗号化データはそのまま返す
 }
 
 // ─────────────────────────────────────────────
@@ -139,11 +191,26 @@ function escapeCsvCell(value: unknown): string {
 // ─────────────────────────────────────────────
 // Webhook認証ヘルパー
 // ─────────────────────────────────────────────
-function verifyWebhookSecret(req: express.Request, res: express.Response): boolean {
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a)
+  const bb = Buffer.from(b)
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb)
+}
+
+// allowQuery: SendGrid Inbound Parse はカスタムヘッダーを付けられないため、メール受信のみ ?secret= を許可
+function verifyWebhookSecret(req: express.Request, res: express.Response, allowQuery = false): boolean {
   const secret = process.env.INBOUND_SECRET
-  if (!secret) return true // 未設定の場合はスキップ（開発環境考慮）
-  const provided = req.headers['x-webhook-secret'] || req.query.secret
-  if (provided !== secret) {
+  if (!secret) {
+    if (isProduction) {
+      logger.error('INBOUND_SECRET 未設定のため受信Webhookを拒否しました', undefined, { context: 'webhook' })
+      res.status(503).json({ error: 'Webhook is not configured' })
+      return false
+    }
+    return true // 開発環境のみスキップ
+  }
+  const header = req.headers['x-webhook-secret']
+  const provided = typeof header === 'string' ? header : (allowQuery && typeof req.query.secret === 'string' ? req.query.secret : '')
+  if (!provided || !safeEqual(provided, secret)) {
     res.status(401).json({ error: 'Unauthorized' })
     return false
   }
@@ -241,6 +308,9 @@ const prisma = new PrismaClient({
 })
 const PORT = process.env.PORT || 3000
 
+// リバースプロキシ（Railway等）配下でクライアントIPを正しく扱う（レート制限・署名記録のIP）
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? (isProduction ? 1 : 0)))
+
 // ─────────────────────────────────────────────
 // ミドルウェア
 // ─────────────────────────────────────────────
@@ -250,7 +320,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],   // Viteのインラインスクリプト対応
+      scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'blob:'],
       connectSrc: ["'self'", 'https://www.worksapis.com', 'https://auth.worksmobile.com'],
@@ -277,7 +347,11 @@ app.use(cors({
 
 // Stripe Webhookはraw bodyが必要なため、express.json()より前に登録
 app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }))
-app.use(express.json({ limit: '10mb' }))
+app.use(express.json({
+  limit: '10mb',
+  // Webhook署名検証用に生ボディを保持
+  verify: (req, _res, buf) => { (req as any).rawBody = buf },
+}))
 app.use(express.urlencoded({ extended: true }))
 
 // M-1: レート制限を強化
@@ -286,6 +360,10 @@ app.use('/api/', limiter)
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'ログイン試行回数の上限に達しました。15分後にお試しください。' } })
 app.use('/api/auth/login', authLimiter)
+// 登録・パスワードリセットのトークン総当たり対策
+const accountLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false, message: { error: 'リクエストが多すぎます。しばらくしてからお試しください。' } })
+app.use('/api/auth/register', accountLimiter)
+app.use('/api/auth/reset-password', accountLimiter)
 
 // Webhook専用レート制限: 緩めに設定
 const webhookLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 30 })
@@ -307,19 +385,79 @@ function signToken(payload: JwtPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '4h' })
 }
 
-function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
+// ユーザー・テナント状態のキャッシュ（1分）。無効化/停止/権限変更/パスワードリセットを反映する
+interface AuthState {
+  isActive: boolean
+  role: string
+  isSuperAdmin: boolean
+  companyActive: boolean
+  companySuspended: boolean
+  resetUsedAt: number // 最新のパスワードリセット完了時刻(ms)。これより前に発行したトークンは無効
+  expiresAt: number
+}
+const authStateCache = new Map<string, AuthState>()
+
+// テナントの停止/再開時にキャッシュを即時破棄する（キャッシュはユーザー単位のため全消去）
+const companyStatusCache = { delete: (_companyId: string) => { authStateCache.clear() } }
+
+async function loadAuthState(userId: string): Promise<AuthState | null> {
+  const cached = authStateCache.get(userId)
+  if (cached && cached.expiresAt > Date.now()) return cached
+  const u = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      isActive: true, role: true, isSuperAdmin: true,
+      company: { select: { isActive: true, subscriptionStatus: true } },
+      passwordResetTokens: { where: { usedAt: { not: null } }, orderBy: { usedAt: 'desc' }, take: 1, select: { usedAt: true } },
+    },
+  })
+  if (!u) { authStateCache.delete(userId); return null }
+  const state: AuthState = {
+    isActive: u.isActive,
+    role: u.role,
+    isSuperAdmin: u.isSuperAdmin,
+    companyActive: u.company?.isActive ?? false,
+    companySuspended: u.company?.subscriptionStatus === 'SUSPENDED',
+    resetUsedAt: u.passwordResetTokens[0]?.usedAt?.getTime() ?? 0,
+    expiresAt: Date.now() + 60_000,
+  }
+  authStateCache.set(userId, state)
+  return state
+}
+
+async function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
   const auth = req.headers.authorization
   if (!auth?.startsWith('Bearer ')) {
     res.status(401).json({ error: '認証が必要です' })
     return
   }
+  let payload: JwtPayload & { iat?: number }
   try {
-    const payload = jwt.verify(auth.slice(7), JWT_SECRET) as JwtPayload
-    ;(req as any).user = payload
-    next()
+    payload = jwt.verify(auth.slice(7), JWT_SECRET, { algorithms: ['HS256'] }) as JwtPayload & { iat?: number }
   } catch {
     res.status(401).json({ error: 'トークンが無効です' })
+    return
   }
+
+  const state = await loadAuthState(payload.userId)
+  if (
+    !state || !state.isActive ||
+    state.role !== payload.role || state.isSuperAdmin !== payload.isSuperAdmin ||
+    ((payload.iat ?? 0) + 1) * 1000 < state.resetUsedAt
+  ) {
+    res.status(401).json({ error: 'トークンが無効です。再度ログインしてください' })
+    return
+  }
+
+  // テナント利用停止チェック（スーパー管理者・自身の情報取得は除外）
+  const isMe = req.originalUrl.split('?')[0] === '/api/auth/me'
+  if (!state.isSuperAdmin && !isMe && (!state.companyActive || state.companySuspended)) {
+    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+    return
+  }
+
+  ;(req as any).user = payload
+  next()
 }
 
 function requireRole(...roles: string[]) {
@@ -363,47 +501,6 @@ function requireSuperAdmin(req: express.Request, res: express.Response, next: ex
 }
 
 // ─────────────────────────────────────────────
-// テナント利用停止チェック（1分キャッシュ付き）
-// ─────────────────────────────────────────────
-const companyStatusCache = new Map<string, { isActive: boolean; status: string; expiresAt: number }>()
-
-async function checkCompanyActive(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const user = (req as any).user as JwtPayload
-  if (!user) { next(); return }
-  if (user.isSuperAdmin) { next(); return }
-
-  const cached = companyStatusCache.get(user.companyId)
-  if (cached && cached.expiresAt > Date.now()) {
-    if (!cached.isActive || cached.status === 'SUSPENDED') {
-      res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
-      return
-    }
-    next(); return
-  }
-
-  const company = await prisma.company.findUnique({
-    where: { id: user.companyId },
-    select: { isActive: true, subscriptionStatus: true },
-  })
-  companyStatusCache.set(user.companyId, {
-    isActive: company?.isActive ?? false,
-    status: company?.subscriptionStatus ?? 'TRIAL',
-    expiresAt: Date.now() + 60_000,
-  })
-
-  if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
-    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
-    return
-  }
-  next()
-}
-
-// authenticateとテナントチェックを合成したミドルウェア
-function authenticateAndCheck(req: express.Request, res: express.Response, next: express.NextFunction) {
-  authenticate(req, res, () => checkCompanyActive(req, res, next))
-}
-
-// ─────────────────────────────────────────────
 // ヘルスチェック
 // ─────────────────────────────────────────────
 
@@ -425,8 +522,8 @@ app.post('/api/auth/login', async (req, res) => {
   if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
 
   const { email, password } = parsed.data
-  const user = await prisma.user.findUnique({
-    where: { email },
+  const user = await prisma.user.findFirst({
+    where: { email: { equals: email.trim(), mode: 'insensitive' } },
     include: { company: true },
   })
 
@@ -497,7 +594,7 @@ app.post('/api/auth/register', async (req, res) => {
     return
   }
 
-  const existing = await prisma.user.findUnique({ where: { email: invitation.email } })
+  const existing = await prisma.user.findFirst({ where: { email: { equals: invitation.email, mode: 'insensitive' } } })
   if (existing) { res.status(409).json({ error: 'このメールアドレスは既に登録されています' }); return }
 
   const hashed = await bcrypt.hash(password, 12)
@@ -520,13 +617,13 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   if (!email || typeof email !== 'string') { res.status(400).json({ error: 'メールアドレスは必須です' }); return }
 
   // ユーザー存在の有無を外部に漏らさないため、常に200を返す
-  const user = await prisma.user.findUnique({ where: { email: email.toLowerCase().trim() } })
+  const user = await prisma.user.findFirst({ where: { email: { equals: email.trim(), mode: 'insensitive' } } })
   if (!user || !user.isActive) { res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' }); return }
 
   // 既存の未使用トークンを無効化
   await prisma.passwordResetToken.updateMany({
     where: { userId: user.id, usedAt: null },
-    data: { usedAt: new Date() },
+    data: { expiresAt: new Date() }, // usedAt は「リセット完了」専用（JWT失効判定に使用）
   })
 
   // 新しいトークン生成（1時間有効）
@@ -571,6 +668,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
   const hashed = await bcrypt.hash(password, 12)
   await prisma.user.update({ where: { id: resetToken.userId }, data: { password: hashed } })
   await prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } })
+  authStateCache.delete(resetToken.userId) // 既存セッション(JWT)を即時無効化
 
   res.json({ message: 'パスワードを更新しました。新しいパスワードでログインしてください。' })
 })
@@ -718,7 +816,7 @@ const guardSchema = z.object({
 app.post('/api/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const parsed = guardSchema.safeParse(req.body)
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return }
 
   const guard = await prisma.guard.create({
     data: { ...parsed.data, companyId, birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined },
@@ -732,7 +830,7 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
   const parsed = guardSchema.partial().safeParse(req.body)
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return }
 
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   const updated = await prisma.guard.updateMany({
@@ -845,7 +943,7 @@ app.post('/api/clients', authenticate, requireRole('ADMIN', 'MANAGER'), async (r
 
   // H-2: zodバリデーション
   const parsed = clientSchema.safeParse(req.body)
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return }
 
   // 取引先コード自動生成（C00001形式）
   const count = await prisma.client.count({ where: { companyId } })
@@ -898,7 +996,7 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
 
   // H-2: zodバリデーション（部分更新なのでpartial）
   const parsed = clientSchema.partial().safeParse(req.body)
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return }
 
   const { name, nameKana, category, positionTitle, contactName, phone, fax, email, website, industry, relationship,
     accountingContactName, accountingPhone, accountingEmail, notes,
@@ -2077,31 +2175,25 @@ app.delete('/api/vehicles/:id', authenticate, requireRole('ADMIN'), async (req, 
 // ─────────────────────────────────────────────
 
 app.post('/api/webhook/line-works', async (req, res) => {
-  // LINE Works Bot Secret による HMAC-SHA256 署名検証
-  const signature = req.headers['x-works-signature'] as string | undefined
-  if (signature) {
-    // 署名ヘッダーがある場合は検証（LINE Works からの正規リクエスト）
-    const settings = await prisma.lineWorksSettings.findFirst({
-      where: { botSecret: { not: null } },
-      select: { botSecret: true },
-    })
-    if (settings?.botSecret) {
-      const secret = decrypt(settings.botSecret)
-      const body = JSON.stringify(req.body)
-      const expected = crypto.createHmac('sha256', secret).update(body).digest('base64')
-      if (signature !== expected) {
-        logger.warn('LINE Works webhook 署名検証失敗', { context: 'webhook/line-works' })
-        res.status(401).json({ error: '署名が無効です' })
-        return
-      }
-    }
-  } else {
-    // 署名ヘッダーなし → 本番環境では拒否
-    if (isProduction) {
-      logger.warn('LINE Works webhook 署名ヘッダーなし', { context: 'webhook/line-works' })
+  // テナント特定（channelId）→ そのテナントの Bot Secret で生ボディの HMAC-SHA256 署名を検証
+  const channelId = typeof req.body?.source?.channelId === 'string' ? req.body.source.channelId : ''
+  const signature = req.headers['x-works-signature']
+  const lwSettingsForVerify = channelId ? await prisma.lineWorksSettings.findFirst({ where: { channelId } }) : null
+  const encSecret = lwSettingsForVerify?.botSecret
+  if (isProduction || signature) {
+    if (typeof signature !== 'string' || !encSecret) {
+      logger.warn('LINE Works webhook 署名検証不可', { context: 'webhook/line-works' })
       res.status(401).json({ error: '署名が必要です' })
       return
     }
+    const rawBody: Buffer | undefined = (req as any).rawBody
+    const expected = crypto.createHmac('sha256', decrypt(encSecret)).update(rawBody ?? Buffer.alloc(0)).digest('base64')
+    if (!rawBody || !safeEqual(signature, expected)) {
+      logger.warn('LINE Works webhook 署名検証失敗', { context: 'webhook/line-works' })
+      res.status(401).json({ error: '署名が無効です' })
+      return
+    }
+  } else {
     logger.warn('LINE Works webhook 署名なし（開発環境のためスキップ）', { context: 'webhook/line-works' })
   }
   const { type, content, source } = req.body
@@ -2112,11 +2204,10 @@ app.post('/api/webhook/line-works', async (req, res) => {
   const text = content?.text
   if (!text) { res.json({ ok: true }); return }
 
-  // チャンネルIDからCompanyを特定
-  const channelId = source?.channelId
-  if (!channelId) { res.json({ ok: true }); return }
+  // チャンネルIDからCompanyを特定（署名検証済みの設定を再利用）
+  if (!channelId || !source) { res.json({ ok: true }); return }
 
-  const lwSettings = await prisma.lineWorksSettings.findFirst({ where: { channelId } })
+  const lwSettings = lwSettingsForVerify
   if (!lwSettings) { res.json({ ok: true }); return }
 
   // 簡易パース：「○月○日 ×現場 △名」のような文言を受信した場合
@@ -2330,8 +2421,12 @@ app.post('/api/security-reports/approve/:token', async (req, res) => {
   const report = await prisma.securityReport.findFirst({ where: { approvalToken: req.params.token } })
   if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
   if (report.approvedAt) { res.status(409).json({ error: '既に承認済みです' }); return }
+  // 承認リンクの有効期限: 作成から30日
+  if (report.createdAt.getTime() + 30 * 24 * 60 * 60 * 1000 < Date.now()) {
+    res.status(410).json({ error: '承認リンクの有効期限が切れています' }); return
+  }
 
-  const { approvedBy } = req.body
+  const approvedBy = typeof req.body?.approvedBy === 'string' ? req.body.approvedBy.trim().slice(0, 100) : ''
   await prisma.securityReport.update({
     where: { id: report.id },
     data: { approvedAt: new Date(), approvedBy: approvedBy || '承認者' },
@@ -2683,7 +2778,7 @@ app.post('/api/schedules/:id/send-reminder', authenticate, requireRole('ADMIN', 
 // SendGrid → Settings > Inbound Parse > POST /api/inbound/email
 app.post('/api/inbound/email', express.urlencoded({ extended: true }), async (req, res) => {
   // C-3: Webhookシークレット認証
-  if (!verifyWebhookSecret(req, res)) return
+  if (!verifyWebhookSecret(req, res, true)) return
 
   try {
     const from: string = req.body.from || req.body.sender || ''
@@ -6490,7 +6585,12 @@ app.post('/api/guards/:id/documents/upload', authenticate, requireRole('ADMIN', 
   const file = req.file
 
   if (!file) { res.status(400).json({ error: 'ファイルが必要です' }); return }
-  if (!docType) { res.status(400).json({ error: 'docType が必要です' }); return }
+  if (!docType || typeof docType !== 'string') { fs.unlinkSync(file.path); res.status(400).json({ error: 'docType が必要です' }); return }
+  if (!matchesMagicBytes(file.path, file.mimetype)) {
+    fs.unlinkSync(file.path)
+    res.status(400).json({ error: 'ファイルの内容が形式と一致しません（PDF・画像のみ）' })
+    return
+  }
 
   const guard = await prisma.guard.findFirst({ where: { id: guardId, companyId } })
   if (!guard) {
@@ -6798,29 +6898,6 @@ app.get('/api/equipment/guard-holdings', authenticate, async (req, res) => {
 })
 
 // ─────────────────────────────────────────────
-// 静的ファイル配信（本番）
-// ─────────────────────────────────────────────
-
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'dist/public')))
-  app.use((_req, res) => {
-    res.sendFile(path.join(__dirname, 'dist/public/index.html'))
-  })
-}
-
-// ─────────────────────────────────────────────
-// M-4: グローバルエラーハンドラー
-// ─────────────────────────────────────────────
-app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  logger.error('未処理エラー', err, { method: req.method, path: req.path })
-  if (isProduction) {
-    res.status(500).json({ error: '内部サーバーエラーが発生しました' })
-  } else {
-    res.status(500).json({ error: err.message, stack: err.stack })
-  }
-})
-
-// ─────────────────────────────────────────────
 // 管制ボード API（ドラッグ配員用）
 // ─────────────────────────────────────────────
 
@@ -6915,6 +6992,29 @@ app.get('/api/schedules/dispatch-board', authenticate, async (req, res) => {
 // 404ハンドラー（APIルート）
 app.use('/api/', (req: express.Request, res: express.Response) => {
   res.status(404).json({ error: 'エンドポイントが見つかりません' })
+})
+
+// ─────────────────────────────────────────────
+// 静的ファイル配信（本番）
+// ─────────────────────────────────────────────
+
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, 'dist/public')))
+  app.use((_req, res) => {
+    res.sendFile(path.join(__dirname, 'dist/public/index.html'))
+  })
+}
+
+// ─────────────────────────────────────────────
+// M-4: グローバルエラーハンドラー
+// ─────────────────────────────────────────────
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error('未処理エラー', err, { method: req.method, path: req.path })
+  if (process.env.NODE_ENV === 'development') {
+    res.status(500).json({ error: err.message, stack: err.stack })
+  } else {
+    res.status(500).json({ error: '内部サーバーエラーが発生しました' })
+  }
 })
 
 // ─────────────────────────────────────────────
