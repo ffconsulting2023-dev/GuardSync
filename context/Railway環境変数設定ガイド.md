@@ -85,8 +85,8 @@ git push origin main
 
 | ロール | メールアドレス | パスワード |
 |--------|--------------|-----------|
-| スーパー管理者 | admin@guardsync.jp | GuardSync2026! |
-| デモ会社管理者 | demo@demo-security.co.jp | demo1234 |
+| スーパー管理者 | admin@guardsync.jp | `SEED_ADMIN_PASSWORD` で指定（未指定時はシード実行時に生成表示） |
+| デモ会社管理者 | demo@demo-security.co.jp | `SEED_DEMO_PASSWORD` で指定（未指定時はシード実行時に生成表示） |
 
 > **注意**: 本番環境では必ずパスワードを変更してください。
 

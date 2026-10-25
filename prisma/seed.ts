@@ -1,9 +1,22 @@
 import { PrismaClient } from '@prisma/client'
 import bcrypt from 'bcryptjs'
+import crypto from 'crypto'
 
 const prisma = new PrismaClient()
 
+// 初期パスワードはソースに固定しない。環境変数で指定、未指定なら乱数を生成して一度だけ表示する
+function seedPassword(envName: string, label: string): string {
+  const fromEnv = process.env[envName]
+  if (fromEnv) return fromEnv
+  const generated = crypto.randomBytes(12).toString('base64url') + 'aA1'
+  console.log(`[seed] ${label} の初期パスワード（今回のみ表示）: ${generated}`)
+  return generated
+}
+
 async function main() {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_PRODUCTION_SEED !== 'true') {
+    throw new Error('本番環境でのシード実行は拒否されました（必要な場合は ALLOW_PRODUCTION_SEED=true）')
+  }
   console.log('Seeding database...')
 
   // スーパー管理者会社
@@ -19,10 +32,10 @@ async function main() {
   })
 
   // スーパー管理者ユーザー
-  const adminHash = await bcrypt.hash('GuardSync2026!', 12)
+  const adminHash = await bcrypt.hash(seedPassword('SEED_ADMIN_PASSWORD', 'admin@guardsync.jp'), 12)
   await prisma.user.upsert({
     where: { email: 'admin@guardsync.jp' },
-    update: { password: adminHash },
+    update: {}, // 既存ユーザーのパスワードは上書きしない
     create: {
       email: 'admin@guardsync.jp',
       password: adminHash,
@@ -45,10 +58,10 @@ async function main() {
   })
 
   // デモ管理者
-  const demoHash = await bcrypt.hash('demo1234', 12)
+  const demoHash = await bcrypt.hash(seedPassword('SEED_DEMO_PASSWORD', 'demo@demo-security.co.jp'), 12)
   const demoAdmin = await prisma.user.upsert({
     where: { email: 'demo@demo-security.co.jp' },
-    update: { password: demoHash },
+    update: {}, // 既存ユーザーのパスワードは上書きしない
     create: {
       email: 'demo@demo-security.co.jp',
       password: demoHash,
@@ -160,8 +173,8 @@ async function main() {
   await seedPayrollMasterData()
 
   console.log('✓ Seed completed')
-  console.log('  スーパー管理者: admin@guardsync.jp / GuardSync2026!')
-  console.log('  デモ管理者: demo@demo-security.co.jp / demo1234')
+  console.log('  スーパー管理者: admin@guardsync.jp（パスワードは SEED_ADMIN_PASSWORD または上記の生成値）')
+  console.log('  デモ管理者: demo@demo-security.co.jp（パスワードは SEED_DEMO_PASSWORD または上記の生成値）')
 }
 
 // ─────────────────────────────────────────────
