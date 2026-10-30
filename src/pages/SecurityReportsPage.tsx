@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { format } from 'date-fns'
+import { REPORT_STATUS, REPORT_PATROL_RESULT, reportStatus } from '../../shared/securityReport'
 
 interface ReportContent {
   patrolRecords: { time: string; location: string; note: string }[]
@@ -27,7 +28,13 @@ export default function SecurityReportsPage() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState(EMPTY_FORM)
   const [content, setContent] = useState<ReportContent>(EMPTY_CONTENT)
-  const [selected, setSelected] = useState<any>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const { data: selected } = useQuery({
+    queryKey: ['security-report', selectedId],
+    queryFn: () => api.get(`/security-reports/${selectedId}`).then(r => r.data),
+    enabled: !!selectedId,
+  })
+  const setSelected = (r: any) => setSelectedId(r ? r.id : null)
 
   const { data: reports = [], isLoading } = useQuery({
     queryKey: ['security-reports'],
@@ -56,7 +63,7 @@ export default function SecurityReportsPage() {
 
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
         <p className="font-medium">📋 承認方式について</p>
-        <p className="text-xs mt-0.5">発注元へのメールにURLリンクを送付し、クリックで承認。特許回避のため手書き署名を使用しない設計です。</p>
+        <p className="text-xs mt-0.5">隊員が現場でスマートフォンを現場監督に渡し、タッチパネルでサインを取得します。発注元へのメールURLによる承認も併用できます。</p>
       </div>
 
       {isLoading ? (
@@ -77,8 +84,8 @@ export default function SecurityReportsPage() {
                     </div>
                     <p className="text-xs text-gray-400 mt-0.5">{format(new Date(r.reportDate), 'yyyy年M月d日')}</p>
                   </div>
-                  <span className={`badge flex-shrink-0 ${r.approvedAt ? 'badge-success' : 'badge-warning'}`}>
-                    {r.approvedAt ? '承認済み' : '承認待ち'}
+                  <span className={`badge flex-shrink-0 ${r.approvedAt || r.signedAt ? 'badge-success' : 'badge-warning'}`}>
+                    {REPORT_STATUS[reportStatus(r)]}
                   </span>
                 </div>
               </div>
@@ -88,7 +95,7 @@ export default function SecurityReportsPage() {
       )}
 
       {/* 詳細モーダル */}
-      {selected && (
+      {selectedId && selected && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
@@ -103,7 +110,7 @@ export default function SecurityReportsPage() {
                 <div>
                   <p className="text-xs text-gray-500">承認状況</p>
                   <span className={`badge ${selected.approvedAt ? 'badge-success' : 'badge-warning'}`}>
-                    {selected.approvedAt ? `承認済み（${selected.approvedBy}）` : '承認待ち'}
+                    {REPORT_STATUS[reportStatus(selected)]}{selected.approvedBy ? `（${selected.approvedBy}）` : ''}
                   </span>
                 </div>
               </div>
@@ -116,6 +123,7 @@ export default function SecurityReportsPage() {
                       <div key={i} className="bg-gray-50 rounded px-3 py-2 text-sm">
                         <span className="text-gray-500 text-xs">{rec.time}</span>
                         <span className="mx-2 text-gray-700">{rec.location}</span>
+                        {rec.result && <span className={`text-xs mr-2 ${rec.result === 'ABNORMAL' ? 'text-red-600 font-medium' : 'text-gray-400'}`}>{REPORT_PATROL_RESULT[rec.result as keyof typeof REPORT_PATROL_RESULT]}</span>}
                         {rec.note && <span className="text-gray-500 text-xs">— {rec.note}</span>}
                       </div>
                     ))}
@@ -127,6 +135,15 @@ export default function SecurityReportsPage() {
                 <div>
                   <p className="text-xs font-medium text-gray-500 mb-1">インシデント・特記事項</p>
                   <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 text-sm text-gray-700">{selected.content.incidents}</div>
+                </div>
+              )}
+              {selected.signatureImage && (
+                <div>
+                  <p className="text-xs font-medium text-gray-500 mb-1">現場監督サイン</p>
+                  <img src={selected.signatureImage} alt="監督サイン" className="h-24 border rounded bg-white" />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {selected.signerName}{selected.signerTitle ? `（${selected.signerTitle}）` : ''} / {format(new Date(selected.signedAt), 'yyyy/M/d HH:mm')}
+                  </p>
                 </div>
               )}
             </div>

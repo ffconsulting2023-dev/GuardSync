@@ -14,6 +14,7 @@ import nodemailer from 'nodemailer'
 import crypto from 'crypto'
 import multer from 'multer'
 import fs from 'fs'
+import { reportContentSchema, signatureInputSchema } from './shared/securityReport'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2430,21 +2431,70 @@ app.get('/api/security-reports', authenticate, async (req, res) => {
       ...(from || to ? { reportDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
     },
     include: { guard: true, site: true },
+    omit: { signatureImage: true, approvalToken: true },
     orderBy: { reportDate: 'desc' },
   })
-  res.json(reports)
+  res.json(reports.map(r => ({ ...r, hasSignature: !!r.signedAt })))
+})
+
+// 詳細（署名画像を含む）
+app.get('/api/security-reports/:id', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { guard: true, site: true },
+    omit: { approvalToken: true },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  res.json(report)
+})
+
+// 現場監督のタッチサイン登録（隊員のスマートフォンから現場で取得）
+app.post('/api/security-reports/:id/sign', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = signatureInputSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+  const report = await prisma.securityReport.findFirst({ where: { id: req.params.id, companyId } })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (report.signedAt || report.approvedAt) { res.status(409).json({ error: '既にサイン済みです' }); return }
+  const { signerName, signerTitle, signatureImage } = parsed.data
+  await prisma.securityReport.update({
+    where: { id: report.id },
+    data: { signerName, signerTitle: signerTitle || null, signatureImage, signedAt: new Date() },
+  })
+  res.json({ success: true })
 })
 
 app.post('/api/security-reports', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, reportDate, content, clientEmail } = req.body
+  const { guardId, siteId, reportDate, content, clientEmail, signature } = req.body
   if (!guardId || !siteId || !reportDate || !content) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
+  const parsedContent = reportContentSchema.safeParse(content)
+  if (!parsedContent.success) { res.status(400).json({ error: '報告内容が不正です' }); return }
+  const parsedSig = signature ? signatureInputSchema.safeParse(signature) : null
+  if (parsedSig && !parsedSig.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+
+  // 他社の隊員・現場を指定できないよう所属を検証
+  const [guardOk, siteOk] = await Promise.all([
+    prisma.guard.findFirst({ where: { id: guardId, companyId }, select: { id: true } }),
+    prisma.site.findFirst({ where: { id: siteId, companyId }, select: { id: true } }),
+  ])
+  if (!guardOk || !siteOk) { res.status(400).json({ error: '隊員または現場が不正です' }); return }
 
   const report = await prisma.securityReport.create({
-    data: { companyId, guardId, siteId, reportDate: new Date(reportDate), content },
+    data: {
+      companyId, guardId, siteId, reportDate: new Date(reportDate), content: parsedContent.data,
+      ...(parsedSig?.success ? {
+        signerName: parsedSig.data.signerName,
+        signerTitle: parsedSig.data.signerTitle || null,
+        signatureImage: parsedSig.data.signatureImage,
+        signedAt: new Date(),
+      } : {}),
+    },
     include: { guard: true, site: true, company: true },
+    omit: { signatureImage: true },
   })
 
   // 発注元への承認依頼メール
@@ -2475,7 +2525,8 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
     await sendEmail(clientEmail, subject, html)
   }
 
-  res.status(201).json(report)
+  const { approvalToken: _t, ...safe } = report as any
+  res.status(201).json(safe)
 })
 
 // メールリンクによる承認（認証不要）

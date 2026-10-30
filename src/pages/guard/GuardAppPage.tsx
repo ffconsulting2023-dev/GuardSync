@@ -8,13 +8,17 @@ import { api } from '../../lib/api'
 import { useAuth } from '../../hooks/useAuth'
 import { format, addMonths, subMonths } from 'date-fns'
 import { ja } from 'date-fns/locale'
+import SignaturePad from '../../components/SignaturePad'
+import { REPORT_WEATHER, REPORT_PATROL_RESULT, REPORT_STATUS, reportStatus } from '../../../shared/securityReport'
 
 type Tab = 'today' | 'schedule' | 'attendance' | 'reports'
 
 const EMPTY_REPORT = {
   guardId: '', siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd'),
-  weather: '晴れ', incidents: '', specialNotes: '',
+  weather: '晴れ' as string, workStart: '', workEnd: '', breakMinutes: 0,
+  hasIncident: false, incidents: '', specialNotes: '',
 }
+const EMPTY_PATROL = { time: '', location: '', result: 'NORMAL' as 'NORMAL' | 'ABNORMAL', note: '' }
 
 export default function GuardAppPage() {
   const { user, logout } = useAuth()
@@ -22,6 +26,10 @@ export default function GuardAppPage() {
   const [viewMonth, setViewMonth] = useState(new Date())
   const [reportForm, setReportForm] = useState(EMPTY_REPORT)
   const [showReportForm, setShowReportForm] = useState(false)
+  const [patrols, setPatrols] = useState([EMPTY_PATROL])
+  const [signTarget, setSignTarget] = useState<string | null>(null) // サイン対象の既存報告書ID
+  const [signDraft, setSignDraft] = useState<any>(null)            // 提出時に取得したサイン
+  const [showPad, setShowPad] = useState(false)
   const qc = useQueryClient()
 
   // 今日のシフト
@@ -67,12 +75,23 @@ export default function GuardAppPage() {
     enabled: tab === 'reports',
   })
 
+  const signMutation = useMutation({
+    mutationFn: (v: any) => api.post(`/security-reports/${signTarget}/sign`, v),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['guard-reports'] })
+      setSignTarget(null)
+      setShowPad(false)
+    },
+  })
+
   const submitReportMutation = useMutation({
     mutationFn: (data: any) => api.post('/security-reports', data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['guard-reports'] })
       setShowReportForm(false)
       setReportForm(EMPTY_REPORT)
+      setPatrols([EMPTY_PATROL])
+      setSignDraft(null)
     },
   })
 
@@ -362,12 +381,17 @@ export default function GuardAppPage() {
                     <div className="flex items-start justify-between">
                       <div>
                         <p className="font-medium text-gray-800">{rep.site?.name}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.weather}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.content?.weather}</p>
                       </div>
-                      <span className={`badge ${rep.approvedAt ? 'badge-success' : 'badge-warning'}`}>
-                        {rep.approvedAt ? '承認済' : '確認待ち'}
+                      <span className={`badge ${rep.approvedAt || rep.signedAt ? 'badge-success' : 'badge-warning'}`}>
+                        {REPORT_STATUS[reportStatus(rep)]}
                       </span>
                     </div>
+                    {rep.signedAt ? (
+                      <p className="text-xs text-gray-500 mt-2">監督サイン: {rep.signerName}{rep.signerTitle ? `（${rep.signerTitle}）` : ''}</p>
+                    ) : (
+                      <button onClick={() => { setSignTarget(rep.id); setShowPad(true) }} className="btn-primary text-sm w-full mt-3">✍️ 現場監督のサインをもらう</button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -382,9 +406,17 @@ export default function GuardAppPage() {
                 </div>
                 <form onSubmit={e => {
                   e.preventDefault()
+                  const { guardId, siteId, reportDate, ...c } = reportForm
                   submitReportMutation.mutate({
-                    ...reportForm,
-                    content: { patrolRecords: [], incidents: reportForm.incidents, specialNotes: reportForm.specialNotes, weather: reportForm.weather }
+                    guardId, siteId, reportDate,
+                    content: {
+                      ...c,
+                      workStart: c.workStart || undefined,
+                      workEnd: c.workEnd || undefined,
+                      hasIncident: c.hasIncident,
+                      patrolRecords: patrols.filter(p => p.time && p.location),
+                    },
+                    ...(signDraft ? { signature: signDraft } : {}),
                   })
                 }} className="p-4 space-y-4">
                   <div>
@@ -401,11 +433,40 @@ export default function GuardAppPage() {
                   <div>
                     <label className="form-label">天候</label>
                     <select value={reportForm.weather} onChange={e => setReportForm(f => ({ ...f, weather: e.target.value }))} className="form-input">
-                      {['晴れ', '曇り', '雨', '雪', '強風'].map(w => <option key={w} value={w}>{w}</option>)}
+                      {REPORT_WEATHER.map(w => <option key={w} value={w}>{w}</option>)}
                     </select>
                   </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div><label className="form-label">開始</label><input type="time" value={reportForm.workStart} onChange={e => setReportForm(f => ({ ...f, workStart: e.target.value }))} className="form-input" /></div>
+                    <div><label className="form-label">終了</label><input type="time" value={reportForm.workEnd} onChange={e => setReportForm(f => ({ ...f, workEnd: e.target.value }))} className="form-input" /></div>
+                    <div><label className="form-label">休憩(分)</label><input type="number" min={0} max={480} value={reportForm.breakMinutes} onChange={e => setReportForm(f => ({ ...f, breakMinutes: Math.max(0, Number(e.target.value) || 0) }))} className="form-input" /></div>
+                  </div>
                   <div>
-                    <label className="form-label">特記事項・インシデント</label>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="form-label mb-0">巡回記録</label>
+                      <button type="button" onClick={() => setPatrols(p => [...p, EMPTY_PATROL])} className="text-blue-600 text-xs">+ 行追加</button>
+                    </div>
+                    <div className="space-y-2">
+                      {patrols.map((p, i) => (
+                        <div key={i} className="border border-gray-200 rounded-lg p-2 space-y-2">
+                          <div className="grid grid-cols-2 gap-2">
+                            <input type="time" value={p.time} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, time: e.target.value } : x))} className="form-input" />
+                            <select value={p.result} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, result: e.target.value as 'NORMAL' | 'ABNORMAL' } : x))} className="form-input">
+                              {Object.entries(REPORT_PATROL_RESULT).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                            </select>
+                          </div>
+                          <input value={p.location} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, location: e.target.value } : x))} className="form-input" placeholder="巡回場所" />
+                          <input value={p.note} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} className="form-input" placeholder="備考" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" checked={reportForm.hasIncident} onChange={e => setReportForm(f => ({ ...f, hasIncident: e.target.checked }))} />
+                    異常・インシデントあり
+                  </label>
+                  <div>
+                    <label className="form-label">異常・インシデントの内容と対応</label>
                     <textarea
                       value={reportForm.incidents}
                       onChange={e => setReportForm(f => ({ ...f, incidents: e.target.value }))}
@@ -424,6 +485,19 @@ export default function GuardAppPage() {
                       placeholder="引き継ぎ事項等"
                     />
                   </div>
+                  <div className="border border-gray-200 rounded-lg p-3">
+                    <p className="form-label">現場監督サイン</p>
+                    {signDraft ? (
+                      <div className="flex items-center gap-3">
+                        <img src={signDraft.signatureImage} alt="監督サイン" className="h-16 border rounded bg-white" />
+                        <div className="text-sm flex-1">{signDraft.signerName}{signDraft.signerTitle ? `（${signDraft.signerTitle}）` : ''}</div>
+                        <button type="button" onClick={() => setSignDraft(null)} className="text-xs text-red-600">取消</button>
+                      </div>
+                    ) : (
+                      <button type="button" onClick={() => { setSignTarget(null); setShowPad(true) }} className="btn-secondary w-full text-sm">✍️ 現場監督にサインしてもらう</button>
+                    )}
+                    <p className="text-xs text-gray-400 mt-1">提出後に一覧から後でもらうこともできます。</p>
+                  </div>
                   <div className="flex gap-3 pb-8">
                     <button type="button" onClick={() => setShowReportForm(false)} className="btn-secondary flex-1">キャンセル</button>
                     <button type="submit" disabled={submitReportMutation.isPending} className="btn-primary flex-1 disabled:opacity-50">
@@ -432,6 +506,18 @@ export default function GuardAppPage() {
                   </div>
                 </form>
               </div>
+            )}
+
+            {showPad && (
+              <SignaturePad
+                submitting={signMutation.isPending}
+                error={signMutation.isError ? 'サインの送信に失敗しました。通信状況をご確認ください。' : undefined}
+                onCancel={() => { setShowPad(false); setSignTarget(null) }}
+                onSubmit={v => {
+                  if (signTarget) signMutation.mutate(v)
+                  else { setSignDraft(v); setShowPad(false) }
+                }}
+              />
             )}
           </div>
         )}

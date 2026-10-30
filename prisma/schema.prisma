@@ -880,6 +880,11 @@ model SecurityReport {
   approvalToken String? @unique @default(uuid()) // メールリンク承認用
   approvedAt  DateTime?
   approvedBy  String?
+  // 現場監督の手書きサイン（承認者名は signerName、署名日時は signedAt が正）
+  signerName     String?
+  signerTitle    String?
+  signatureImage String?  @db.Text // PNG data URL
+  signedAt       DateTime?
   pdfPath     String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
