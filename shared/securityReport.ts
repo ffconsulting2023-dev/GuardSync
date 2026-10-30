@@ -46,6 +46,9 @@ export const signatureInputSchema = z.object({
     .string()
     .max(SIGNATURE_MAX_LENGTH)
     .regex(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/),
+  // サイン取得場所（端末の位置情報。拒否・取得不可の場合は省略）
+  lat: z.number().min(-90).max(90).optional(),
+  lng: z.number().min(-180).max(180).optional(),
 })
 export type SignatureInput = z.infer<typeof signatureInputSchema>
 

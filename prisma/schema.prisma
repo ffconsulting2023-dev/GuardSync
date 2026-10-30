@@ -885,6 +885,8 @@ model SecurityReport {
   signerTitle    String?
   signatureImage String?  @db.Text // PNG data URL
   signedAt       DateTime?
+  signedLat      Float?   // サイン取得位置
+  signedLng      Float?
   pdfPath     String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

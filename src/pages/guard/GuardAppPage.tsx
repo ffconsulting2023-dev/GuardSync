@@ -381,6 +381,7 @@ export default function GuardAppPage() {
                     <div className="flex items-start justify-between">
                       <div>
                         <p className="font-medium text-gray-800">{rep.site?.name}</p>
+                        {(rep.site?.client?.name || rep.site?.clientName) && <p className="text-xs text-gray-500">{rep.site?.client?.name || rep.site?.clientName}</p>}
                         <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.content?.weather}</p>
                       </div>
                       <span className={`badge ${rep.approvedAt || rep.signedAt ? 'badge-success' : 'badge-warning'}`}>
@@ -421,7 +422,12 @@ export default function GuardAppPage() {
                 }} className="p-4 space-y-4">
                   <div>
                     <label className="form-label">現場 *</label>
-                    <select value={reportForm.siteId} onChange={e => setReportForm(f => ({ ...f, siteId: e.target.value }))} className="form-input" required>
+                    <select value={reportForm.siteId} onChange={e => {
+                      const siteId = e.target.value
+                      // 勤務実績（本日の配員）から実働時間を初期入力
+                      const sch = reportForm.reportDate === today ? todaySchedules.find((x: any) => x.siteId === siteId) : null
+                      setReportForm(f => ({ ...f, siteId, workStart: sch?.startTime ?? f.workStart, workEnd: sch?.endTime ?? f.workEnd }))
+                    }} className="form-input" required>
                       <option value="">選択してください</option>
                       {mySites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>

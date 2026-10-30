@@ -2430,7 +2430,7 @@ app.get('/api/security-reports', authenticate, async (req, res) => {
       ...(siteId ? { siteId: String(siteId) } : {}),
       ...(from || to ? { reportDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
     },
-    include: { guard: true, site: true },
+    include: { guard: true, site: { include: { client: true } } },
     omit: { signatureImage: true, approvalToken: true },
     orderBy: { reportDate: 'desc' },
   })
@@ -2442,7 +2442,7 @@ app.get('/api/security-reports/:id', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const report = await prisma.securityReport.findFirst({
     where: { id: req.params.id, companyId },
-    include: { guard: true, site: true },
+    include: { guard: true, site: { include: { client: true } } },
     omit: { approvalToken: true },
   })
   if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
@@ -2457,10 +2457,10 @@ app.post('/api/security-reports/:id/sign', authenticate, async (req, res) => {
   const report = await prisma.securityReport.findFirst({ where: { id: req.params.id, companyId } })
   if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
   if (report.signedAt || report.approvedAt) { res.status(409).json({ error: '既にサイン済みです' }); return }
-  const { signerName, signerTitle, signatureImage } = parsed.data
+  const { signerName, signerTitle, signatureImage, lat, lng } = parsed.data
   await prisma.securityReport.update({
     where: { id: report.id },
-    data: { signerName, signerTitle: signerTitle || null, signatureImage, signedAt: new Date() },
+    data: { signerName, signerTitle: signerTitle || null, signatureImage, signedAt: new Date(), signedLat: lat ?? null, signedLng: lng ?? null },
   })
   res.json({ success: true })
 })
@@ -2491,6 +2491,8 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
         signerTitle: parsedSig.data.signerTitle || null,
         signatureImage: parsedSig.data.signatureImage,
         signedAt: new Date(),
+        signedLat: parsedSig.data.lat ?? null,
+        signedLng: parsedSig.data.lng ?? null,
       } : {}),
     },
     include: { guard: true, site: true, company: true },

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 
 interface Props {
-  onSubmit: (v: { signerName: string; signerTitle: string; signatureImage: string }) => void
+  onSubmit: (v: { signerName: string; signerTitle: string; signatureImage: string; lat?: number; lng?: number }) => void
   onCancel: () => void
   submitting?: boolean
   error?: string
@@ -65,7 +65,17 @@ export default function SignaturePad({ onSubmit, onCancel, submitting, error }: 
   }
   const up = () => { drawing.current = false }
 
-  const submit = () => {
+  // 位置情報は任意。拒否・タイムアウト時は付けずに送信する
+  const getLocation = () => new Promise<{ lat?: number; lng?: number }>(resolve => {
+    if (!navigator.geolocation) return resolve({})
+    navigator.geolocation.getCurrentPosition(
+      p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      () => resolve({}),
+      { timeout: 5000, maximumAge: 60000 },
+    )
+  })
+
+  const submit = async () => {
     const c = canvasRef.current!
     // 透明背景のままだと閲覧環境で黒潰れするため白背景に合成して出力
     const out = document.createElement('canvas')
@@ -75,7 +85,8 @@ export default function SignaturePad({ onSubmit, onCancel, submitting, error }: 
     octx.fillStyle = '#fff'
     octx.fillRect(0, 0, out.width, out.height)
     octx.drawImage(c, 0, 0)
-    onSubmit({ signerName: signerName.trim(), signerTitle: signerTitle.trim(), signatureImage: out.toDataURL('image/png') })
+    const loc = await getLocation()
+    onSubmit({ signerName: signerName.trim(), signerTitle: signerTitle.trim(), signatureImage: out.toDataURL('image/png'), ...loc })
   }
 
   const canSubmit = hasInk && signerName.trim().length > 0 && !submitting

@@ -97,15 +97,18 @@ export default function SecurityReportsPage() {
       {/* 詳細モーダル */}
       {selectedId && selected && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+          <div className="report-print bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between">
               <h2 className="font-semibold text-gray-800">警備報告書</h2>
-              <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <div className="flex items-center gap-3 print:hidden">
+                <button onClick={() => window.print()} className="text-sm text-blue-600">🖨 印刷/PDF</button>
+                <button onClick={() => setSelected(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+              </div>
             </div>
             <div className="p-6 space-y-4">
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div><p className="text-xs text-gray-500">隊員</p><p className="font-medium">{selected.guard?.name}</p></div>
-                <div><p className="text-xs text-gray-500">現場</p><p className="font-medium">{selected.site?.name}</p></div>
+                <div><p className="text-xs text-gray-500">現場 / 発注元</p><p className="font-medium">{selected.site?.name}</p><p className="text-xs text-gray-500">{selected.site?.client?.name || selected.site?.clientName}</p></div>
                 <div><p className="text-xs text-gray-500">報告日</p><p>{format(new Date(selected.reportDate), 'yyyy/M/d')}</p></div>
                 <div>
                   <p className="text-xs text-gray-500">承認状況</p>
@@ -143,6 +146,9 @@ export default function SecurityReportsPage() {
                   <img src={selected.signatureImage} alt="監督サイン" className="h-24 border rounded bg-white" />
                   <p className="text-xs text-gray-500 mt-1">
                     {selected.signerName}{selected.signerTitle ? `（${selected.signerTitle}）` : ''} / {format(new Date(selected.signedAt), 'yyyy/M/d HH:mm')}
+                    {selected.signedLat != null && selected.signedLng != null && (
+                      <> / <a className="text-blue-600 underline print:no-underline" target="_blank" rel="noreferrer" href={`https://www.google.com/maps?q=${selected.signedLat},${selected.signedLng}`}>取得場所</a></>
+                    )}
                   </p>
                 </div>
               )}

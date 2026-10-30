@@ -70,3 +70,10 @@ body {
 .form-label {
   @apply block text-sm font-medium text-gray-700 mb-1;
 }
+
+/* 警備報告書の印刷/PDF: 詳細モーダルのみを紙面に出す */
+@media print {
+  body * { visibility: hidden; }
+  .report-print, .report-print * { visibility: visible; }
+  .report-print { position: absolute; inset: 0; max-height: none !important; overflow: visible !important; }
+}
