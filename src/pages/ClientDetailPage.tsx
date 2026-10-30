@@ -6,6 +6,7 @@ import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 import { EMPTY_CLIENT_FORM } from './ClientsPage'
 import { CLIENT_CATEGORY } from '../lib/constants'
+import ReportTemplateEditor from '../components/report/ReportTemplateEditor'
 
 const LOG_TYPES: Record<string, { label: string; icon: string }> = {
   NOTE:    { label: 'メモ',   icon: '📝' },
@@ -20,7 +21,7 @@ const DOC_LABELS: Record<string, string> = {
   securityLog: '警備日誌', securityCommission: '警備委託', other: 'その他',
 }
 
-type TabKey = 'basic' | 'contacts' | 'accounting' | 'history'
+type TabKey = 'basic' | 'contacts' | 'accounting' | 'history' | 'reportTemplate'
 
 function clientToForm(c: any) {
   const base = { ...EMPTY_CLIENT_FORM }
@@ -179,6 +180,7 @@ export default function ClientDetailPage() {
               { key: 'contacts',    label: `担当者（${client?.subContacts?.filter((c: any) => c.name)?.length ?? 0}）` },
               { key: 'accounting',  label: '経理情報' },
               { key: 'history',     label: `取引履歴（${client?._count?.sites ?? 0}件）` },
+              { key: 'reportTemplate', label: '報告書帳票' },
             ] as { key: TabKey; label: string }[]).map(t => (
               <button
                 key={t.key}
@@ -537,6 +539,10 @@ export default function ClientDetailPage() {
                     </FormField>
                   </Section>
                 </>
+              )}
+
+              {!isNew && tab === 'reportTemplate' && id && (
+                <ReportTemplateEditor clientId={id} canEdit={!!user && (user.isSuperAdmin || ['ADMIN', 'MANAGER'].includes(user.role))} />
               )}
 
               {!isNew && tab === 'history' && (

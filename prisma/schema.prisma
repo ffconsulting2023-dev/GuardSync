@@ -418,6 +418,7 @@ model Client {
 
   sites       Site[]
   logs        ClientLog[]
+  reportTemplate SecurityReportTemplate?
   invoices    Invoice[]
 
   @@index([companyId])
@@ -541,6 +542,7 @@ model Partner {
   updatedAt   DateTime    @updatedAt
 
   payments    SubcontractorPayment[]
+  reportShares SecurityReportShare[]
 
   @@index([companyId])
 }
@@ -890,6 +892,71 @@ model SecurityReport {
   pdfPath     String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  photos      SecurityReportPhoto[]
+  revisions   SecurityReportRevision[]
+  shares      SecurityReportShare[]
+}
+
+// 現場写真（Railwayのディスクは再デプロイで消えるためDBに保存。端末側で縮小済み）
+model SecurityReportPhoto {
+  id        String         @id @default(uuid())
+  reportId  String
+  report    SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  companyId String
+  mimeType  String
+  data      Bytes
+  caption   String?
+  lat       Float?
+  lng       Float?
+  createdAt DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+// 修正履歴・承認履歴（追記のみ）
+model SecurityReportRevision {
+  id          String         @id @default(uuid())
+  reportId    String
+  report      SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  companyId   String
+  action      String         // shared/securityReport.ts REPORT_REVISION_ACTION のキー
+  actorName   String
+  actorUserId String?
+  changes     Json?          // [{ field, before, after }] または補足情報
+  createdAt   DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+// 協力会社への閲覧専用共有リンク
+model SecurityReportShare {
+  id            String         @id @default(uuid())
+  reportId      String
+  report        SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  companyId     String
+  partnerId     String
+  partner       Partner        @relation(fields: [partnerId], references: [id])
+  token         String         @unique @default(uuid())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  viewCount     Int            @default(0)
+  lastViewedAt  DateTime?
+  createdByName String
+  createdAt     DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+// 顧客別の帳票設定（settings の構造は shared/securityReport.ts reportTemplateSchema が正）
+model SecurityReportTemplate {
+  id        String   @id @default(uuid())
+  companyId String
+  clientId  String   @unique
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  settings  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─────────────────────────────────────────────

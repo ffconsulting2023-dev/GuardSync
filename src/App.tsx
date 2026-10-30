@@ -19,6 +19,7 @@ import SignContractPage from './pages/SignContractPage'
 import RegisterPage from './pages/RegisterPage'
 import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
+import SharedReportPage from './pages/SharedReportPage'
 import GuardAppPage from './pages/guard/GuardAppPage'
 import SettingsPage from './pages/SettingsPage'
 import VehiclesPage from './pages/VehiclesPage'
@@ -76,6 +77,7 @@ export default function App() {
           <Route path="/reset-password" element={auth.user ? <Navigate to="/" replace /> : <ResetPasswordPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/sign/:token" element={<SignContractPage />} />
+          <Route path="/shared/report/:token" element={<SharedReportPage />} />
           <Route path="/guard/*" element={auth.user ? <GuardAppPage /> : <Navigate to="/login" replace />} />
           <Route
             path="/*"

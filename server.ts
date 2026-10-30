@@ -14,7 +14,11 @@ import nodemailer from 'nodemailer'
 import crypto from 'crypto'
 import multer from 'multer'
 import fs from 'fs'
-import { reportContentSchema, signatureInputSchema } from './shared/securityReport'
+import {
+  reportContentSchema, signatureInputSchema, photoInputSchema, shareInputSchema, reportTemplateSchema,
+  validateReportAgainstTemplate, decodePhotoDataUrl, DEFAULT_REPORT_TEMPLATE, MAX_PHOTOS_PER_REPORT, REPORT_FIELD_LABEL,
+  type ReportTemplate, type ReportRevisionAction, type PhotoInput,
+} from './shared/securityReport'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2417,7 +2421,58 @@ app.get('/api/guards/:id/schedule', authenticate, async (req, res) => {
 
 // ─────────────────────────────────────────────
 // 管制機能 - 警備報告書 API
+// 項目定義・検証は shared/securityReport.ts が正（SSOT）
 // ─────────────────────────────────────────────
+
+// 操作者名（修正履歴用）
+async function reportActor(user: JwtPayload): Promise<{ actorName: string; actorUserId: string }> {
+  const u = await prisma.user.findUnique({ where: { id: user.userId }, select: { name: true } })
+  return { actorName: u?.name || 'ユーザー', actorUserId: user.userId }
+}
+
+async function logReportRevision(
+  db: Pick<typeof prisma, 'securityReportRevision'>,
+  report: { id: string; companyId: string },
+  action: ReportRevisionAction,
+  actor: { actorName: string; actorUserId?: string | null },
+  changes?: unknown,
+) {
+  await db.securityReportRevision.create({
+    data: {
+      reportId: report.id, companyId: report.companyId, action,
+      actorName: actor.actorName, actorUserId: actor.actorUserId ?? null,
+      ...(changes !== undefined ? { changes: changes as any } : {}),
+    },
+  })
+}
+
+// 現場→顧客の帳票設定（未設定ならデフォルト）
+async function reportTemplateForSite(siteId: string, companyId: string): Promise<ReportTemplate> {
+  const site = await prisma.site.findFirst({
+    where: { id: siteId, companyId },
+    select: { client: { select: { reportTemplate: { select: { settings: true } } } } },
+  })
+  const parsed = reportTemplateSchema.safeParse(site?.client?.reportTemplate?.settings ?? {})
+  return parsed.success ? parsed.data : DEFAULT_REPORT_TEMPLATE
+}
+
+function diffReportContent(before: Record<string, unknown>, after: Record<string, unknown>) {
+  return Object.keys(REPORT_FIELD_LABEL)
+    .filter(k => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
+    .map(field => ({ field, before: before[field] ?? null, after: after[field] ?? null }))
+}
+
+function photoCreateData(p: PhotoInput, report: { id: string; companyId: string }) {
+  const { mimeType, base64 } = decodePhotoDataUrl(p.dataUrl)
+  return {
+    reportId: report.id, companyId: report.companyId, mimeType,
+    data: Buffer.from(base64, 'base64'),
+    caption: p.caption || null, lat: p.lat ?? null, lng: p.lng ?? null,
+  }
+}
+
+const photoMetaSelect = { id: true, caption: true, lat: true, lng: true, mimeType: true, createdAt: true } as const
+const isReportLocked = (r: { signedAt: Date | null; approvedAt: Date | null }) => !!(r.signedAt || r.approvedAt)
 
 app.get('/api/security-reports', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
@@ -2430,44 +2485,33 @@ app.get('/api/security-reports', authenticate, async (req, res) => {
       ...(siteId ? { siteId: String(siteId) } : {}),
       ...(from || to ? { reportDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
     },
-    include: { guard: true, site: { include: { client: true } } },
+    include: { guard: true, site: { include: { client: true } }, _count: { select: { photos: true } } },
     omit: { signatureImage: true, approvalToken: true },
     orderBy: { reportDate: 'desc' },
   })
   res.json(reports.map(r => ({ ...r, hasSignature: !!r.signedAt })))
 })
 
-// 詳細（署名画像を含む）
+// 詳細（署名画像・写真メタ・帳票設定を含む）
 app.get('/api/security-reports/:id', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const report = await prisma.securityReport.findFirst({
     where: { id: req.params.id, companyId },
-    include: { guard: true, site: { include: { client: true } } },
+    include: {
+      guard: true, site: { include: { client: true } },
+      photos: { select: photoMetaSelect, orderBy: { createdAt: 'asc' } },
+    },
     omit: { approvalToken: true },
   })
   if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
-  res.json(report)
+  res.json({ ...report, template: await reportTemplateForSite(report.siteId, companyId) })
 })
 
-// 現場監督のタッチサイン登録（隊員のスマートフォンから現場で取得）
-app.post('/api/security-reports/:id/sign', authenticate, async (req, res) => {
-  const { companyId } = (req as any).user as JwtPayload
-  const parsed = signatureInputSchema.safeParse(req.body)
-  if (!parsed.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
-  const report = await prisma.securityReport.findFirst({ where: { id: req.params.id, companyId } })
-  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
-  if (report.signedAt || report.approvedAt) { res.status(409).json({ error: '既にサイン済みです' }); return }
-  const { signerName, signerTitle, signatureImage, lat, lng } = parsed.data
-  await prisma.securityReport.update({
-    where: { id: report.id },
-    data: { signerName, signerTitle: signerTitle || null, signatureImage, signedAt: new Date(), signedLat: lat ?? null, signedLng: lng ?? null },
-  })
-  res.json({ success: true })
-})
-
+// 報告書作成（写真・サインを同時に受け付ける）
 app.post('/api/security-reports', authenticate, async (req, res) => {
-  const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, reportDate, content, clientEmail, signature } = req.body
+  const user = (req as any).user as JwtPayload
+  const { companyId } = user
+  const { guardId, siteId, reportDate, content, clientEmail, signature, photos } = req.body
   if (!guardId || !siteId || !reportDate || !content) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
@@ -2475,6 +2519,8 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
   if (!parsedContent.success) { res.status(400).json({ error: '報告内容が不正です' }); return }
   const parsedSig = signature ? signatureInputSchema.safeParse(signature) : null
   if (parsedSig && !parsedSig.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+  const parsedPhotos = z.array(photoInputSchema).max(MAX_PHOTOS_PER_REPORT).safeParse(photos ?? [])
+  if (!parsedPhotos.success) { res.status(400).json({ error: `写真が不正です（最大${MAX_PHOTOS_PER_REPORT}枚）` }); return }
 
   // 他社の隊員・現場を指定できないよう所属を検証
   const [guardOk, siteOk] = await Promise.all([
@@ -2483,20 +2529,35 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
   ])
   if (!guardOk || !siteOk) { res.status(400).json({ error: '隊員または現場が不正です' }); return }
 
-  const report = await prisma.securityReport.create({
-    data: {
-      companyId, guardId, siteId, reportDate: new Date(reportDate), content: parsedContent.data,
-      ...(parsedSig?.success ? {
-        signerName: parsedSig.data.signerName,
-        signerTitle: parsedSig.data.signerTitle || null,
-        signatureImage: parsedSig.data.signatureImage,
-        signedAt: new Date(),
-        signedLat: parsedSig.data.lat ?? null,
-        signedLng: parsedSig.data.lng ?? null,
-      } : {}),
-    },
-    include: { guard: true, site: true, company: true },
-    omit: { signatureImage: true },
+  const template = await reportTemplateForSite(siteId, companyId)
+  const tplErrors = validateReportAgainstTemplate(parsedContent.data, template, parsedPhotos.data.length)
+  if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
+
+  const actor = await reportActor(user)
+  const report = await prisma.$transaction(async tx => {
+    const created = await tx.securityReport.create({
+      data: {
+        companyId, guardId, siteId, reportDate: new Date(reportDate), content: parsedContent.data,
+        ...(parsedSig?.success ? {
+          signerName: parsedSig.data.signerName,
+          signerTitle: parsedSig.data.signerTitle || null,
+          signatureImage: parsedSig.data.signatureImage,
+          signedAt: new Date(),
+          signedLat: parsedSig.data.lat ?? null,
+          signedLng: parsedSig.data.lng ?? null,
+        } : {}),
+      },
+      include: { guard: true, site: true, company: true },
+      omit: { signatureImage: true },
+    })
+    if (parsedPhotos.data.length) {
+      await tx.securityReportPhoto.createMany({ data: parsedPhotos.data.map(p => photoCreateData(p, created)) })
+    }
+    await logReportRevision(tx, created, 'CREATE', actor, parsedPhotos.data.length ? { photos: parsedPhotos.data.length } : undefined)
+    if (parsedSig?.success) {
+      await logReportRevision(tx, created, 'SIGN', { actorName: parsedSig.data.signerName }, { signerTitle: parsedSig.data.signerTitle || null })
+    }
+    return created
   })
 
   // 発注元への承認依頼メール
@@ -2504,31 +2565,291 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
     const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
     const approvalUrl = `${baseUrl}/api/security-reports/approve/${report.approvalToken}`
     const dateStr = new Date(reportDate).toLocaleDateString('ja-JP')
-    const subject = `【承認依頼】${dateStr} ${(report as any).site.name} 警備報告書`
+    const subject = `【承認依頼】${dateStr} ${report.site.name} ${template.title}`
     const html = `
 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
   <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0;font-size:18px">警備報告書 承認依頼</h2>
+    <h2 style="margin:0;font-size:18px">${escapeHtml(template.title)} 承認依頼</h2>
   </div>
   <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
     <p>担当者様</p>
-    <p>下記の警備報告書のご確認・承認をお願いします。</p>
+    <p>下記の${escapeHtml(template.title)}のご確認・承認をお願いします。</p>
     <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
       <p><strong>報告日:</strong> ${escapeHtml(dateStr)}</p>
-      <p><strong>現場:</strong> ${escapeHtml((report as any).site.name)}</p>
-      <p><strong>担当隊員:</strong> ${escapeHtml((report as any).guard.name)}</p>
+      <p><strong>現場:</strong> ${escapeHtml(report.site.name)}</p>
+      <p><strong>担当隊員:</strong> ${escapeHtml(report.guard.name)}</p>
     </div>
     <div style="text-align:center;margin:24px 0">
       <a href="${approvalUrl}" style="background:#27ae60;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">報告書を承認する</a>
     </div>
-    <p style="font-size:12px;color:#999">${(report as any).company.name} | GuardSync</p>
+    <p style="font-size:12px;color:#999">${escapeHtml(report.company.name)} | GuardSync</p>
   </div>
 </div>`
     await sendEmail(clientEmail, subject, html)
   }
 
-  const { approvalToken: _t, ...safe } = report as any
+  const { approvalToken: _t, company: _c, ...safe } = report
   res.status(201).json(safe)
+})
+
+// 報告書の修正（サイン・承認前のみ。サイン後の改変はサインの意味を失うため不可）
+app.put('/api/security-reports/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId: user.companyId },
+    include: { _count: { select: { photos: true } } },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: 'サイン・承認済みの報告書は修正できません' }); return }
+
+  const parsed = reportContentSchema.safeParse(req.body.content)
+  if (!parsed.success) { res.status(400).json({ error: '報告内容が不正です' }); return }
+  const template = await reportTemplateForSite(report.siteId, user.companyId)
+  const tplErrors = validateReportAgainstTemplate(parsed.data, template, report._count.photos)
+  if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
+
+  const newDate = req.body.reportDate ? new Date(req.body.reportDate) : report.reportDate
+  if (isNaN(newDate.getTime())) { res.status(400).json({ error: '報告日が不正です' }); return }
+  const fmt = (d: Date) => d.toISOString().slice(0, 10)
+  const changes = diffReportContent(
+    { ...(report.content as Record<string, unknown>), reportDate: fmt(report.reportDate) },
+    { ...parsed.data, reportDate: fmt(newDate) },
+  )
+  if (!changes.length) { res.json({ success: true, changed: 0 }); return }
+
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReport.update({ where: { id: report.id }, data: { content: parsed.data, reportDate: newDate } })
+    await logReportRevision(tx, report, 'UPDATE', actor, changes)
+  })
+  res.json({ success: true, changed: changes.length })
+})
+
+// 修正履歴
+app.get('/api/security-reports/:id/revisions', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const revisions = await prisma.securityReportRevision.findMany({
+    where: { reportId: req.params.id, companyId },
+    orderBy: { createdAt: 'asc' },
+  })
+  res.json(revisions)
+})
+
+// 現場写真の追加（サイン前のみ）
+app.post('/api/security-reports/:id/photos', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId: user.companyId },
+    include: { _count: { select: { photos: true } } },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: 'サイン・承認済みの報告書には写真を追加できません' }); return }
+  const parsed = z.array(photoInputSchema).min(1).safeParse(req.body.photos)
+  if (!parsed.success) { res.status(400).json({ error: '写真が不正です' }); return }
+  if (report._count.photos + parsed.data.length > MAX_PHOTOS_PER_REPORT) {
+    res.status(400).json({ error: `写真は1報告書あたり${MAX_PHOTOS_PER_REPORT}枚までです` }); return
+  }
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReportPhoto.createMany({ data: parsed.data.map(p => photoCreateData(p, report)) })
+    await logReportRevision(tx, report, 'PHOTO_ADD', actor, { count: parsed.data.length })
+  })
+  res.status(201).json({ success: true })
+})
+
+app.delete('/api/security-reports/:id/photos/:photoId', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({ where: { id: req.params.id, companyId: user.companyId } })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: 'サイン・承認済みの報告書の写真は削除できません' }); return }
+  const photo = await prisma.securityReportPhoto.findFirst({ where: { id: req.params.photoId, reportId: report.id }, select: { id: true, caption: true } })
+  if (!photo) { res.status(404).json({ error: '写真が見つかりません' }); return }
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReportPhoto.delete({ where: { id: photo.id } })
+    await logReportRevision(tx, report, 'PHOTO_DELETE', actor, { caption: photo.caption })
+  })
+  res.json({ success: true })
+})
+
+app.get('/api/security-reports/:id/photos/:photoId', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const photo = await prisma.securityReportPhoto.findFirst({ where: { id: req.params.photoId, reportId: req.params.id, companyId } })
+  if (!photo) { res.status(404).json({ error: '写真が見つかりません' }); return }
+  res.setHeader('Content-Type', photo.mimeType)
+  res.setHeader('Cache-Control', 'private, max-age=3600')
+  res.send(Buffer.from(photo.data))
+})
+
+// 現場監督のタッチサイン登録（隊員のスマートフォンから現場で取得）
+app.post('/api/security-reports/:id/sign', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = signatureInputSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { _count: { select: { photos: true } } },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: '既にサイン済みです' }); return }
+  // 帳票設定変更後でも、サイン時点で必須条件を満たしていることを保証する
+  const template = await reportTemplateForSite(report.siteId, companyId)
+  const content = reportContentSchema.safeParse(report.content)
+  const tplErrors = content.success ? validateReportAgainstTemplate(content.data, template, report._count.photos) : []
+  if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
+
+  const { signerName, signerTitle, signatureImage, lat, lng } = parsed.data
+  await prisma.$transaction(async tx => {
+    await tx.securityReport.update({
+      where: { id: report.id },
+      data: { signerName, signerTitle: signerTitle || null, signatureImage, signedAt: new Date(), signedLat: lat ?? null, signedLng: lng ?? null },
+    })
+    await logReportRevision(tx, report, 'SIGN', { actorName: signerName }, { signerTitle: signerTitle || null })
+  })
+  res.json({ success: true })
+})
+
+// ─────────────────────────────────────────────
+// 協力会社への共有（閲覧専用・期限付きリンク）
+// ─────────────────────────────────────────────
+
+app.get('/api/security-reports/:id/shares', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const shares = await prisma.securityReportShare.findMany({
+    where: { reportId: req.params.id, companyId },
+    include: { partner: { select: { id: true, name: true, email: true } } },
+    omit: { token: true },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(shares)
+})
+
+app.post('/api/security-reports/:id/shares', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const parsed = shareInputSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '共有先が不正です' }); return }
+  const [report, partner] = await Promise.all([
+    prisma.securityReport.findFirst({ where: { id: req.params.id, companyId: user.companyId }, include: { site: true, company: true } }),
+    prisma.partner.findFirst({ where: { id: parsed.data.partnerId, companyId: user.companyId, isActive: true } }),
+  ])
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (!partner) { res.status(400).json({ error: '協力会社が見つかりません' }); return }
+
+  const actor = await reportActor(user)
+  const expiresAt = new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1000)
+  const share = await prisma.$transaction(async tx => {
+    const s = await tx.securityReportShare.create({
+      data: { reportId: report.id, companyId: user.companyId, partnerId: partner.id, expiresAt, createdByName: actor.actorName },
+    })
+    await logReportRevision(tx, report, 'SHARE', actor, { partner: partner.name, expiresAt })
+    return s
+  })
+
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  const shareUrl = `${baseUrl}/shared/report/${share.token}`
+  let emailed = false
+  if (partner.email) {
+    const dateStr = report.reportDate.toLocaleDateString('ja-JP')
+    emailed = await sendEmail(partner.email, `【共有】${dateStr} ${report.site.name} 警備報告書`, `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <p>${escapeHtml(partner.contactName || partner.name)} 様</p>
+  <p>${escapeHtml(report.company.name)}より警備報告書が共有されました。下記リンクから閲覧できます（${escapeHtml(expiresAt.toLocaleDateString('ja-JP'))}まで有効）。</p>
+  <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
+    <p><strong>報告日:</strong> ${escapeHtml(dateStr)}</p>
+    <p><strong>現場:</strong> ${escapeHtml(report.site.name)}</p>
+  </div>
+  <p style="text-align:center"><a href="${shareUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold">報告書を閲覧する</a></p>
+  <p style="font-size:12px;color:#999">GuardSync</p>
+</div>`)
+  }
+  res.status(201).json({ id: share.id, shareUrl, expiresAt, emailed })
+})
+
+app.delete('/api/security-reports/:id/shares/:shareId', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const share = await prisma.securityReportShare.findFirst({
+    where: { id: req.params.shareId, reportId: req.params.id, companyId: user.companyId, revokedAt: null },
+    include: { partner: { select: { name: true } }, report: { select: { id: true, companyId: true } } },
+  })
+  if (!share) { res.status(404).json({ error: '共有が見つかりません' }); return }
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReportShare.update({ where: { id: share.id }, data: { revokedAt: new Date() } })
+    await logReportRevision(tx, share.report, 'SHARE_REVOKE', actor, { partner: share.partner.name })
+  })
+  res.json({ success: true })
+})
+
+async function findActiveShare(token: string) {
+  const share = await prisma.securityReportShare.findUnique({ where: { token } })
+  if (!share || share.revokedAt || share.expiresAt < new Date()) return null
+  return share
+}
+
+// 共有リンクからの閲覧（認証不要・閲覧のみ）
+app.get('/api/public/report-shares/:token', async (req, res) => {
+  const share = await findActiveShare(req.params.token)
+  if (!share) { res.status(404).json({ error: 'リンクが無効か、有効期限が切れています' }); return }
+  const report = await prisma.securityReport.findUnique({
+    where: { id: share.reportId },
+    select: {
+      reportDate: true, content: true, siteId: true, companyId: true,
+      signerName: true, signerTitle: true, signatureImage: true, signedAt: true, approvedAt: true, approvedBy: true,
+      guard: { select: { name: true } },
+      site: { select: { name: true, address: true, clientName: true, client: { select: { name: true } } } },
+      company: { select: { name: true } },
+      photos: { select: { id: true, caption: true }, orderBy: { createdAt: 'asc' } },
+    },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  await prisma.securityReportShare.update({ where: { id: share.id }, data: { viewCount: { increment: 1 }, lastViewedAt: new Date() } })
+  const { siteId, companyId, ...rest } = report
+  res.json({ ...rest, template: await reportTemplateForSite(siteId, companyId), expiresAt: share.expiresAt })
+})
+
+app.get('/api/public/report-shares/:token/photos/:photoId', async (req, res) => {
+  const share = await findActiveShare(req.params.token)
+  if (!share) { res.status(404).end(); return }
+  const photo = await prisma.securityReportPhoto.findFirst({ where: { id: req.params.photoId, reportId: share.reportId } })
+  if (!photo) { res.status(404).end(); return }
+  res.setHeader('Content-Type', photo.mimeType)
+  res.setHeader('Cache-Control', 'private, max-age=600')
+  res.send(Buffer.from(photo.data))
+})
+
+// ─────────────────────────────────────────────
+// 顧客別の帳票設定
+// ─────────────────────────────────────────────
+
+app.get('/api/clients/:id/report-template', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId }, select: { reportTemplate: true } })
+  if (!client) { res.status(404).json({ error: '顧客が見つかりません' }); return }
+  const parsed = reportTemplateSchema.safeParse(client.reportTemplate?.settings ?? {})
+  res.json({ settings: parsed.success ? parsed.data : DEFAULT_REPORT_TEMPLATE, isDefault: !client.reportTemplate })
+})
+
+app.put('/api/clients/:id/report-template', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId }, select: { id: true } })
+  if (!client) { res.status(404).json({ error: '顧客が見つかりません' }); return }
+  const parsed = reportTemplateSchema.safeParse(req.body.settings)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '帳票設定が不正です' }); return }
+  for (const f of parsed.data.customFields) {
+    if (f.type === 'select' && f.options.length === 0) { res.status(400).json({ error: `「${f.label}」の選択肢を入力してください` }); return }
+  }
+  const saved = await prisma.securityReportTemplate.upsert({
+    where: { clientId: client.id },
+    create: { companyId, clientId: client.id, settings: parsed.data },
+    update: { settings: parsed.data },
+  })
+  res.json({ settings: saved.settings, isDefault: false })
+})
+
+// 現場に適用される帳票設定（隊員アプリ・作成フォーム用）
+app.get('/api/sites/:id/report-template', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  res.json(await reportTemplateForSite(req.params.id, companyId))
 })
 
 // メールリンクによる承認（認証不要）
@@ -2538,9 +2859,10 @@ app.post('/api/security-reports/approve/:token', async (req, res) => {
   if (report.approvedAt) { res.status(409).json({ error: '既に承認済みです' }); return }
 
   const { approvedBy } = req.body
-  await prisma.securityReport.update({
-    where: { id: report.id },
-    data: { approvedAt: new Date(), approvedBy: approvedBy || '承認者' },
+  const name = typeof approvedBy === 'string' && approvedBy.trim() ? approvedBy.trim().slice(0, 50) : '承認者'
+  await prisma.$transaction(async tx => {
+    await tx.securityReport.update({ where: { id: report.id }, data: { approvedAt: new Date(), approvedBy: name } })
+    await logReportRevision(tx, report, 'APPROVE', { actorName: name })
   })
   res.json({ success: true, message: '警備報告書が承認されました' })
 })

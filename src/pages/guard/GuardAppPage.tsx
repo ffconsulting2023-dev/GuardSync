@@ -9,16 +9,15 @@ import { useAuth } from '../../hooks/useAuth'
 import { format, addMonths, subMonths } from 'date-fns'
 import { ja } from 'date-fns/locale'
 import SignaturePad from '../../components/SignaturePad'
-import { REPORT_WEATHER, REPORT_PATROL_RESULT, REPORT_STATUS, reportStatus } from '../../../shared/securityReport'
+import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent } from '../../components/report/ReportContentForm'
+import {
+  REPORT_STATUS, reportStatus, DEFAULT_REPORT_TEMPLATE, validateReportAgainstTemplate,
+  type PhotoInput, type ReportTemplate,
+} from '../../../shared/securityReport'
 
 type Tab = 'today' | 'schedule' | 'attendance' | 'reports'
 
-const EMPTY_REPORT = {
-  guardId: '', siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd'),
-  weather: '晴れ' as string, workStart: '', workEnd: '', breakMinutes: 0,
-  hasIncident: false, incidents: '', specialNotes: '',
-}
-const EMPTY_PATROL = { time: '', location: '', result: 'NORMAL' as 'NORMAL' | 'ABNORMAL', note: '' }
+const EMPTY_REPORT = { siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd') }
 
 export default function GuardAppPage() {
   const { user, logout } = useAuth()
@@ -26,7 +25,9 @@ export default function GuardAppPage() {
   const [viewMonth, setViewMonth] = useState(new Date())
   const [reportForm, setReportForm] = useState(EMPTY_REPORT)
   const [showReportForm, setShowReportForm] = useState(false)
-  const [patrols, setPatrols] = useState([EMPTY_PATROL])
+  const [reportContent, setReportContent] = useState(EMPTY_REPORT_CONTENT)
+  const [reportPhotos, setReportPhotos] = useState<PhotoInput[]>([])
+  const [reportError, setReportError] = useState('')
   const [signTarget, setSignTarget] = useState<string | null>(null) // サイン対象の既存報告書ID
   const [signDraft, setSignDraft] = useState<any>(null)            // 提出時に取得したサイン
   const [showPad, setShowPad] = useState(false)
@@ -75,6 +76,13 @@ export default function GuardAppPage() {
     enabled: tab === 'reports',
   })
 
+  // 現場の発注元ごとの帳票設定
+  const { data: reportTemplate = DEFAULT_REPORT_TEMPLATE } = useQuery<ReportTemplate>({
+    queryKey: ['site-report-template', reportForm.siteId],
+    queryFn: () => api.get(`/sites/${reportForm.siteId}/report-template`).then(r => r.data),
+    enabled: showReportForm && !!reportForm.siteId,
+  })
+
   const signMutation = useMutation({
     mutationFn: (v: any) => api.post(`/security-reports/${signTarget}/sign`, v),
     onSuccess: () => {
@@ -90,9 +98,11 @@ export default function GuardAppPage() {
       qc.invalidateQueries({ queryKey: ['guard-reports'] })
       setShowReportForm(false)
       setReportForm(EMPTY_REPORT)
-      setPatrols([EMPTY_PATROL])
+      setReportContent(EMPTY_REPORT_CONTENT)
+      setReportPhotos([])
       setSignDraft(null)
     },
+    onError: (e: any) => setReportError(e.response?.data?.error || '提出に失敗しました。通信状況をご確認ください。'),
   })
 
   const TAB_ITEMS = [
@@ -364,7 +374,8 @@ export default function GuardAppPage() {
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-gray-800">警備報告書</h2>
               <button onClick={() => {
-                setReportForm({ ...EMPTY_REPORT, guardId: user?.id || '' })
+                setReportForm(EMPTY_REPORT)
+                setReportError('')
                 setShowReportForm(true)
               }} className="btn-primary text-sm">+ 提出</button>
             </div>
@@ -382,7 +393,7 @@ export default function GuardAppPage() {
                       <div>
                         <p className="font-medium text-gray-800">{rep.site?.name}</p>
                         {(rep.site?.client?.name || rep.site?.clientName) && <p className="text-xs text-gray-500">{rep.site?.client?.name || rep.site?.clientName}</p>}
-                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.content?.weather}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.content?.weather}{rep._count?.photos ? ` / 📷${rep._count.photos}` : ''}</p>
                       </div>
                       <span className={`badge ${rep.approvedAt || rep.signedAt ? 'badge-success' : 'badge-warning'}`}>
                         {REPORT_STATUS[reportStatus(rep)]}
@@ -402,21 +413,18 @@ export default function GuardAppPage() {
             {showReportForm && (
               <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
                 <div className="sticky top-0 bg-white px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-                  <h3 className="font-semibold text-gray-800">警備報告書 提出</h3>
+                  <h3 className="font-semibold text-gray-800">{reportTemplate.title} 提出</h3>
                   <button onClick={() => setShowReportForm(false)} className="text-gray-400">✕</button>
                 </div>
                 <form onSubmit={e => {
                   e.preventDefault()
-                  const { guardId, siteId, reportDate, ...c } = reportForm
+                  const content = toSubmitContent(reportContent, reportTemplate)
+                  const errors = validateReportAgainstTemplate(content, reportTemplate, reportPhotos.length)
+                  if (errors.length) { setReportError(errors.join(' / ')); return }
+                  setReportError('')
                   submitReportMutation.mutate({
-                    guardId, siteId, reportDate,
-                    content: {
-                      ...c,
-                      workStart: c.workStart || undefined,
-                      workEnd: c.workEnd || undefined,
-                      hasIncident: c.hasIncident,
-                      patrolRecords: patrols.filter(p => p.time && p.location),
-                    },
+                    guardId: user?.id, siteId: reportForm.siteId, reportDate: reportForm.reportDate,
+                    content, photos: reportPhotos,
                     ...(signDraft ? { signature: signDraft } : {}),
                   })
                 }} className="p-4 space-y-4">
@@ -424,9 +432,10 @@ export default function GuardAppPage() {
                     <label className="form-label">現場 *</label>
                     <select value={reportForm.siteId} onChange={e => {
                       const siteId = e.target.value
+                      setReportForm(f => ({ ...f, siteId }))
                       // 勤務実績（本日の配員）から実働時間を初期入力
                       const sch = reportForm.reportDate === today ? todaySchedules.find((x: any) => x.siteId === siteId) : null
-                      setReportForm(f => ({ ...f, siteId, workStart: sch?.startTime ?? f.workStart, workEnd: sch?.endTime ?? f.workEnd }))
+                      if (sch) setReportContent(c => ({ ...c, workStart: sch.startTime, workEnd: sch.endTime }))
                     }} className="form-input" required>
                       <option value="">選択してください</option>
                       {mySites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -436,61 +445,13 @@ export default function GuardAppPage() {
                     <label className="form-label">日付 *</label>
                     <input type="date" value={reportForm.reportDate} onChange={e => setReportForm(f => ({ ...f, reportDate: e.target.value }))} className="form-input" required />
                   </div>
-                  <div>
-                    <label className="form-label">天候</label>
-                    <select value={reportForm.weather} onChange={e => setReportForm(f => ({ ...f, weather: e.target.value }))} className="form-input">
-                      {REPORT_WEATHER.map(w => <option key={w} value={w}>{w}</option>)}
-                    </select>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div><label className="form-label">開始</label><input type="time" value={reportForm.workStart} onChange={e => setReportForm(f => ({ ...f, workStart: e.target.value }))} className="form-input" /></div>
-                    <div><label className="form-label">終了</label><input type="time" value={reportForm.workEnd} onChange={e => setReportForm(f => ({ ...f, workEnd: e.target.value }))} className="form-input" /></div>
-                    <div><label className="form-label">休憩(分)</label><input type="number" min={0} max={480} value={reportForm.breakMinutes} onChange={e => setReportForm(f => ({ ...f, breakMinutes: Math.max(0, Number(e.target.value) || 0) }))} className="form-input" /></div>
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="form-label mb-0">巡回記録</label>
-                      <button type="button" onClick={() => setPatrols(p => [...p, EMPTY_PATROL])} className="text-blue-600 text-xs">+ 行追加</button>
-                    </div>
-                    <div className="space-y-2">
-                      {patrols.map((p, i) => (
-                        <div key={i} className="border border-gray-200 rounded-lg p-2 space-y-2">
-                          <div className="grid grid-cols-2 gap-2">
-                            <input type="time" value={p.time} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, time: e.target.value } : x))} className="form-input" />
-                            <select value={p.result} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, result: e.target.value as 'NORMAL' | 'ABNORMAL' } : x))} className="form-input">
-                              {Object.entries(REPORT_PATROL_RESULT).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-                            </select>
-                          </div>
-                          <input value={p.location} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, location: e.target.value } : x))} className="form-input" placeholder="巡回場所" />
-                          <input value={p.note} onChange={e => setPatrols(a => a.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} className="form-input" placeholder="備考" />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <label className="flex items-center gap-2 text-sm text-gray-700">
-                    <input type="checkbox" checked={reportForm.hasIncident} onChange={e => setReportForm(f => ({ ...f, hasIncident: e.target.checked }))} />
-                    異常・インシデントあり
-                  </label>
-                  <div>
-                    <label className="form-label">異常・インシデントの内容と対応</label>
-                    <textarea
-                      value={reportForm.incidents}
-                      onChange={e => setReportForm(f => ({ ...f, incidents: e.target.value }))}
-                      className="form-input"
-                      rows={4}
-                      placeholder="異常なし、または発生した事象を記載"
-                    />
-                  </div>
-                  <div>
-                    <label className="form-label">その他連絡事項</label>
-                    <textarea
-                      value={reportForm.specialNotes}
-                      onChange={e => setReportForm(f => ({ ...f, specialNotes: e.target.value }))}
-                      className="form-input"
-                      rows={3}
-                      placeholder="引き継ぎ事項等"
-                    />
-                  </div>
+                  <ReportContentForm
+                    value={reportContent}
+                    onChange={setReportContent}
+                    template={reportTemplate}
+                    photos={reportPhotos}
+                    onPhotosChange={setReportPhotos}
+                  />
                   <div className="border border-gray-200 rounded-lg p-3">
                     <p className="form-label">現場監督サイン</p>
                     {signDraft ? (
@@ -504,6 +465,7 @@ export default function GuardAppPage() {
                     )}
                     <p className="text-xs text-gray-400 mt-1">提出後に一覧から後でもらうこともできます。</p>
                   </div>
+                  {reportError && <p className="text-sm text-red-600">{reportError}</p>}
                   <div className="flex gap-3 pb-8">
                     <button type="button" onClick={() => setShowReportForm(false)} className="btn-secondary flex-1">キャンセル</button>
                     <button type="submit" disabled={submitReportMutation.isPending} className="btn-primary flex-1 disabled:opacity-50">
@@ -517,7 +479,7 @@ export default function GuardAppPage() {
             {showPad && (
               <SignaturePad
                 submitting={signMutation.isPending}
-                error={signMutation.isError ? 'サインの送信に失敗しました。通信状況をご確認ください。' : undefined}
+                error={signMutation.isError ? ((signMutation.error as any)?.response?.data?.error || 'サインの送信に失敗しました。通信状況をご確認ください。') : undefined}
                 onCancel={() => { setShowPad(false); setSignTarget(null) }}
                 onSubmit={v => {
                   if (signTarget) signMutation.mutate(v)
