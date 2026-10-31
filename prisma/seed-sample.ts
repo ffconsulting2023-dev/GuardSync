@@ -1,10 +1,17 @@
 import { PrismaClient } from '@prisma/client'
 
 const prisma = new PrismaClient()
-const COMPANY_ID = '52af056f-31df-4d6e-976e-62fe7f475317' // 株式会社デモ警備
+// 対象会社: 環境変数 SAMPLE_COMPANY_ID → 既定ID（本番のデモ会社）→ 会社コード DEMO001（seed.ts が作るデモ会社）の順で探す
+// ※ 対象会社の既存データを削除してから投入するため、本番では実行しないこと
+const DEFAULT_COMPANY_ID = '52af056f-31df-4d6e-976e-62fe7f475317' // 株式会社デモ警備
+let COMPANY_ID = process.env.SAMPLE_COMPANY_ID || DEFAULT_COMPANY_ID
 
 async function main() {
-  console.log('サンプルデータ投入開始...')
+  const target = (await prisma.company.findUnique({ where: { id: COMPANY_ID } }))
+    ?? (await prisma.company.findUnique({ where: { code: 'DEMO001' } }))
+  if (!target) throw new Error('サンプル投入先の会社が見つかりません。先に npm run db:seed を実行してください。')
+  COMPANY_ID = target.id
+  console.log(`サンプルデータ投入開始...（対象: ${target.name}）`)
 
   // ─── 既存データのクリーンアップ（関連テーブルの順序に注意）───
   console.log('  既存データをクリーンアップ中...')
@@ -275,7 +282,10 @@ async function main() {
   console.log(`  相性設定: ${compatData.length}件作成`)
 
   // ─── 契約（Contract）───
-  const USER_ID = '872bf72f-bae8-42d6-bfb6-30f48baca455'
+  // 作成者: 既定ID（本番のデモ管理者）が無い環境では対象会社の管理者を使う
+  const USER_ID = (await prisma.user.findFirst({ where: { id: '872bf72f-bae8-42d6-bfb6-30f48baca455', companyId: COMPANY_ID } }))?.id
+    ?? (await prisma.user.findFirst({ where: { companyId: COMPANY_ID, role: 'ADMIN' }, orderBy: { createdAt: 'asc' } }))?.id
+  if (!USER_ID) throw new Error('契約の作成者にする管理者ユーザーが対象会社にいません')
   const contractsData = [
     { siteIdx: 0, clientName: '大成建設株式会社', unitPrice: 13000, guardCount: 4, num: 'CT-2026-001' },
     { siteIdx: 1, clientName: '大成建設株式会社', unitPrice: 12500, guardCount: 3, num: 'CT-2026-002' },

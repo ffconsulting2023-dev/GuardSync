@@ -15,7 +15,11 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "db:seed": "ts-node prisma/seed.ts",
+    "db:seed": "ts-node --project tsconfig.server.json prisma/seed.ts",
+    "db:seed:sample": "ts-node --project tsconfig.server.json prisma/seed-sample.ts",
+    "db:up": "docker compose -f docker-compose.dev.yml up -d --wait",
+    "db:down": "docker compose -f docker-compose.dev.yml down",
+    "setup": "bash scripts/setup-local.sh",
     "postinstall": "prisma generate"
   },
   "dependencies": {
