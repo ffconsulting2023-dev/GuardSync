@@ -4,7 +4,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
-import { CATEGORIES, EMPTY_CLIENT_FORM } from './ClientsPage'
+import { EMPTY_CLIENT_FORM } from './ClientsPage'
+import { CLIENT_CATEGORY } from '../lib/constants'
+import ReportTemplateEditor from '../components/report/ReportTemplateEditor'
 
 const LOG_TYPES: Record<string, { label: string; icon: string }> = {
   NOTE:    { label: 'メモ',   icon: '📝' },
@@ -19,7 +21,7 @@ const DOC_LABELS: Record<string, string> = {
   securityLog: '警備日誌', securityCommission: '警備委託', other: 'その他',
 }
 
-type TabKey = 'basic' | 'contacts' | 'accounting' | 'history'
+type TabKey = 'basic' | 'contacts' | 'accounting' | 'history' | 'reportTemplate'
 
 function clientToForm(c: any) {
   const base = { ...EMPTY_CLIENT_FORM }
@@ -110,7 +112,7 @@ export default function ClientDetailPage() {
   }
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
-  const cat = CATEGORIES[form.category] || CATEGORIES.OTHER
+  const cat = CLIENT_CATEGORY[form.category] || CLIENT_CATEGORY.OTHER
 
   if (!isNew && isLoading) return <div className="flex items-center justify-center h-full text-gray-400">読み込み中...</div>
 
@@ -178,6 +180,7 @@ export default function ClientDetailPage() {
               { key: 'contacts',    label: `担当者（${client?.subContacts?.filter((c: any) => c.name)?.length ?? 0}）` },
               { key: 'accounting',  label: '経理情報' },
               { key: 'history',     label: `取引履歴（${client?._count?.sites ?? 0}件）` },
+              { key: 'reportTemplate', label: '報告書帳票' },
             ] as { key: TabKey; label: string }[]).map(t => (
               <button
                 key={t.key}
@@ -270,7 +273,7 @@ export default function ClientDetailPage() {
                       <div>
                         <FormField label="区分" edit={editMode}>
                           <select value={form.category} onChange={e => setForm((f: any) => ({ ...f, category: e.target.value }))} className="form-input">
-                            {Object.entries(CATEGORIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                            {Object.entries(CLIENT_CATEGORY).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                           </select>
                           <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${cat.color}`}>{cat.label}</span>
                         </FormField>
@@ -536,6 +539,10 @@ export default function ClientDetailPage() {
                     </FormField>
                   </Section>
                 </>
+              )}
+
+              {!isNew && tab === 'reportTemplate' && id && (
+                <ReportTemplateEditor clientId={id} canEdit={hasRole(user, 'ADMIN', 'MANAGER')} />
               )}
 
               {!isNew && tab === 'history' && (

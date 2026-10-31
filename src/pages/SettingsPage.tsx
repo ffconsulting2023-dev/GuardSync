@@ -2,7 +2,9 @@ import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
-import { hasRole } from '../lib/auth'
+import { hasRole, canIssueAccounts } from '../lib/auth'
+import AccountManager from '../components/AccountManager'
+import { USER_ROLES } from '../lib/constants'
 
 export default function SettingsPage() {
   const { user } = useAuth()
@@ -16,8 +18,6 @@ export default function SettingsPage() {
 
   const [lwForm, setLwForm] = useState({ botId: '', botSecret: '', channelId: '' })
   const [testUserId, setTestUserId] = useState('')
-  const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteResult, setInviteResult] = useState<any>(null)
 
   React.useEffect(() => {
     if (lwSettings) setLwForm({ botId: lwSettings.botId || '', botSecret: '', channelId: lwSettings.channelId || '' })
@@ -32,18 +32,14 @@ export default function SettingsPage() {
     mutationFn: (userId: string) => api.post('/settings/line-works/test', { testUserId: userId }),
   })
 
-  const inviteMutation = useMutation({
-    mutationFn: (email: string) => api.post('/auth/invite', { email }),
-    onSuccess: (res) => { setInviteResult(res.data); setInviteEmail('') },
-  })
-
   const { data: users = [] } = useQuery({
     queryKey: ['users'],
     queryFn: () => api.get('/settings/users').then(r => r.data),
-    enabled: tab === 'users',
+    enabled: tab === 'users' && !canIssueAccounts(user) && hasRole(user, 'MANAGER'),
   })
 
   const canAdmin = hasRole(user, 'ADMIN')
+  const issuer = canIssueAccounts(user)
 
   return (
     <div className="p-4 md:p-6 space-y-4">
@@ -54,7 +50,7 @@ export default function SettingsPage() {
         {[
           { key: 'lineworks', label: 'LINE Works' },
           { key: 'company', label: '会社情報' },
-          { key: 'users', label: 'ユーザー管理' },
+          { key: 'users', label: canIssueAccounts(user) ? 'ユーザー・ID発行' : 'ユーザー管理' },
         ].map(t => (
           <button
             key={t.key}
@@ -175,41 +171,11 @@ export default function SettingsPage() {
       {/* ユーザー管理 */}
       {tab === 'users' && (
         <div className="space-y-4">
-          {/* 招待 */}
-          {canAdmin && (
-            <div className="card space-y-3">
-              <h3 className="font-semibold text-gray-800">ユーザー招待</h3>
-              <div className="flex gap-2">
-                <input
-                  type="email"
-                  value={inviteEmail}
-                  onChange={e => setInviteEmail(e.target.value)}
-                  placeholder="招待するメールアドレス"
-                  className="form-input flex-1"
-                />
-                <button
-                  onClick={() => {
-                    if (!inviteEmail) { alert('メールアドレスを入力してください'); return }
-                    inviteMutation.mutate(inviteEmail)
-                  }}
-                  disabled={inviteMutation.isPending}
-                  className="btn-primary disabled:opacity-50 whitespace-nowrap"
-                >
-                  招待
-                </button>
-              </div>
-              {inviteResult && (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm">
-                  <p className="text-green-800 font-medium">招待リンク生成完了</p>
-                  <p className="text-green-600 mt-1 break-all text-xs">{window.location.origin}/register?token={inviteResult.token}</p>
-                  <p className="text-xs text-green-500 mt-1">7日間有効</p>
-                </div>
-              )}
-            </div>
-          )}
+          {/* ログインID発行（ADMIN と ID発行権限を付与されたユーザー） */}
+          {issuer && <AccountManager />}
 
-          {/* ユーザー一覧 */}
-          <div className="card overflow-x-auto p-0">
+          {/* ユーザー一覧（ID発行権限が無いマネージャー向けの閲覧のみ） */}
+          {!issuer && <div className="card overflow-x-auto p-0">
             <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
               <h3 className="font-semibold text-gray-800">ユーザー一覧</h3>
             </div>
@@ -227,7 +193,7 @@ export default function SettingsPage() {
                   <tr key={u.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-800">{u.name}</td>
                     <td className="px-4 py-3 text-gray-600 text-xs">{u.email}</td>
-                    <td className="px-4 py-3"><span className="badge badge-info">{u.role}</span></td>
+                    <td className="px-4 py-3"><span className="badge badge-info">{USER_ROLES[u.role] ?? u.role}</span></td>
                     <td className="px-4 py-3 text-xs text-gray-400 hidden md:table-cell">
                       {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleDateString('ja-JP') : '—'}
                     </td>
@@ -235,7 +201,7 @@ export default function SettingsPage() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </div>}
         </div>
       )}
     </div>
