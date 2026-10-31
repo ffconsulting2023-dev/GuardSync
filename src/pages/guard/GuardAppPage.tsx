@@ -11,13 +11,13 @@ import { ja } from 'date-fns/locale'
 import SignaturePad from '../../components/SignaturePad'
 import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent } from '../../components/report/ReportContentForm'
 import {
-  REPORT_STATUS, reportStatus, DEFAULT_REPORT_TEMPLATE, validateReportAgainstTemplate,
+  REPORT_STATUS, reportStatus, DEFAULT_REPORT_TEMPLATE, validateReportAgainstTemplate, PROXY_SUBMISSION_LABEL,
   type PhotoInput, type ReportTemplate,
 } from '../../../shared/securityReport'
 
 type Tab = 'today' | 'schedule' | 'attendance' | 'reports'
 
-const EMPTY_REPORT = { siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd') }
+const EMPTY_REPORT = { guardId: '', siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd'), submissionNote: '' }
 
 export default function GuardAppPage() {
   const { user, logout } = useAuth()
@@ -33,22 +33,30 @@ export default function GuardAppPage() {
   const [showPad, setShowPad] = useState(false)
   const qc = useQueryClient()
 
+  // ログインユーザーに紐付く隊員（User.id と Guard.id は別物のため、サーバーで同一ID→メールアドレスの順に突き合わせる）
+  const { data: me, isLoading: meLoading } = useQuery<{ guard: { id: string; name: string } | null }>({
+    queryKey: ['guard-app-me', user?.id],
+    queryFn: () => api.get('/guard-app/me').then(r => r.data),
+    enabled: !!user?.id,
+  })
+  const myGuardId = me?.guard?.id
+
   // 今日のシフト
   const today = format(new Date(), 'yyyy-MM-dd')
   const { data: todaySchedules = [] } = useQuery({
-    queryKey: ['guard-today', user?.id, today],
-    queryFn: () => api.get(`/guards/${user?.id}/schedule?year=${new Date().getFullYear()}&month=${new Date().getMonth() + 1}`).then(r =>
+    queryKey: ['guard-today', myGuardId, today],
+    queryFn: () => api.get(`/guards/${myGuardId}/schedule?year=${new Date().getFullYear()}&month=${new Date().getMonth() + 1}`).then(r =>
       r.data.schedules.filter((s: any) => s.date.split('T')[0] === today)
     ),
-    enabled: !!user?.id,
+    enabled: !!myGuardId,
     refetchInterval: 30000,
   })
 
   // 月間スケジュール
   const { data: monthData } = useQuery({
-    queryKey: ['guard-schedule', user?.id, format(viewMonth, 'yyyy-MM')],
-    queryFn: () => api.get(`/guards/${user?.id}/schedule?year=${viewMonth.getFullYear()}&month=${viewMonth.getMonth() + 1}`).then(r => r.data),
-    enabled: !!user?.id && tab === 'schedule',
+    queryKey: ['guard-schedule', myGuardId, format(viewMonth, 'yyyy-MM')],
+    queryFn: () => api.get(`/guards/${myGuardId}/schedule?year=${viewMonth.getFullYear()}&month=${viewMonth.getMonth() + 1}`).then(r => r.data),
+    enabled: !!myGuardId && tab === 'schedule',
   })
 
   // 出退勤打刻
@@ -65,9 +73,17 @@ export default function GuardAppPage() {
   // 報告書取得
   const { data: myReports = [] } = useQuery({
     queryKey: ['guard-reports', user?.id],
-    queryFn: () => api.get(`/security-reports?guardId=${user?.id}`).then(r => r.data),
+    queryFn: () => api.get('/security-reports?mine=1').then(r => r.data),
     enabled: !!user?.id && tab === 'reports',
   })
+
+  // 隊員一覧（報告対象の隊員を選ぶため。紐付けが無い・他の隊員の分を提出する場合に使う）
+  const { data: activeGuards = [] } = useQuery({
+    queryKey: ['guards-active'],
+    queryFn: () => api.get('/guards?isActive=true').then(r => r.data),
+    enabled: showReportForm,
+  })
+  const isProxy = !!reportForm.guardId && reportForm.guardId !== myGuardId
 
   // 現場取得（報告書用）
   const { data: mySites = [] } = useQuery({
@@ -158,6 +174,13 @@ export default function GuardAppPage() {
               <h2 className="text-xl font-bold text-gray-800">今日の出動</h2>
             </div>
 
+            {!meLoading && !myGuardId && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                このアカウントは隊員登録と紐付いていないため、シフト・出退勤を表示できません。
+                管理者に、隊員情報のメールアドレスをログイン用メールアドレス（{user?.email}）と同じにするよう依頼してください。
+                報告書は隊員を選んで提出できます（提出者として記録されます）。
+              </div>
+            )}
             {todaySchedules.length === 0 ? (
               <div className="card text-center py-12">
                 <p className="text-4xl mb-3">😊</p>
@@ -374,7 +397,7 @@ export default function GuardAppPage() {
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-gray-800">警備報告書</h2>
               <button onClick={() => {
-                setReportForm(EMPTY_REPORT)
+                setReportForm({ ...EMPTY_REPORT, guardId: myGuardId ?? '' })
                 setReportError('')
                 setShowReportForm(true)
               }} className="btn-primary text-sm">+ 提出</button>
@@ -392,6 +415,8 @@ export default function GuardAppPage() {
                     <div className="flex items-start justify-between">
                       <div>
                         <p className="font-medium text-gray-800">{rep.site?.name}</p>
+                        {rep.guardId !== myGuardId && <p className="text-xs text-gray-600">隊員: {rep.guard?.name}</p>}
+                        {rep.submittedAsProxy && <p className="text-xs text-amber-700">{PROXY_SUBMISSION_LABEL}（提出者: {rep.submittedByName}）</p>}
                         {(rep.site?.client?.name || rep.site?.clientName) && <p className="text-xs text-gray-500">{rep.site?.client?.name || rep.site?.clientName}</p>}
                         <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.content?.weather}{rep._count?.photos ? ` / 📷${rep._count.photos}` : ''}</p>
                       </div>
@@ -423,11 +448,34 @@ export default function GuardAppPage() {
                   if (errors.length) { setReportError(errors.join(' / ')); return }
                   setReportError('')
                   submitReportMutation.mutate({
-                    guardId: user?.id, siteId: reportForm.siteId, reportDate: reportForm.reportDate,
+                    guardId: reportForm.guardId, siteId: reportForm.siteId, reportDate: reportForm.reportDate,
                     content, photos: reportPhotos,
+                    ...(isProxy ? { submissionNote: reportForm.submissionNote } : {}),
                     ...(signDraft ? { signature: signDraft } : {}),
                   })
                 }} className="p-4 space-y-4">
+                  <div>
+                    <label className="form-label">隊員 *</label>
+                    <select value={reportForm.guardId} onChange={e => setReportForm(f => ({ ...f, guardId: e.target.value }))} className="form-input" required>
+                      <option value="">選択してください</option>
+                      {activeGuards.map((g: any) => <option key={g.id} value={g.id}>{g.name}{g.id === myGuardId ? '（自分）' : ''}</option>)}
+                    </select>
+                  </div>
+                  {isProxy && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                      <p className="text-xs text-amber-800">
+                        {myGuardId
+                          ? `ログイン中の隊員（${me?.guard?.name}）とは別の隊員の報告書です。`
+                          : 'このアカウントは隊員登録と紐付いていません。'}
+                        「{PROXY_SUBMISSION_LABEL}」として、提出者（{user?.name}）と備考が履歴に記録されます。
+                      </p>
+                      <div>
+                        <label className="form-label">備考（提出理由）</label>
+                        <textarea value={reportForm.submissionNote} onChange={e => setReportForm(f => ({ ...f, submissionNote: e.target.value }))}
+                          className="form-input" rows={2} maxLength={300} placeholder="例: 本人の端末故障のため班長が代理で提出" />
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <label className="form-label">現場 *</label>
                     <select value={reportForm.siteId} onChange={e => {

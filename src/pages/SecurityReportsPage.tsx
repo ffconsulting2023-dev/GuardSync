@@ -9,13 +9,13 @@ import ReportView from '../components/report/ReportView'
 import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent, fromSavedContent } from '../components/report/ReportContentForm'
 import {
   REPORT_STATUS, REPORT_REVISION_ACTION, REPORT_FIELD_LABEL, MAX_PHOTOS_PER_REPORT, DEFAULT_REPORT_TEMPLATE,
-  reportStatus, validateReportAgainstTemplate,
+  reportStatus, validateReportAgainstTemplate, PROXY_SUBMISSION_LABEL,
   type PhotoInput, type ReportTemplate, type ReportRevisionAction,
 } from '../../shared/securityReport'
 import { resizeImageFile, getCurrentLocation } from '../lib/image'
 
 const EMPTY_FORM = {
-  guardId: '', siteId: '', clientEmail: '',
+  guardId: '', siteId: '', clientEmail: '', submissionNote: '',
   reportDate: format(new Date(), 'yyyy-MM-dd'),
 }
 const EDIT_ROLES = ['ADMIN', 'MANAGER', 'OPERATOR']
@@ -49,6 +49,9 @@ function RevisionList({ reportId }: { reportId: string }) {
                 <li key={c.field}>{REPORT_FIELD_LABEL[c.field] ?? c.field}: {formatChangeValue(c.before)} → {formatChangeValue(c.after)}</li>
               ))}
             </ul>
+          )}
+          {r.action === 'CREATE' && r.changes?.proxy && (
+            <p className="text-amber-700">{PROXY_SUBMISSION_LABEL}（隊員: {r.changes.guard}）{r.changes.note ? ` 備考: ${r.changes.note}` : ''}</p>
           )}
           {(r.action === 'SHARE' || r.action === 'SHARE_REVOKE') && r.changes?.partner && <p className="text-gray-500">{r.changes.partner}</p>}
         </li>
@@ -281,6 +284,7 @@ export default function SecurityReportsPage() {
                       {format(new Date(r.reportDate), 'yyyy年M月d日')}
                       {r._count?.photos ? ` / 📷${r._count.photos}` : ''}
                       {r.content?.hasIncident ? ' / ⚠️ 異常あり' : ''}
+                      {r.submittedAsProxy ? ` / 📝 代理提出（${r.submittedByName}）` : ''}
                     </p>
                   </div>
                   <span className={`badge flex-shrink-0 ${r.approvedAt || r.signedAt ? 'badge-success' : 'badge-warning'}`}>
@@ -390,6 +394,11 @@ export default function SecurityReportsPage() {
 
               <ReportContentForm value={content} onChange={setContent} template={formTemplate} photos={photos} onPhotosChange={setPhotos} />
 
+              <div>
+                <label className="form-label">備考（任意・隊員本人以外が作成する理由など）</label>
+                <input value={form.submissionNote} onChange={e => setForm(f => ({ ...f, submissionNote: e.target.value }))} className="form-input" maxLength={300} placeholder="例: 隊員から電話で聴取し管制が代理入力" />
+                <p className="text-xs text-gray-400 mt-1">隊員本人以外のアカウントで作成すると「{PROXY_SUBMISSION_LABEL}」として作成者と備考が履歴に残ります。</p>
+              </div>
               <div>
                 <label className="form-label">発注元へ承認依頼メールを送る（任意）</label>
                 <input type="email" value={form.clientEmail} onChange={e => setForm(f => ({ ...f, clientEmail: e.target.value }))} className="form-input" placeholder="client@example.com" />

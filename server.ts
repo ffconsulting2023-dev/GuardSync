@@ -18,6 +18,7 @@ import {
   reportContentSchema, signatureInputSchema, photoInputSchema, shareInputSchema, reportTemplateSchema,
   validateReportAgainstTemplate, decodePhotoDataUrl, DEFAULT_REPORT_TEMPLATE, MAX_PHOTOS_PER_REPORT, REPORT_FIELD_LABEL,
   type ReportTemplate, type ReportRevisionAction, type PhotoInput,
+  submissionNoteSchema, PROXY_SUBMISSION_DEFAULT_NOTE,
 } from './shared/securityReport'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
@@ -2471,16 +2472,44 @@ function photoCreateData(p: PhotoInput, report: { id: string; companyId: string 
   }
 }
 
+// ログインユーザーに対応する隊員（User と Guard は別テーブルのため、同一ID → 同一メールアドレスの順で突き合わせる）
+async function linkedGuardForUser(user: JwtPayload): Promise<{ id: string; name: string } | null> {
+  const byId = await prisma.guard.findFirst({ where: { id: user.userId, companyId: user.companyId }, select: { id: true, name: true } })
+  if (byId) return byId
+  const u = await prisma.user.findUnique({ where: { id: user.userId }, select: { email: true } })
+  if (!u?.email) return null
+  const byEmail = await prisma.guard.findMany({
+    where: { companyId: user.companyId, isActive: true, email: { equals: u.email, mode: 'insensitive' } },
+    select: { id: true, name: true },
+    take: 2,
+  })
+  return byEmail.length === 1 ? byEmail[0] : null // 同じメールの隊員が複数いる場合は特定できないため紐付けない
+}
+
+// 隊員アプリ：ログイン中のユーザーに紐付く隊員
+app.get('/api/guard-app/me', authenticate, async (req, res) => {
+  res.json({ guard: await linkedGuardForUser((req as any).user as JwtPayload) })
+})
+
 const photoMetaSelect = { id: true, caption: true, lat: true, lng: true, mimeType: true, createdAt: true } as const
 const isReportLocked = (r: { signedAt: Date | null; approvedAt: Date | null }) => !!(r.signedAt || r.approvedAt)
 
 app.get('/api/security-reports', authenticate, async (req, res) => {
-  const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, from, to } = req.query
+  const user = (req as any).user as JwtPayload
+  const { companyId } = user
+  const { guardId, siteId, from, to, mine } = req.query
+
+  // mine=1: 自分に紐付く隊員の報告書＋自分が提出した報告書（隊員アプリ用）
+  let mineFilter = {}
+  if (mine === '1') {
+    const linked = await linkedGuardForUser(user)
+    mineFilter = { OR: [{ submittedByUserId: user.userId }, ...(linked ? [{ guardId: linked.id }] : [])] }
+  }
 
   const reports = await prisma.securityReport.findMany({
     where: {
       companyId,
+      ...mineFilter,
       ...(guardId ? { guardId: String(guardId) } : {}),
       ...(siteId ? { siteId: String(siteId) } : {}),
       ...(from || to ? { reportDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
@@ -2511,7 +2540,7 @@ app.get('/api/security-reports/:id', authenticate, async (req, res) => {
 app.post('/api/security-reports', authenticate, async (req, res) => {
   const user = (req as any).user as JwtPayload
   const { companyId } = user
-  const { guardId, siteId, reportDate, content, clientEmail, signature, photos } = req.body
+  const { guardId, siteId, reportDate, content, clientEmail, signature, photos, submissionNote } = req.body
   if (!guardId || !siteId || !reportDate || !content) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
@@ -2519,12 +2548,14 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
   if (!parsedContent.success) { res.status(400).json({ error: '報告内容が不正です' }); return }
   const parsedSig = signature ? signatureInputSchema.safeParse(signature) : null
   if (parsedSig && !parsedSig.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+  const parsedNote = submissionNoteSchema.safeParse(submissionNote ?? '')
+  if (!parsedNote.success) { res.status(400).json({ error: '備考は300文字以内で入力してください' }); return }
   const parsedPhotos = z.array(photoInputSchema).max(MAX_PHOTOS_PER_REPORT).safeParse(photos ?? [])
   if (!parsedPhotos.success) { res.status(400).json({ error: `写真が不正です（最大${MAX_PHOTOS_PER_REPORT}枚）` }); return }
 
   // 他社の隊員・現場を指定できないよう所属を検証
   const [guardOk, siteOk] = await Promise.all([
-    prisma.guard.findFirst({ where: { id: guardId, companyId }, select: { id: true } }),
+    prisma.guard.findFirst({ where: { id: guardId, companyId }, select: { id: true, name: true } }),
     prisma.site.findFirst({ where: { id: siteId, companyId }, select: { id: true } }),
   ])
   if (!guardOk || !siteOk) { res.status(400).json({ error: '隊員または現場が不正です' }); return }
@@ -2534,10 +2565,16 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
   if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
 
   const actor = await reportActor(user)
+  // 提出したアカウントが報告対象の隊員本人でなければ代理提出として記録する（拒否はしない）
+  const linked = await linkedGuardForUser(user)
+  const asProxy = linked?.id !== guardOk.id
+  const note = parsedNote.data.trim() || (asProxy ? PROXY_SUBMISSION_DEFAULT_NOTE : '')
   const report = await prisma.$transaction(async tx => {
     const created = await tx.securityReport.create({
       data: {
         companyId, guardId, siteId, reportDate: new Date(reportDate), content: parsedContent.data,
+        submittedByUserId: actor.actorUserId, submittedByName: actor.actorName,
+        submittedAsProxy: asProxy, submissionNote: note || null,
         ...(parsedSig?.success ? {
           signerName: parsedSig.data.signerName,
           signerTitle: parsedSig.data.signerTitle || null,
@@ -2553,7 +2590,12 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
     if (parsedPhotos.data.length) {
       await tx.securityReportPhoto.createMany({ data: parsedPhotos.data.map(p => photoCreateData(p, created)) })
     }
-    await logReportRevision(tx, created, 'CREATE', actor, parsedPhotos.data.length ? { photos: parsedPhotos.data.length } : undefined)
+    await logReportRevision(tx, created, 'CREATE', actor, {
+      guard: guardOk.name,
+      proxy: asProxy,
+      ...(note ? { note } : {}),
+      ...(parsedPhotos.data.length ? { photos: parsedPhotos.data.length } : {}),
+    })
     if (parsedSig?.success) {
       await logReportRevision(tx, created, 'SIGN', { actorName: parsedSig.data.signerName }, { signerTitle: parsedSig.data.signerTitle || null })
     }
@@ -2795,6 +2837,7 @@ app.get('/api/public/report-shares/:token', async (req, res) => {
     select: {
       reportDate: true, content: true, siteId: true, companyId: true,
       signerName: true, signerTitle: true, signatureImage: true, signedAt: true, approvedAt: true, approvedBy: true,
+      submittedByName: true, submittedAsProxy: true, submissionNote: true,
       guard: { select: { name: true } },
       site: { select: { name: true, address: true, clientName: true, client: { select: { name: true } } } },
       company: { select: { name: true } },

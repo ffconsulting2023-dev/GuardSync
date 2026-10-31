@@ -182,3 +182,10 @@ export function validateReportAgainstTemplate(
   }
   return errors
 }
+
+// ─────────────────────────────────────────────
+// 提出者（ログインユーザーと報告対象の隊員が異なる場合の記録）
+// ─────────────────────────────────────────────
+export const PROXY_SUBMISSION_LABEL = '隊員本人以外による提出'
+export const PROXY_SUBMISSION_DEFAULT_NOTE = 'ログインアカウントと報告対象の隊員が異なるため、提出者を記録'
+export const submissionNoteSchema = z.string().max(300).default('')
