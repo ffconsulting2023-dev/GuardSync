@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { format } from 'date-fns'
+import AccountManager from '../components/AccountManager'
 import {
   SUBSCRIPTION_STATUS, PLAN_TYPE, BILLING_LOG_TYPE,
 } from '../lib/constants'
@@ -364,6 +365,7 @@ function BillingTab() {
 // 会社管理タブ（既存のコンテンツ）
 // ─────────────────────────────────────────────
 function CompaniesTab() {
+  const [accountsFor, setAccountsFor] = useState<{ id: string; name: string } | null>(null)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteResult, setInviteResult] = useState<any>(null)
 
@@ -420,6 +422,7 @@ function CompaniesTab() {
                 <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">隊員</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden lg:table-cell">登録日</th>
                 <th className="text-center px-4 py-3 text-xs font-medium text-gray-500">状態</th>
+                <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
@@ -436,12 +439,29 @@ function CompaniesTab() {
                   <td className="px-4 py-3 text-center">
                     <span className={`badge ${c.isActive ? 'badge-success' : 'badge-danger'}`}>{c.isActive ? '有効' : '停止'}</span>
                   </td>
+                  <td className="px-4 py-3 text-right">
+                    <button onClick={() => setAccountsFor({ id: c.id, name: c.name })} className="text-blue-600 text-xs whitespace-nowrap">ID発行・管理者設定</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
       </div>
+      {accountsFor && (
+        <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/50 p-4 overflow-y-auto">
+          <div className="bg-gray-50 rounded-2xl w-full max-w-4xl my-8">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-white rounded-t-2xl">
+              <div>
+                <h2 className="font-semibold text-gray-800">{accountsFor.name}：ID発行・管理者設定</h2>
+                <p className="text-xs text-gray-500">この会社の管理者（ID発行担当）を発行し、認証用URL・QRコードを渡してください。管理者は会社の設定画面から他のユーザーにID発行権限を付与できます。</p>
+              </div>
+              <button onClick={() => setAccountsFor(null)} className="text-gray-400 hover:text-gray-600" aria-label="閉じる">✕</button>
+            </div>
+            <div className="p-6"><AccountManager companyId={accountsFor.id} /></div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

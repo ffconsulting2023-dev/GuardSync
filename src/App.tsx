@@ -20,6 +20,7 @@ import RegisterPage from './pages/RegisterPage'
 import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
 import SharedReportPage from './pages/SharedReportPage'
+import SetupPasswordPage from './pages/SetupPasswordPage'
 import GuardAppPage from './pages/guard/GuardAppPage'
 import SettingsPage from './pages/SettingsPage'
 import VehiclesPage from './pages/VehiclesPage'
@@ -72,16 +73,19 @@ export default function App() {
         <Routes>
           <Route path="/suspended" element={<SuspendedPage />} />
           <Route path="/payment-complete" element={<div className="min-h-screen flex items-center justify-center"><div className="text-center"><p className="text-2xl mb-2">お支払いありがとうございます</p><p className="text-gray-500">サービスが有効化されました。<a href="/" className="text-blue-600 underline">ダッシュボードへ</a></p></div></div>} />
-          <Route path="/login" element={auth.user ? <Navigate to="/" replace /> : <LoginPage />} />
+          <Route path="/login" element={auth.user ? <Navigate to={auth.user.role === 'GUARD' ? '/guard' : '/'} replace /> : <LoginPage />} />
           <Route path="/forgot-password" element={auth.user ? <Navigate to="/" replace /> : <ForgotPasswordPage />} />
           <Route path="/reset-password" element={auth.user ? <Navigate to="/" replace /> : <ResetPasswordPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/sign/:token" element={<SignContractPage />} />
           <Route path="/shared/report/:token" element={<SharedReportPage />} />
+          <Route path="/setup-password" element={<SetupPasswordPage />} />
           <Route path="/guard/*" element={auth.user ? <GuardAppPage /> : <Navigate to="/login" replace />} />
           <Route
             path="/*"
             element={
+              // 隊員アカウントは隊員アプリのみ利用する
+              auth.user?.role === 'GUARD' ? <Navigate to="/guard" replace /> :
               auth.user ? (
                 <Layout>
                   <Routes>

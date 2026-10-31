@@ -177,7 +177,7 @@ export default function GuardAppPage() {
             {!meLoading && !myGuardId && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
                 このアカウントは隊員登録と紐付いていないため、シフト・出退勤を表示できません。
-                管理者に、隊員情報のメールアドレスをログイン用メールアドレス（{user?.email}）と同じにするよう依頼してください。
+                管理者に「設定 → ユーザー・ID発行」でこのアカウント（{user?.loginId ?? user?.email}）と隊員の紐付けを依頼してください。
                 報告書は隊員を選んで提出できます（提出者として記録されます）。
               </div>
             )}

@@ -1,3 +1,4 @@
+import { ACCOUNT_ROLES } from '../../shared/account'
 // ─────────────────────────────────────────────
 // GuardSync 共通定数
 // SSOT: ラベル・ステータス・選択肢は必ずここから import する
@@ -6,12 +7,9 @@
 export type StatusDef = { label: string; className: string }
 
 // ─── ユーザーロール ───────────────────────────
-export const USER_ROLES: Record<string, string> = {
-  ADMIN:    '管理者',
-  MANAGER:  'マネージャー',
-  OPERATOR: 'オペレーター',
-  VIEWER:   '閲覧者',
-}
+// ロール表示名は shared/account.ts が正。通知の宛先選択などでは隊員(GUARD)を除いた管理系ロールを使う
+const { GUARD: _guardRole, ...STAFF_ROLES } = ACCOUNT_ROLES
+export const USER_ROLES: Record<string, string> = STAFF_ROLES
 
 // ─── 電子契約ステータス ───────────────────────
 export const E_CONTRACT_STATUS: Record<string, StatusDef> = {

@@ -17,10 +17,10 @@ export default function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      const { token } = await login(email, password)
+      const { token, user } = await login(email, password)
       saveToken(token)
       await refresh()
-      navigate('/', { replace: true })
+      navigate(user.role === 'GUARD' ? '/guard' : '/', { replace: true })
     } catch (err: any) {
       setError(err.response?.data?.error || 'ログインに失敗しました')
     } finally {
@@ -45,15 +45,18 @@ export default function LoginPage() {
           <h2 className="text-lg font-semibold text-gray-800 mb-6">ログイン</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="form-label">メールアドレス</label>
+              <label className="form-label">ログインID または メールアドレス</label>
               <input
-                type="email"
+                type="text"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className="form-input"
-                placeholder="example@company.co.jp"
+                placeholder="例: yamada01 / example@company.co.jp"
                 required
-                autoComplete="email"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
             </div>
             <div>

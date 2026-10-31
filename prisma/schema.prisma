@@ -80,7 +80,8 @@ model Invitation {
 
 model User {
   id          String   @id @default(uuid())
-  email       String   @unique
+  email       String?  @unique // 隊員などメールを持たないアカウントは null（ログインIDでログイン）
+  loginId     String?  @unique // 自由設定のログインID（システム全体で一意・小文字で保存。規則は shared/account.ts）
   password    String
   name        String
   role        UserRole @default(OPERATOR)
@@ -92,7 +93,16 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // ID発行権限（ADMIN は常に可。それ以外は会社ごとに付与）
+  canIssueAccounts Boolean @default(false)
+  // 発行直後でパスワード未設定（設定用URLからの設定待ち）
+  mustSetPassword  Boolean @default(false)
+  // 隊員アカウントの紐付け先（隊員アプリはこの隊員として動作）
+  guardId     String?  @unique
+  guard       Guard?   @relation(fields: [guardId], references: [id])
+
   passwordResetTokens  PasswordResetToken[]
+  setupTokens          AccountSetupToken[]
   createdContracts     Contract[]
   createdInvoices      Invoice[]
   approvedDailyPays    DailyPayRequest[] @relation("ApprovedBy")
@@ -107,6 +117,21 @@ enum UserRole {
   MANAGER       // 管理者（配員・請求）
   OPERATOR      // オペレーター（管制）
   VIEWER        // 閲覧のみ
+  GUARD         // 隊員（隊員アプリのみ）
+}
+
+// パスワード設定用URL（管理者が発行。メール・URLコピー・QRで本人に渡す）
+model AccountSetupToken {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash     String    @unique // URLのトークンは保存せずSHA-256のみ保持
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdByName String
+  createdAt     DateTime  @default(now())
+
+  @@index([userId])
 }
 
 // ─────────────────────────────────────────────
@@ -250,6 +275,7 @@ model Guard {
   myNumber          String?   // マイナンバー（AES-256暗号化して保存）
   myNumberUpdatedAt DateTime? // 最終更新日時
 
+  userAccount     User?       // 隊員アプリのログインアカウント
   schedules       Schedule[]
   attendances     Attendance[]
   dailyPayRequests DailyPayRequest[]

@@ -20,6 +20,10 @@ import {
   type ReportTemplate, type ReportRevisionAction, type PhotoInput,
   submissionNoteSchema, PROXY_SUBMISSION_DEFAULT_NOTE,
 } from './shared/securityReport'
+import {
+  PASSWORD_PATTERN, PASSWORD_RULE_TEXT, SETUP_LINK_TTL_DAYS, normalizeLoginId,
+  accountCreateSchema, accountUpdateSchema, passwordSetupSchema, loginIdSchema,
+} from './shared/account'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -423,25 +427,33 @@ app.get('/api/health', (_req, res) => {
 // 認証 API
 // ─────────────────────────────────────────────
 
+// ログイン欄は「ログインID または メールアドレス」。'@' を含めばメールアドレスとして扱う（ログインIDは '@' 不可）
+// 旧クライアント互換のため email フィールドも受け付ける
 const loginSchema = z.object({
-  email: z.string().email(),
+  id: z.string().trim().min(1).max(254).optional(),
+  email: z.string().trim().min(1).max(254).optional(),
   password: z.string().min(1),
-})
+}).refine(v => !!(v.id || v.email))
 
 app.post('/api/auth/login', async (req, res) => {
   const parsed = loginSchema.safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
 
-  const { email, password } = parsed.data
-  const user = await prisma.user.findUnique({
-    where: { email },
-    include: { company: true },
-  })
+  const { password } = parsed.data
+  const identifier = (parsed.data.id || parsed.data.email)!
+  const user = identifier.includes('@')
+    ? (await prisma.user.findUnique({ where: { email: identifier }, include: { company: true } }))
+      ?? (await prisma.user.findUnique({ where: { email: identifier.toLowerCase() }, include: { company: true } }))
+    : await prisma.user.findUnique({ where: { loginId: normalizeLoginId(identifier) }, include: { company: true } })
 
-  if (!user || !user.isActive) { res.status(401).json({ error: 'メールアドレスまたはパスワードが違います' }); return }
+  const loginError = 'ログインID（メールアドレス）またはパスワードが違います'
+  if (!user || !user.isActive) { res.status(401).json({ error: loginError }); return }
+  if (user.mustSetPassword) {
+    res.status(401).json({ error: 'パスワードが未設定です。管理者から届いた設定用URL（またはQRコード）からパスワードを設定してください。' }); return
+  }
 
   const valid = await bcrypt.compare(password, user.password)
-  if (!valid) { res.status(401).json({ error: 'メールアドレスまたはパスワードが違います' }); return }
+  if (!valid) { res.status(401).json({ error: loginError }); return }
 
   // 会社が利用停止中の場合はログインを拒否（super-adminは除外）
   if (!user.isSuperAdmin && (!user.company.isActive || user.company.subscriptionStatus === 'SUSPENDED')) {
@@ -460,7 +472,7 @@ app.post('/api/auth/login', async (req, res) => {
 
   res.json({
     token,
-    user: { id: user.id, name: user.name, email: user.email, role: user.role, company: { id: user.company.id, name: user.company.name, plan: user.company.plan } },
+    user: { id: user.id, name: user.name, email: user.email, loginId: user.loginId, role: user.role, company: { id: user.company.id, name: user.company.name, plan: user.company.plan } },
   })
 })
 
@@ -468,7 +480,10 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
   const { userId } = (req as any).user as JwtPayload
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, name: true, email: true, role: true, isSuperAdmin: true, company: { select: { id: true, name: true, plan: true } } },
+    select: {
+      id: true, name: true, email: true, loginId: true, role: true, isSuperAdmin: true, canIssueAccounts: true, guardId: true,
+      company: { select: { id: true, name: true, plan: true } },
+    },
   })
   if (!user) { res.status(404).json({ error: 'ユーザーが見つかりません' }); return }
   res.json(user)
@@ -493,10 +508,9 @@ app.post('/api/auth/register', async (req, res) => {
   const { token, name, password } = req.body
   if (!token || !name || !password) { res.status(400).json({ error: '必須項目が不足しています' }); return }
 
-  // H-6: パスワード強度要件（8文字以上、大文字・小文字・数字を含む）
-  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/
-  if (!passwordRegex.test(password)) {
-    res.status(400).json({ error: 'パスワードは8文字以上で、大文字・小文字・数字を含む必要があります' })
+  // H-6: パスワード強度要件（規則は shared/account.ts）
+  if (!PASSWORD_PATTERN.test(password)) {
+    res.status(400).json({ error: `パスワードは${PASSWORD_RULE_TEXT}` })
     return
   }
 
@@ -535,7 +549,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
 
   // ユーザー存在の有無を外部に漏らさないため、常に200を返す
   const user = await prisma.user.findUnique({ where: { email: email.toLowerCase().trim() } })
-  if (!user || !user.isActive) { res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' }); return }
+  if (!user || !user.isActive || !user.email) { res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' }); return }
 
   // 既存の未使用トークンを無効化
   await prisma.passwordResetToken.updateMany({
@@ -568,9 +582,8 @@ app.post('/api/auth/reset-password', async (req, res) => {
   if (!token || !password || !passwordConfirm) { res.status(400).json({ error: '必須項目が不足しています' }); return }
   if (password !== passwordConfirm) { res.status(400).json({ error: 'パスワードが一致しません' }); return }
 
-  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/
-  if (!passwordRegex.test(password)) {
-    res.status(400).json({ error: 'パスワードは8文字以上で、大文字・小文字・数字を含めてください' }); return
+  if (!PASSWORD_PATTERN.test(password)) {
+    res.status(400).json({ error: `パスワードは${PASSWORD_RULE_TEXT}` }); return
   }
 
   const resetToken = await prisma.passwordResetToken.findUnique({
@@ -583,10 +596,237 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 
   const hashed = await bcrypt.hash(password, 12)
-  await prisma.user.update({ where: { id: resetToken.userId }, data: { password: hashed } })
+  await prisma.user.update({ where: { id: resetToken.userId }, data: { password: hashed, mustSetPassword: false } })
   await prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } })
 
   res.json({ message: 'パスワードを更新しました。新しいパスワードでログインしてください。' })
+})
+
+// ─────────────────────────────────────────────
+// アカウント発行 API（ログインID・パスワード設定用URL/QR）
+// 規則は shared/account.ts が正（SSOT）
+// ─────────────────────────────────────────────
+
+// 設定用URLは同じ事業所のWi-Fiから複数の隊員が続けて使うため、ログインより緩い上限にする
+const setupLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { error: '試行回数の上限に達しました。しばらくしてからお試しください。' } })
+const hashSetupToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex')
+const appBaseUrl = () => (process.env.APP_URL || 'https://guardsync.jp').replace(/\/+$/, '')
+
+interface AccountActor { userId: string; name: string; isSuperAdmin: boolean; isCompanyAdmin: boolean; companyId: string }
+
+// ID発行者のみ通す。スーパー管理者は ?companyId= / body.companyId で対象会社を指定でき、それ以外は自社のみ
+async function requireAccountIssuer(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const jwtUser = (req as any).user as JwtPayload
+  const me = await prisma.user.findUnique({ where: { id: jwtUser.userId }, select: { id: true, name: true, role: true, canIssueAccounts: true, isSuperAdmin: true, isActive: true } })
+  if (!me || !me.isActive) { res.status(401).json({ error: '認証が必要です' }); return }
+  const isSuperAdmin = me.isSuperAdmin
+  if (!isSuperAdmin && me.role !== 'ADMIN' && !(me.canIssueAccounts && me.role !== 'GUARD')) {
+    res.status(403).json({ error: 'ID発行の権限がありません（会社の管理者に権限付与を依頼してください）' }); return
+  }
+  const requested = (req.query.companyId as string) || (req.body && typeof req.body.companyId === 'string' ? req.body.companyId : '')
+  const companyId = isSuperAdmin && requested ? requested : jwtUser.companyId
+  if (isSuperAdmin && requested && !(await prisma.company.findUnique({ where: { id: requested }, select: { id: true } }))) {
+    res.status(404).json({ error: '会社が見つかりません' }); return
+  }
+  ;(req as any).accountActor = { userId: me.id, name: me.name, isSuperAdmin, isCompanyAdmin: isSuperAdmin || me.role === 'ADMIN', companyId } satisfies AccountActor
+  next()
+}
+
+const accountSelect = {
+  id: true, name: true, loginId: true, email: true, role: true, isActive: true, canIssueAccounts: true,
+  mustSetPassword: true, lastLoginAt: true, createdAt: true, guardId: true,
+  guard: { select: { id: true, name: true, employeeNumber: true } },
+  setupTokens: { where: { usedAt: null }, select: { expiresAt: true, createdAt: true }, orderBy: { createdAt: 'desc' as const }, take: 1 },
+} as const
+
+function isUniqueViolation(e: unknown, field: string) {
+  const err = e as { code?: string; meta?: { target?: string[] | string } }
+  if (err?.code !== 'P2002') return false
+  const t = err.meta?.target
+  return Array.isArray(t) ? t.includes(field) : typeof t === 'string' ? t.includes(field) : true
+}
+
+// ログインID・メール・隊員紐付けの重複チェック（DBの一意制約に加えて事前に分かりやすく返す）
+async function accountConflict(data: { loginId?: string; email?: string | null; guardId?: string | null }, excludeUserId?: string): Promise<string | null> {
+  const not = excludeUserId ? { NOT: { id: excludeUserId } } : {}
+  if (data.loginId && await prisma.user.findFirst({ where: { loginId: data.loginId, ...not }, select: { id: true } })) return 'このログインIDは既に使用されています'
+  if (data.email && await prisma.user.findFirst({ where: { email: data.email, ...not }, select: { id: true } })) return 'このメールアドレスは既に登録されています'
+  if (data.guardId && await prisma.user.findFirst({ where: { guardId: data.guardId, ...not }, select: { id: true } })) return 'この隊員には既に別のアカウントが紐付いています'
+  return null
+}
+
+function accountWriteError(e: unknown): string | null {
+  if (isUniqueViolation(e, 'loginId')) return 'このログインIDは既に使用されています'
+  if (isUniqueViolation(e, 'email')) return 'このメールアドレスは既に登録されています'
+  if (isUniqueViolation(e, 'guardId')) return 'この隊員には既に別のアカウントが紐付いています'
+  return null
+}
+
+// アカウント一覧＋紐付け候補の隊員
+app.get('/api/accounts', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const [users, guards, company] = await Promise.all([
+    prisma.user.findMany({ where: { companyId: actor.companyId, isSuperAdmin: false }, select: accountSelect, orderBy: [{ isActive: 'desc' }, { name: 'asc' }] }),
+    prisma.guard.findMany({ where: { companyId: actor.companyId, isActive: true }, select: { id: true, name: true, employeeNumber: true, email: true, userAccount: { select: { id: true } } }, orderBy: { employeeNumber: 'asc' } }),
+    prisma.company.findUnique({ where: { id: actor.companyId }, select: { id: true, name: true } }),
+  ])
+  res.json({
+    company,
+    actor: { isCompanyAdmin: actor.isCompanyAdmin },
+    users: users.map(({ setupTokens, ...u }) => ({ ...u, pendingSetupExpiresAt: setupTokens[0]?.expiresAt ?? null })),
+    guards: guards.map(({ userAccount, ...g }) => ({ ...g, linkedUserId: userAccount?.id ?? null })),
+  })
+})
+
+// ログインIDの利用可否（入力中の重複チェック用）
+app.get('/api/accounts/login-id-availability', authenticate, requireAccountIssuer, async (req, res) => {
+  const parsed = loginIdSchema.safeParse(String(req.query.loginId ?? ''))
+  if (!parsed.success) { res.json({ valid: false, available: false, message: parsed.error.issues[0]?.message }); return }
+  const exclude = typeof req.query.excludeUserId === 'string' ? req.query.excludeUserId : undefined
+  const taken = await prisma.user.findFirst({ where: { loginId: parsed.data, ...(exclude ? { NOT: { id: exclude } } : {}) }, select: { id: true } })
+  res.json({ valid: true, available: !taken, loginId: parsed.data, message: taken ? 'このログインIDは既に使用されています' : '使用できます' })
+})
+
+app.post('/api/accounts', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const parsed = accountCreateSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const d = parsed.data
+  if (!actor.isCompanyAdmin && (d.role === 'ADMIN' || d.canIssueAccounts)) {
+    res.status(403).json({ error: '管理者アカウントの作成・ID発行権限の付与は会社の管理者のみ可能です' }); return
+  }
+  if (d.guardId && !(await prisma.guard.findFirst({ where: { id: d.guardId, companyId: actor.companyId }, select: { id: true } }))) {
+    res.status(400).json({ error: '紐付ける隊員が見つかりません' }); return
+  }
+  const conflict = await accountConflict(d)
+  if (conflict) { res.status(409).json({ error: conflict }); return }
+  try {
+    const user = await prisma.user.create({
+      data: {
+        companyId: actor.companyId, name: d.name, loginId: d.loginId, email: d.email ?? null, role: d.role,
+        guardId: d.guardId ?? null, canIssueAccounts: d.role !== 'GUARD' && !!d.canIssueAccounts,
+        // 本人が設定用URLでパスワードを決めるまでログイン不可（推測不能なランダム値をハッシュ化）
+        password: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12), mustSetPassword: true,
+      },
+      select: accountSelect,
+    })
+    logger.info('アカウント発行', { companyId: actor.companyId, userId: user.id, by: actor.userId })
+    res.status(201).json(user)
+  } catch (e) {
+    const msg = accountWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+})
+
+app.patch('/api/accounts/:id', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const target = await prisma.user.findFirst({ where: { id: req.params.id, companyId: actor.companyId, isSuperAdmin: false } })
+  if (!target) { res.status(404).json({ error: 'アカウントが見つかりません' }); return }
+  const parsed = accountUpdateSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const d = parsed.data
+  const touchesAdmin = target.role === 'ADMIN' || d.role === 'ADMIN' || d.canIssueAccounts !== undefined
+  if (!actor.isCompanyAdmin && touchesAdmin) {
+    res.status(403).json({ error: '管理者アカウントの変更・ID発行権限の変更は会社の管理者のみ可能です' }); return
+  }
+  if (target.id === actor.userId && (d.isActive === false || (d.role && d.role !== target.role))) {
+    res.status(400).json({ error: '自分自身の無効化・ロール変更はできません' }); return
+  }
+  const role = d.role ?? target.role
+  const guardId = d.guardId !== undefined ? d.guardId : target.guardId
+  if (role === 'GUARD' && !guardId) { res.status(400).json({ error: '隊員アカウントは紐付ける隊員を選択してください' }); return }
+  if (d.guardId && !(await prisma.guard.findFirst({ where: { id: d.guardId, companyId: actor.companyId }, select: { id: true } }))) {
+    res.status(400).json({ error: '紐付ける隊員が見つかりません' }); return
+  }
+  const conflict = await accountConflict({ loginId: d.loginId, email: d.email, guardId: d.guardId }, target.id)
+  if (conflict) { res.status(409).json({ error: conflict }); return }
+  try {
+    const user = await prisma.user.update({
+      where: { id: target.id },
+      data: {
+        ...(d.name !== undefined ? { name: d.name } : {}),
+        ...(d.loginId !== undefined ? { loginId: d.loginId } : {}),
+        ...(d.email !== undefined ? { email: d.email ?? null } : {}),
+        ...(d.role !== undefined ? { role: d.role } : {}),
+        ...(d.guardId !== undefined ? { guardId: d.guardId } : {}),
+        ...(d.canIssueAccounts !== undefined ? { canIssueAccounts: d.canIssueAccounts } : {}),
+        ...(role === 'GUARD' ? { canIssueAccounts: false } : {}),
+        ...(d.isActive !== undefined ? { isActive: d.isActive } : {}),
+      },
+      select: accountSelect,
+    })
+    // 無効化したアカウントの未使用の設定用URLは失効させる
+    if (d.isActive === false) await prisma.accountSetupToken.updateMany({ where: { userId: target.id, usedAt: null }, data: { usedAt: new Date() } })
+    res.json(user)
+  } catch (e) {
+    const msg = accountWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+})
+
+// パスワード設定用URLの発行（再発行すると以前のURLは無効）。sendEmail=true ならメールも送信
+app.post('/api/accounts/:id/setup-link', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const target = await prisma.user.findFirst({ where: { id: req.params.id, companyId: actor.companyId, isSuperAdmin: false }, include: { company: { select: { name: true } } } })
+  if (!target) { res.status(404).json({ error: 'アカウントが見つかりません' }); return }
+  if (!target.isActive) { res.status(400).json({ error: '無効化されたアカウントには発行できません' }); return }
+  if (!actor.isCompanyAdmin && target.role === 'ADMIN') { res.status(403).json({ error: '管理者アカウントのURL発行は会社の管理者のみ可能です' }); return }
+  const sendMail = req.body?.sendEmail === true
+  if (sendMail && !target.email) { res.status(400).json({ error: 'メールアドレスが未登録のため送信できません（URLまたはQRコードで渡してください）' }); return }
+
+  const token = crypto.randomBytes(32).toString('base64url')
+  const expiresAt = new Date(Date.now() + SETUP_LINK_TTL_DAYS * 24 * 60 * 60 * 1000)
+  await prisma.$transaction([
+    prisma.accountSetupToken.updateMany({ where: { userId: target.id, usedAt: null }, data: { usedAt: new Date() } }),
+    prisma.accountSetupToken.create({ data: { userId: target.id, tokenHash: hashSetupToken(token), expiresAt, createdByName: actor.name } }),
+  ])
+  const url = `${appBaseUrl()}/setup-password?token=${token}`
+
+  let emailSent = false
+  if (sendMail && target.email) {
+    const expiresLabel = expiresAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+    emailSent = await sendEmail(target.email, '【GuardSync】パスワード設定のご案内', `
+<div style="font-family:sans-serif;line-height:1.7;color:#1f2937;max-width:600px">
+  <p>${escapeHtml(target.name)} 様</p>
+  <p>${escapeHtml(target.company.name)} より GuardSync のアカウントが発行されました。下のボタンからパスワードを設定してください。</p>
+  <p><strong>ログインID:</strong> ${escapeHtml(target.loginId ?? target.email)}</p>
+  <p style="margin:24px 0"><a href="${url}" style="background:#1e3a5f;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:bold">パスワードを設定する</a></p>
+  <p style="word-break:break-all;font-size:13px">${url}</p>
+  <p style="color:#6b7280;font-size:13px">有効期限: ${escapeHtml(expiresLabel)}（${SETUP_LINK_TTL_DAYS}日間）。心当たりがない場合は破棄してください。</p>
+</div>`, `GuardSync パスワード設定のご案内\nログインID: ${target.loginId ?? target.email}\n${url}\n有効期限: ${expiresLabel}`)
+  }
+  logger.info('パスワード設定URL発行', { companyId: actor.companyId, userId: target.id, by: actor.userId, emailSent })
+  res.json({ url, expiresAt, emailSent, loginId: target.loginId, name: target.name })
+})
+
+// 設定用URLの内容確認（認証不要）
+app.get('/api/auth/setup/:token', setupLimiter, async (req, res) => {
+  const t = await prisma.accountSetupToken.findUnique({
+    where: { tokenHash: hashSetupToken(req.params.token) },
+    include: { user: { select: { name: true, loginId: true, email: true, isActive: true, company: { select: { name: true } } } } },
+  })
+  if (!t || t.usedAt || t.expiresAt < new Date() || !t.user.isActive) {
+    res.status(410).json({ error: 'このURLは無効か、有効期限が切れています。管理者に再発行を依頼してください。' }); return
+  }
+  res.json({ name: t.user.name, loginId: t.user.loginId ?? t.user.email, companyName: t.user.company.name, expiresAt: t.expiresAt })
+})
+
+// 設定用URLからのパスワード設定（認証不要）
+app.post('/api/auth/setup/:token', setupLimiter, async (req, res) => {
+  const parsed = passwordSetupSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const t = await prisma.accountSetupToken.findUnique({ where: { tokenHash: hashSetupToken(req.params.token) }, include: { user: { select: { id: true, isActive: true, loginId: true, email: true } } } })
+  if (!t || t.usedAt || t.expiresAt < new Date() || !t.user.isActive) {
+    res.status(410).json({ error: 'このURLは無効か、有効期限が切れています。管理者に再発行を依頼してください。' }); return
+  }
+  const hashed = await bcrypt.hash(parsed.data.password, 12)
+  // 使用済み化を条件付き更新で行い、同じURLの同時使用で二重設定されないようにする
+  const used = await prisma.accountSetupToken.updateMany({ where: { id: t.id, usedAt: null }, data: { usedAt: new Date() } })
+  if (used.count === 0) { res.status(410).json({ error: 'このURLは既に使用されています' }); return }
+  await prisma.user.update({ where: { id: t.user.id }, data: { password: hashed, mustSetPassword: false } })
+  res.json({ message: 'パスワードを設定しました。ログインしてください。', loginId: t.user.loginId ?? t.user.email })
 })
 
 // ─────────────────────────────────────────────
@@ -2474,6 +2714,10 @@ function photoCreateData(p: PhotoInput, report: { id: string; companyId: string 
 
 // ログインユーザーに対応する隊員（User と Guard は別テーブルのため、同一ID → 同一メールアドレスの順で突き合わせる）
 async function linkedGuardForUser(user: JwtPayload): Promise<{ id: string; name: string } | null> {
+  // 1. アカウント発行時の明示的な紐付け（User.guardId）
+  const u0 = await prisma.user.findUnique({ where: { id: user.userId }, select: { guard: { select: { id: true, name: true, companyId: true, isActive: true } } } })
+  if (u0?.guard && u0.guard.companyId === user.companyId && u0.guard.isActive) return { id: u0.guard.id, name: u0.guard.name }
+  // 2. 旧仕様（Guard.id = User.id）
   const byId = await prisma.guard.findFirst({ where: { id: user.userId, companyId: user.companyId }, select: { id: true, name: true } })
   if (byId) return byId
   const u = await prisma.user.findUnique({ where: { id: user.userId }, select: { email: true } })

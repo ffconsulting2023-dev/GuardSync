@@ -60,6 +60,8 @@ jobs:
             cd /opt/guardsync-staging
             docker compose build app
             docker compose up -d db
+            # 既存テーブルへの一意制約など db push が警告で止まる変更を先に冪等SQLで適用（prisma/predeploy.sql）
+            docker compose run --rm app npx prisma db execute --file prisma/predeploy.sql --schema prisma/schema.prisma
             docker compose run --rm app npx prisma db push
             docker compose up -d app
             sleep 5
