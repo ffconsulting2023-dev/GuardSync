@@ -4,7 +4,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import path from 'path'
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient, Prisma } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import cron from 'node-cron'
@@ -24,6 +24,10 @@ import {
   PASSWORD_PATTERN, PASSWORD_RULE_TEXT, SETUP_LINK_TTL_DAYS, normalizeLoginId,
   accountCreateSchema, accountUpdateSchema, passwordSetupSchema, loginIdSchema,
 } from './shared/account'
+import { IMPORT_ORDER, COMPANY_INSURANCE_FIELDS } from './shared/import'
+import { estimateRequestBilling } from './shared/siteRequest'
+import { runImport, ImportError } from './server/import'
+import { parseUpload, fetchGoogleSheet, ParseError } from './server/importParse'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -830,6 +834,179 @@ app.post('/api/auth/setup/:token', setupLimiter, async (req, res) => {
 })
 
 // ─────────────────────────────────────────────
+// データ取り込み API（CSV・Excel・Googleスプレッドシート）
+// マイナンバー・口座情報を含むため、会社の管理者（ADMIN）とスーパー管理者のみ。
+// スーパー管理者は ?companyId= で対象会社を指定できる（会社立ち上げ時の移行用）
+// ─────────────────────────────────────────────
+
+interface CompanyAdminScope { companyId: string; userId: string; name: string; isSuperAdmin: boolean }
+
+async function requireCompanyAdminScope(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const jwtUser = (req as any).user as JwtPayload
+  const me = await prisma.user.findUnique({ where: { id: jwtUser.userId }, select: { id: true, name: true, role: true, isSuperAdmin: true, isActive: true } })
+  if (!me || !me.isActive) { res.status(401).json({ error: '認証が必要です' }); return }
+  if (!me.isSuperAdmin && me.role !== 'ADMIN') { res.status(403).json({ error: '会社の管理者のみ実行できます' }); return }
+  const requested = typeof req.query.companyId === 'string' ? req.query.companyId : ''
+  const companyId = me.isSuperAdmin && requested ? requested : jwtUser.companyId
+  if (me.isSuperAdmin && requested && !(await prisma.company.findUnique({ where: { id: requested }, select: { id: true } }))) {
+    res.status(404).json({ error: '会社が見つかりません' }); return
+  }
+  ;(req as any).adminScope = { companyId, userId: me.id, name: me.name, isSuperAdmin: me.isSuperAdmin } satisfies CompanyAdminScope
+  next()
+}
+
+const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } })
+const importDeps = () => ({ prisma, encrypt, canEncrypt: (process.env.ENCRYPTION_KEY?.length ?? 0) >= 32 })
+
+// 既存の相手に紐付ける指示は ID 必須（server/import.ts の Resolution と同じ形）
+const linkTo = <A extends string>(action: A) => z.object({ action: z.literal(action), id: z.string().uuid() })
+const createOrSkip = <A extends string>(action: A) => z.object({ action: z.literal(action) })
+const resolutionSchema = z.discriminatedUnion('action', [
+  linkTo('client'), linkTo('partner'), linkTo('guard'), linkTo('clientFromPartner'),
+  createOrSkip('newGuard'), createOrSkip('skip'),
+  z.object({ action: z.literal('newClient'), name: z.string().trim().max(100).optional() }),
+  z.object({ action: z.literal('newPartner'), name: z.string().trim().max(100).optional() }),
+])
+
+const importRequestSchema = z.object({
+  kind: z.enum(IMPORT_ORDER as [typeof IMPORT_ORDER[number], ...typeof IMPORT_ORDER[number][]]),
+  sourceName: z.string().max(300),
+  rows: z.array(z.array(z.string().max(5000)).max(80)).max(5000),
+  headerRow: z.number().int().min(-1).max(50),
+  mapping: z.record(z.string(), z.number().int().min(0).max(79)),
+  clientResolutions: z.record(z.string(), resolutionSchema).optional(),
+  peopleResolutions: z.record(z.string(), resolutionSchema).optional(),
+  siteClientOverrides: z.record(z.string(), resolutionSchema).optional(),
+})
+
+function importErrorResponse(res: express.Response, e: unknown) {
+  if (e instanceof ImportError || e instanceof ParseError) { res.status(400).json({ error: e.message }); return }
+  throw e
+}
+
+// ファイル（CSV・Excel）→ シート一覧（取り込み種別と列の自動判定付き）
+app.post('/api/import/parse', authenticate, requireCompanyAdminScope, importUpload.single('file'), async (req, res) => {
+  const file = (req as any).file as Express.Multer.File | undefined
+  if (!file) { res.status(400).json({ error: 'ファイルを選択してください' }); return }
+  try {
+    // multer はファイル名を latin1 として扱うため UTF-8 に戻す
+    const name = Buffer.from(file.originalname, 'latin1').toString('utf8')
+    res.json({ sourceName: name, sheets: await parseUpload(file.buffer, name) })
+  } catch (e) { importErrorResponse(res, e) }
+})
+
+// Googleスプレッドシートの URL → シート一覧
+app.post('/api/import/parse-url', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const url = typeof req.body?.url === 'string' ? req.body.url : ''
+  try {
+    res.json(await fetchGoogleSheet(url))
+  } catch (e) { importErrorResponse(res, e) }
+})
+
+async function handleImport(req: express.Request, res: express.Response, commit: boolean) {
+  const scope = (req as any).adminScope as CompanyAdminScope
+  const parsed = importRequestSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '取り込み内容が不正です' }); return }
+  try {
+    const result = await runImport(importDeps(), scope.companyId, { userId: scope.userId, name: scope.name }, parsed.data, commit)
+    if (commit) logger.info('データ取り込み', { companyId: scope.companyId, kind: parsed.data.kind, by: scope.userId, summary: result.summary })
+    res.json(result)
+  } catch (e) { importErrorResponse(res, e) }
+}
+app.post('/api/import/preview', authenticate, requireCompanyAdminScope, (req, res) => handleImport(req, res, false))
+app.post('/api/import/commit', authenticate, requireCompanyAdminScope, (req, res) => handleImport(req, res, true))
+
+// 名寄せの選択肢（対象会社の取引先・協力会社・隊員）。スーパー管理者が他社を移行する場合も対象会社の一覧を返す
+app.get('/api/import/directory', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const { companyId } = (req as any).adminScope as CompanyAdminScope
+  const [company, clients, partners, guards] = await Promise.all([
+    prisma.company.findUnique({ where: { id: companyId }, select: { id: true, name: true, code: true } }),
+    prisma.client.findMany({ where: { companyId }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.partner.findMany({ where: { companyId }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.guard.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true, employeeNumber: true }, orderBy: { employeeNumber: 'asc' } }),
+  ])
+  res.json({ company, clients, partners, guards, canEncryptMyNumber: importDeps().canEncrypt })
+})
+
+app.get('/api/import/history', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const scope = (req as any).adminScope as CompanyAdminScope
+  res.json(await prisma.importBatch.findMany({ where: { companyId: scope.companyId }, orderBy: { createdAt: 'desc' }, take: 50 }))
+})
+
+// ─────────────────────────────────────────────
+// 会社情報（会社概要・社保／雇用保険の事業所情報）
+// ─────────────────────────────────────────────
+
+const companyProfileSelect = {
+  id: true, name: true, code: true, nameKana: true, representative: true, postalCode: true, address: true, phone: true, email: true, website: true, securityLicenseNumber: true,
+  socialInsuranceOfficeSymbol: true, socialInsuranceOfficeNumber: true, healthInsuranceNumber: true, employmentInsuranceOfficeNumber: true,
+  employmentInsuranceJurisdiction: true, laborInsuranceNumber: true, laborInsuranceEstablishmentType: true, industryClassification: true,
+} as const
+const optText = (max: number) => z.string().trim().max(max).nullable().optional().transform(v => (v ? v : null))
+const companyProfileSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  nameKana: optText(100), representative: optText(100), postalCode: optText(10), address: optText(300),
+  phone: optText(30), email: optText(200), website: optText(300), securityLicenseNumber: optText(50),
+  ...Object.fromEntries(Object.keys(COMPANY_INSURANCE_FIELDS).map(k => [k, optText(100)])),
+})
+
+app.get('/api/company/profile', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const companyId = user.isSuperAdmin && typeof req.query.companyId === 'string' ? req.query.companyId : user.companyId
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: companyProfileSelect })
+  if (!company) { res.status(404).json({ error: '会社が見つかりません' }); return }
+  res.json(company)
+})
+
+app.put('/api/company/profile', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const scope = (req as any).adminScope as CompanyAdminScope
+  const parsed = companyProfileSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
+  const data = Object.fromEntries(Object.entries(parsed.data).filter(([k]) => k in req.body))
+  res.json(await prisma.company.update({ where: { id: scope.companyId }, data, select: companyProfileSelect }))
+})
+
+// スーパー管理者: 会社の作成（作成後、「ID発行・管理者設定」で会社の管理者アカウントを発行する）
+app.post('/api/super-admin/companies', authenticate, requireSuperAdmin, async (req, res) => {
+  const parsed = z.object({
+    name: z.string().trim().min(1).max(100),
+    code: z.string().trim().toUpperCase().regex(/^[A-Z0-9_-]{2,20}$/, '会社コードは半角英数字と _ - の2〜20文字で入力してください'),
+  }).safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  if (await prisma.company.findUnique({ where: { code: parsed.data.code }, select: { id: true } })) {
+    res.status(409).json({ error: 'この会社コードは既に使われています' }); return
+  }
+  const company = await prisma.company.create({ data: { name: parsed.data.name, code: parsed.data.code } })
+  logger.info('会社作成', { companyId: company.id, code: company.code, by: ((req as any).user as JwtPayload).userId })
+  res.status(201).json(company)
+})
+
+// ─────────────────────────────────────────────
+// 現場依頼（受注実績）
+// ─────────────────────────────────────────────
+
+app.get('/api/site-requests', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const month = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : null
+  if (!month) { res.status(400).json({ error: 'month（YYYY-MM）を指定してください' }); return }
+  const [y, m] = month.split('-').map(Number)
+  const requests = await prisma.siteRequest.findMany({
+    where: {
+      companyId,
+      date: { gte: new Date(Date.UTC(y, m - 1, 1)), lt: new Date(Date.UTC(y, m, 1)) },
+      ...(typeof req.query.clientId === 'string' ? { site: { clientId: req.query.clientId } } : {}),
+    },
+    include: {
+      site: { select: { id: true, name: true, nearestStation: true, client: { select: { id: true, name: true, qualificationAllowance: true } } } },
+      subcontractPartner: { select: { id: true, name: true } },
+      schedules: { select: { id: true, guard: { select: { id: true, name: true } } } },
+    },
+    orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
+  })
+  res.json(requests.map(r => ({ ...r, billingEstimate: estimateRequestBilling(r, r.site.client?.qualificationAllowance) })))
+})
+
+// ─────────────────────────────────────────────
 // 隊員 API
 // ─────────────────────────────────────────────
 
@@ -881,7 +1058,7 @@ const guardSchema = z.object({
   email: z.string().email().optional().or(z.literal('')),
   address: z.string().optional(),
   certifications: z.array(z.string()).optional(),
-  employmentType: z.enum(['FULL_TIME', 'PART_TIME', 'CONTRACT', 'DISPATCH']).optional(),
+  employmentType: z.enum(['EXECUTIVE', 'FULL_TIME', 'PART_TIME', 'CONTRACT', 'DISPATCH']).optional(),
   dailyPayEnabled: z.boolean().optional(),
   lineWorksId: z.string().optional(),
   // 住所（構造化）
@@ -967,6 +1144,9 @@ const guardSchema = z.object({
   docOther: z.boolean().optional(),
   // 銀行口座
   bankAccount: z.any().optional(),
+  employmentInsuranceNumber: z.string().max(30).optional().nullable(),
+  pensionNumber: z.string().max(30).optional().nullable(),
+  commuteNotes: z.string().max(500).optional().nullable(),
 })
 
 app.post('/api/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
@@ -1087,6 +1267,9 @@ const clientSchema = z.object({
   overtimeHolidayDayRate: z.number().int().min(0).max(9999999).optional().nullable(),
   overtimeHolidayNightRate: z.number().int().min(0).max(9999999).optional().nullable(),
   qualificationAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  seasonalAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  nominationAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  contractMethod: z.string().max(50).optional().nullable(),
   radioAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
   otherAllowance1: z.number().int().min(0).max(9999999).optional().nullable(),
   otherAllowance2: z.number().int().min(0).max(9999999).optional().nullable(),
@@ -1193,6 +1376,7 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
     unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
     overtimeDayRate, overtimeNightRate, overtimeHolidayDayRate, overtimeHolidayNightRate,
     qualificationAllowance, radioAllowance, otherAllowance1, otherAllowance2,
+    seasonalAllowance, nominationAllowance, contractMethod,
     invoiceRegistrationNumber } = parsed.data
   const { subContacts, documents, contractDate, isActive } = req.body
 
@@ -1219,6 +1403,10 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
       radioAllowance: radioAllowance != null ? Number(radioAllowance) : null,
       otherAllowance1: otherAllowance1 != null ? Number(otherAllowance1) : null,
       otherAllowance2: otherAllowance2 != null ? Number(otherAllowance2) : null,
+      // 後から追加した項目は、送られてきた場合だけ更新する（古い画面からの更新で消さないため）
+      seasonalAllowance: seasonalAllowance !== undefined ? seasonalAllowance : undefined,
+      nominationAllowance: nominationAllowance !== undefined ? nominationAllowance : undefined,
+      contractMethod: contractMethod !== undefined ? (contractMethod || null) : undefined,
       invoiceRegistrationNumber, isActive,
     },
   })
@@ -1275,7 +1463,7 @@ app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req
   const { companyId } = (req as any).user as JwtPayload
   const { name, address, lat, lng, clientId, clientName, clientPhone, notes,
     siteCode, requiredCount, requiredQualifiedA, requiredQualifiedB,
-    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions } = req.body
+    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions, nearestStation } = req.body
   if (!name || !address) { res.status(400).json({ error: '現場名と住所は必須です' }); return }
 
   const site = await prisma.site.create({
@@ -1287,6 +1475,7 @@ app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req
       requiredQualifiedB: requiredQualifiedB != null ? Number(requiredQualifiedB) : 0,
       assemblyTime: assemblyTime || null, defaultStartTime: defaultStartTime || null,
       defaultEndTime: defaultEndTime || null, assemblyPlace: assemblyPlace || null, cautions: cautions || null,
+      nearestStation: nearestStation || null,
     },
     include: { client: true },
   })
@@ -1300,7 +1489,7 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
 
   const { name, address, lat, lng, clientId, clientName, clientPhone, notes, isActive,
     siteCode, requiredCount, requiredQualifiedA, requiredQualifiedB,
-    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions } = req.body
+    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions, nearestStation } = req.body
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   await prisma.site.updateMany({
     where: { id: req.params.id, companyId },
@@ -1315,6 +1504,7 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
       defaultEndTime: defaultEndTime !== undefined ? (defaultEndTime || null) : undefined,
       assemblyPlace: assemblyPlace !== undefined ? (assemblyPlace || null) : undefined,
       cautions: cautions !== undefined ? (cautions || null) : undefined,
+      nearestStation: nearestStation !== undefined ? (nearestStation || null) : undefined,
     },
   })
   const site = await prisma.site.findFirst({ where: { id: req.params.id, companyId }, include: { client: true } })
@@ -1869,13 +2059,44 @@ app.get('/api/partners', authenticate, async (req, res) => {
   res.json(partners)
 })
 
+const yenField = z.number().int().min(0).max(9999999).nullable().optional()
+const partnerSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  type: z.enum(['GROUP', 'PREFERRED', 'GENERAL']).optional(),
+  contactName: z.string().max(100).nullable().optional(),
+  phone: z.string().max(30).nullable().optional(),
+  email: z.string().max(200).nullable().optional(),
+  priority: z.number().int().min(0).max(100).optional(),
+  isActive: z.boolean().optional(),
+  address: z.string().max(300).nullable().optional(),
+  website: z.string().max(300).nullable().optional(),
+  notes: z.string().max(3000).nullable().optional(),
+  contractDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional().or(z.literal('')),
+  contractMethod: z.string().max(50).nullable().optional(),
+  unitPriceDay: yenField, unitPriceNight: yenField, unitPriceHolidayDay: yenField, unitPriceHolidayNight: yenField,
+  overtimeDayRate: yenField, overtimeNightRate: yenField, overtimeHolidayDayRate: yenField, overtimeHolidayNightRate: yenField,
+  qualificationAllowance: yenField, seasonalAllowance: yenField, nominationAllowance: yenField,
+})
+const partnerData = (d: Partial<z.infer<typeof partnerSchema>>) => ({
+  ...d,
+  ...(d.contractDate !== undefined ? { contractDate: d.contractDate ? new Date(`${d.contractDate}T00:00:00Z`) : null } : {}),
+})
+
 app.post('/api/partners', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { name, type = 'GENERAL', contactName, phone, email, priority = 0 } = req.body
-  if (!name) { res.status(400).json({ error: '会社名は必須です' }); return }
-
-  const partner = await prisma.partner.create({ data: { companyId, name, type, contactName, phone, email, priority } })
+  const parsed = partnerSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '会社名は必須です' }); return }
+  const partner = await prisma.partner.create({ data: { companyId, ...partnerData(parsed.data) } as Prisma.PartnerUncheckedCreateInput })
   res.status(201).json(partner)
+})
+
+app.put('/api/partners/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = partnerSchema.partial().safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
+  const result = await prisma.partner.updateMany({ where: { id: req.params.id, companyId }, data: partnerData(parsed.data) as Prisma.PartnerUpdateManyMutationInput })
+  if (!result.count) { res.status(404).json({ error: '協力会社が見つかりません' }); return }
+  res.json(await prisma.partner.findFirst({ where: { id: req.params.id, companyId } }))
 })
 
 // ─────────────────────────────────────────────
@@ -4228,9 +4449,10 @@ app.post('/api/payroll/bank-transfer', authenticate, requireRole('ADMIN'), async
     if (!ba) continue
 
     const record = '2'                                      // データ区分(1)
-      + padRight(ba.bank || '', 4)                          // 被仕向銀行番号(4)
+      // 銀行・支店はコードを優先（bank/branch には名称が入っている場合があるため、数字のときだけコードとみなす）
+      + padRight(ba.bankCode || (/^\d{4}$/.test(ba.bank || '') ? ba.bank : ''), 4) // 被仕向銀行番号(4)
       + padRight('', 15)                                    // 被仕向銀行名(15)
-      + padRight(ba.branch || '', 3)                        // 被仕向支店番号(3)
+      + padRight(ba.branchCode || (/^\d{3}$/.test(ba.branch || '') ? ba.branch : ''), 3) // 被仕向支店番号(3)
       + padRight('', 15)                                    // 被仕向支店名(15)
       + '0000'                                              // 手形交換所番号(4)
       + (ba.type === '当座' ? '2' : '1')                     // 預金種目(1)

@@ -23,6 +23,14 @@ const DOC_LABELS: Record<string, string> = {
 
 type TabKey = 'basic' | 'contacts' | 'accounting' | 'history' | 'reportTemplate'
 
+// 円単位の項目（APIは数値かnullを受け付ける）
+const YEN_KEYS = [
+  'unitPriceDay', 'unitPriceNight', 'unitPriceHolidayDay', 'unitPriceHolidayNight',
+  'overtimeDayRate', 'overtimeNightRate', 'overtimeHolidayDayRate', 'overtimeHolidayNightRate',
+  'qualificationAllowance', 'seasonalAllowance', 'nominationAllowance',
+  'radioAllowance', 'otherAllowance1', 'otherAllowance2',
+] as const
+
 function clientToForm(c: any) {
   const base = { ...EMPTY_CLIENT_FORM }
   const subContacts = Array.isArray(c.subContacts) && c.subContacts.length
@@ -36,6 +44,8 @@ function clientToForm(c: any) {
     overtimeDayRate: c.overtimeDayRate ?? '', overtimeNightRate: c.overtimeNightRate ?? '',
     overtimeHolidayDayRate: c.overtimeHolidayDayRate ?? '', overtimeHolidayNightRate: c.overtimeHolidayNightRate ?? '',
     qualificationAllowance: c.qualificationAllowance ?? '', radioAllowance: c.radioAllowance ?? '',
+    seasonalAllowance: c.seasonalAllowance ?? '', nominationAllowance: c.nominationAllowance ?? '',
+    contractMethod: c.contractMethod ?? '',
     otherAllowance1: c.otherAllowance1 ?? '', otherAllowance2: c.otherAllowance2 ?? '',
     documents: c.documents ?? base.documents,
     subContacts,
@@ -86,6 +96,14 @@ export default function ClientDetailPage() {
     const data = {
       ...form,
       subContacts: form.subContacts.filter((c: any) => c.name || c.phone || c.email),
+    }
+    for (const key of YEN_KEYS) {
+      const v = form[key]
+      data[key] = v === '' || v == null ? null : Number(v)
+    }
+    // 未入力の文字項目は DB では null。サーバーは文字列のみ受け付けるため、触っていない null は送らない
+    for (const key of Object.keys(data)) {
+      if (data[key] === null && !(YEN_KEYS as readonly string[]).includes(key)) delete data[key]
     }
     if (isNew) createMutation.mutate(data)
     else updateMutation.mutate(data)
@@ -477,11 +495,17 @@ export default function ClientDetailPage() {
                   {/* ⑥契約単価 */}
                   <Section title="⑥契約単価">
                     <div className="space-y-3">
-                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                         <div>
                           <FormField label="契約日" edit={editMode}>
                             <input type="date" value={form.contractDate} onChange={e => setForm((f: any) => ({ ...f, contractDate: e.target.value }))} className="form-input" />
                             <span>{form.contractDate || '—'}</span>
+                          </FormField>
+                        </div>
+                        <div>
+                          <FormField label="契約方法" edit={editMode}>
+                            <input type="text" value={form.contractMethod} onChange={e => setForm((f: any) => ({ ...f, contractMethod: e.target.value }))} className="form-input" placeholder="GMO / 郵送 など" />
+                            <span>{form.contractMethod || '—'}</span>
                           </FormField>
                         </div>
                         {[
@@ -513,9 +537,11 @@ export default function ClientDetailPage() {
                           </div>
                         ))}
                       </div>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                         {[
                           { key: 'qualificationAllowance', label: '資格手当' },
+                          { key: 'seasonalAllowance', label: '季節手当' },
+                          { key: 'nominationAllowance', label: '指名料' },
                           { key: 'radioAllowance', label: '無線機/台' },
                           { key: 'otherAllowance1', label: 'その他手当1' },
                           { key: 'otherAllowance2', label: 'その他手当2' },

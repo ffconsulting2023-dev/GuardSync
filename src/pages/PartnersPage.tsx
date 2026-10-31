@@ -8,31 +8,99 @@ import { PARTNER_TYPE } from '../lib/constants'
 
 const TYPE_LABELS = PARTNER_TYPE
 
-const EMPTY_FORM = { name: '', type: 'GENERAL', contactName: '', phone: '', email: '', priority: '0' }
+// 契約単価（円）の項目
+const PRICE_FIELDS = [
+  { key: 'unitPriceDay', label: '日勤単価' },
+  { key: 'unitPriceNight', label: '夜勤単価' },
+  { key: 'unitPriceHolidayDay', label: '土日日勤単価' },
+  { key: 'unitPriceHolidayNight', label: '土日夜勤単価' },
+  { key: 'overtimeDayRate', label: '日勤時間外' },
+  { key: 'overtimeNightRate', label: '夜勤時間外' },
+  { key: 'overtimeHolidayDayRate', label: '土日日勤時間外' },
+  { key: 'overtimeHolidayNightRate', label: '土日夜勤時間外' },
+  { key: 'qualificationAllowance', label: '資格者手当' },
+  { key: 'seasonalAllowance', label: '季節手当' },
+  { key: 'nominationAllowance', label: '指名料' },
+] as const
+type PriceKey = typeof PRICE_FIELDS[number]['key']
+
+type PartnerForm = {
+  name: string; type: string; contactName: string; phone: string; email: string; priority: string
+  isActive: boolean; address: string; website: string; notes: string
+  contractDate: string; contractMethod: string
+} & Record<PriceKey, string>
+
+const EMPTY_FORM: PartnerForm = {
+  name: '', type: 'GENERAL', contactName: '', phone: '', email: '', priority: '0',
+  isActive: true, address: '', website: '', notes: '', contractDate: '', contractMethod: '',
+  ...Object.fromEntries(PRICE_FIELDS.map(f => [f.key, ''])) as Record<PriceKey, string>,
+}
+
+const partnerToForm = (p: any): PartnerForm => ({
+  name: p.name || '', type: p.type || 'GENERAL', contactName: p.contactName || '', phone: p.phone || '',
+  email: p.email || '', priority: String(p.priority ?? 0), isActive: p.isActive !== false,
+  address: p.address || '', website: p.website || '', notes: p.notes || '',
+  contractDate: p.contractDate ? String(p.contractDate).split('T')[0] : '', contractMethod: p.contractMethod || '',
+  ...Object.fromEntries(PRICE_FIELDS.map(f => [f.key, p[f.key] != null ? String(p[f.key]) : ''])) as Record<PriceKey, string>,
+})
+
+// APIへ送る形に変換（空文字はnull、円項目は数値）
+const formToPayload = (form: PartnerForm) => {
+  const orNull = (v: string) => (v.trim() ? v.trim() : null)
+  return {
+    name: form.name, type: form.type, priority: Number(form.priority) || 0, isActive: form.isActive,
+    contactName: orNull(form.contactName), phone: orNull(form.phone), email: orNull(form.email),
+    address: orNull(form.address), website: orNull(form.website), notes: orNull(form.notes),
+    contractDate: form.contractDate, contractMethod: orNull(form.contractMethod),
+    ...Object.fromEntries(PRICE_FIELDS.map(f => [f.key, form[f.key] === '' ? null : Math.round(Number(form[f.key]))])),
+  }
+}
+
+const yen = (v: number | null | undefined) => (v != null ? `¥${v.toLocaleString()}` : '—')
 
 export default function PartnersPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState(EMPTY_FORM)
+  const [form, setForm] = useState<PartnerForm>(EMPTY_FORM)
+  const [editTarget, setEditTarget] = useState<any>(null)
 
   const { data: partners = [], isLoading } = useQuery({
     queryKey: ['partners'],
     queryFn: () => api.get('/partners').then(r => r.data),
   })
 
+  const closeForm = () => { setShowForm(false); setEditTarget(null); setForm(EMPTY_FORM) }
+
   const createMutation = useMutation({
     mutationFn: (data: any) => api.post('/partners', data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['partners'] }); setShowForm(false); setForm(EMPTY_FORM) },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['partners'] }); closeForm() },
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: any }) => api.put(`/partners/${id}`, data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['partners'] }); closeForm() },
   })
 
   const canEdit = hasRole(user, 'ADMIN')
+  const saving = createMutation.isPending || updateMutation.isPending
+  const saveError: any = createMutation.error || updateMutation.error
+
+  const openCreate = () => { setEditTarget(null); setForm(EMPTY_FORM); setShowForm(true) }
+  const openEdit = (p: any) => { setEditTarget(p); setForm(partnerToForm(p)); setShowForm(true) }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const data = formToPayload(form)
+    if (editTarget) updateMutation.mutate({ id: editTarget.id, data })
+    else createMutation.mutate(data)
+  }
 
   return (
     <div className="p-4 md:p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-800">協力会社管理</h1>
-        {canEdit && <button onClick={() => setShowForm(true)} className="btn-primary text-sm">+ 会社登録</button>}
+        {canEdit && <button onClick={openCreate} className="btn-primary text-sm">+ 会社登録</button>}
       </div>
 
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
@@ -60,11 +128,16 @@ export default function PartnersPage() {
                   <p className="text-xs text-gray-300">登録なし</p>
                 ) : (
                   typePartners.map((p: any) => (
-                    <div key={p.id} className="bg-gray-50 rounded-lg p-3">
+                    <div key={p.id}
+                      onClick={canEdit ? () => openEdit(p) : undefined}
+                      className={`bg-gray-50 rounded-lg p-3 ${canEdit ? 'cursor-pointer hover:bg-gray-100' : ''}`}>
                       <p className="font-medium text-gray-800 text-sm">{p.name}</p>
                       {p.contactName && <p className="text-xs text-gray-500">担当: {p.contactName}</p>}
                       {p.phone && <p className="text-xs text-gray-500">📞 {p.phone}</p>}
                       {p.email && <p className="text-xs text-gray-500">✉️ {p.email}</p>}
+                      {(p.unitPriceDay != null || p.unitPriceNight != null) && (
+                        <p className="text-xs text-gray-500">単価: 日勤 {yen(p.unitPriceDay)} / 夜勤 {yen(p.unitPriceNight)}</p>
+                      )}
                       <p className="text-xs text-gray-400 mt-1">優先度: {p.priority}</p>
                     </div>
                   ))
@@ -77,12 +150,12 @@ export default function PartnersPage() {
 
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md">
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-              <h2 className="font-semibold text-gray-800">協力会社登録</h2>
-              <button onClick={() => setShowForm(false)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <h2 className="font-semibold text-gray-800">{editTarget ? '協力会社編集' : '協力会社登録'}</h2>
+              <button onClick={closeForm} className="text-gray-400 hover:text-gray-600">✕</button>
             </div>
-            <form onSubmit={e => { e.preventDefault(); createMutation.mutate({ ...form, priority: Number(form.priority) }) }} className="p-6 space-y-4">
+            <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
               <div>
                 <label className="form-label">会社名 *</label>
                 <input type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="form-input" required />
@@ -111,9 +184,53 @@ export default function PartnersPage() {
                 <label className="form-label">メールアドレス</label>
                 <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} className="form-input" />
               </div>
+              <div>
+                <label className="form-label">住所</label>
+                <input type="text" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))} className="form-input" />
+              </div>
+              <div>
+                <label className="form-label">Webサイト</label>
+                <input type="url" value={form.website} onChange={e => setForm(f => ({ ...f, website: e.target.value }))} className="form-input" placeholder="https://" />
+              </div>
+              <div>
+                <label className="form-label">備考</label>
+                <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} className="form-input" rows={3} />
+              </div>
+
+              {/* 契約単価 */}
+              <h4 className="text-sm font-semibold text-gray-700 border-b pb-1 mt-2">契約単価</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="form-label">契約締結日</label>
+                  <input type="date" value={form.contractDate} onChange={e => setForm(f => ({ ...f, contractDate: e.target.value }))} className="form-input" />
+                </div>
+                <div>
+                  <label className="form-label">契約方法</label>
+                  <input type="text" value={form.contractMethod} onChange={e => setForm(f => ({ ...f, contractMethod: e.target.value }))} className="form-input" placeholder="GMO / 郵送 など" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {PRICE_FIELDS.map(({ key, label }) => (
+                  <div key={key}>
+                    <label className="form-label">{label}</label>
+                    <input type="number" min="0" step="1" value={form[key]} onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))} className="form-input text-right" />
+                  </div>
+                ))}
+              </div>
+
+              {editTarget && (
+                <label className="flex items-center gap-2 cursor-pointer text-sm">
+                  <input type="checkbox" checked={form.isActive} onChange={e => setForm(f => ({ ...f, isActive: e.target.checked }))} className="w-4 h-4 rounded border-gray-300" />
+                  有効（オフにすると一覧に表示されなくなります）
+                </label>
+              )}
+
+              {saveError && (
+                <p className="text-sm text-red-600">{saveError.response?.data?.error || '保存に失敗しました'}</p>
+              )}
               <div className="flex gap-3">
-                <button type="button" onClick={() => setShowForm(false)} className="btn-secondary flex-1">キャンセル</button>
-                <button type="submit" disabled={createMutation.isPending} className="btn-primary flex-1 disabled:opacity-50">登録</button>
+                <button type="button" onClick={closeForm} className="btn-secondary flex-1">キャンセル</button>
+                <button type="submit" disabled={saving} className="btn-primary flex-1 disabled:opacity-50">{editTarget ? '保存' : '登録'}</button>
               </div>
             </form>
           </div>
