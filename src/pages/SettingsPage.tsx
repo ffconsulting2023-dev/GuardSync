@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole, canIssueAccounts } from '../lib/auth'
 import AccountManager from '../components/AccountManager'
+import CompanyProfileForm from '../components/CompanyProfileForm'
 import { USER_ROLES } from '../lib/constants'
 
 export default function SettingsPage() {
@@ -154,17 +155,13 @@ export default function SettingsPage() {
 
       {/* 会社情報 */}
       {tab === 'company' && (
-        <div className="card space-y-3">
-          <h3 className="font-semibold text-gray-800">会社情報</h3>
-          <div>
-            <p className="text-xs text-gray-500">会社名</p>
-            <p className="font-medium text-gray-800">{user?.company?.name}</p>
-          </div>
-          <div>
+        <div className="space-y-4">
+          <div className="card flex items-center gap-3">
             <p className="text-xs text-gray-500">プラン</p>
             <span className={`badge ${user?.company?.plan === 'MAX' ? 'badge-success' : 'badge-info'}`}>{user?.company?.plan}</span>
+            <p className="text-xs text-gray-400">プランの変更はサポートまでお問い合わせください。</p>
           </div>
-          <p className="text-xs text-gray-400">会社名・プランの変更はサポートまでお問い合わせください。</p>
+          <CompanyProfileForm canEdit={canAdmin} />
         </div>
       )}
 

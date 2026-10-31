@@ -27,6 +27,7 @@ export const EMPTY_CLIENT_FORM = {
   contractDate: '', unitPriceDay: '', unitPriceNight: '', unitPriceHolidayDay: '', unitPriceHolidayNight: '',
   overtimeDayRate: '', overtimeNightRate: '', overtimeHolidayDayRate: '', overtimeHolidayNightRate: '',
   qualificationAllowance: '', radioAllowance: '', otherAllowance1: '', otherAllowance2: '',
+  seasonalAllowance: '', nominationAllowance: '', contractMethod: '',
   invoiceRegistrationNumber: '',
 }
 

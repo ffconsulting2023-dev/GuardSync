@@ -77,6 +77,7 @@ export const SUBPAY_NEXT_STATUS: Record<string, string> = {
 
 // ─── 雇用形態 ─────────────────────────────────
 export const EMPLOYMENT_TYPE: Record<string, string> = {
+  EXECUTIVE: '役員',
   FULL_TIME: '正社員',
   PART_TIME: 'アルバイト',
   CONTRACT:  '契約社員',

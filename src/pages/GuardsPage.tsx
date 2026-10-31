@@ -46,6 +46,7 @@ interface GuardFormData {
   // 住所
   postalCode: string; prefecture: string; city: string; addressDetail: string; buildingName: string
   nearestStation1: string; line1: string; nearestStation2: string; line2: string
+  commuteNotes: string
   birthplace: string; medicalHistory: string
   // 緊急連絡先
   emergencyName: string; emergencyKana: string; emergencyRelation: string
@@ -61,13 +62,14 @@ interface GuardFormData {
   // 社会保険
   employmentInsurance: boolean; healthInsurance: boolean; healthInsuranceGrade: number
   pensionInsurance: boolean; pensionInsuranceGrade: number; nursingInsurance: boolean
+  employmentInsuranceNumber: string; pensionNumber: string
   // 家族
   spouse: boolean; spouseDeduction: boolean; dependents: number
   // 書類
   docMyNumber: boolean; docIdCard: boolean; docIdentityCert: boolean; docResidenceCard: boolean
   docResume: boolean; docPledge: boolean; docPhoto: boolean; docOther: boolean
   // 銀行口座
-  bankName: string; bankBranch: string; bankAccountType: string; bankAccountNumber: string; bankAccountHolder: string
+  bankName: string; bankBranch: string; bankCode: string; branchCode: string; bankAccountType: string; bankAccountNumber: string; bankAccountHolder: string
 }
 
 const EMPTY_FORM: GuardFormData = {
@@ -76,7 +78,7 @@ const EMPTY_FORM: GuardFormData = {
   lineWorksId: '',
   guardClass: '', skills: [], nationality: '', financialIssues: false, mbti: '', dormitory: '', notes: '',
   postalCode: '', prefecture: '', city: '', addressDetail: '', buildingName: '',
-  nearestStation1: '', line1: '', nearestStation2: '', line2: '', birthplace: '', medicalHistory: '',
+  nearestStation1: '', line1: '', nearestStation2: '', line2: '', commuteNotes: '', birthplace: '', medicalHistory: '',
   emergencyName: '', emergencyKana: '', emergencyRelation: '',
   emergencyPostal: '', emergencyPrefecture: '', emergencyCity: '', emergencyAddressDetail: '',
   ngGuardIds: [], ngCompanies: [], ngConditions: '',
@@ -87,10 +89,11 @@ const EMPTY_FORM: GuardFormData = {
   otherAllowance1: 0, otherAllowance2: 0, otherAllowanceName1: '', otherAllowanceName2: '',
   employmentInsurance: false, healthInsurance: false, healthInsuranceGrade: 0,
   pensionInsurance: false, pensionInsuranceGrade: 0, nursingInsurance: false,
+  employmentInsuranceNumber: '', pensionNumber: '',
   spouse: false, spouseDeduction: false, dependents: 0,
   docMyNumber: false, docIdCard: false, docIdentityCert: false, docResidenceCard: false,
   docResume: false, docPledge: false, docPhoto: false, docOther: false,
-  bankName: '', bankBranch: '', bankAccountType: '普通', bankAccountNumber: '', bankAccountHolder: '',
+  bankName: '', bankBranch: '', bankCode: '', branchCode: '', bankAccountType: '普通', bankAccountNumber: '', bankAccountHolder: '',
 }
 
 export default function GuardsPage() {
@@ -220,6 +223,7 @@ export default function GuardsPage() {
       city: guard.city || '', addressDetail: guard.addressDetail || '', buildingName: guard.buildingName || '',
       nearestStation1: guard.nearestStation1 || '', line1: guard.line1 || '',
       nearestStation2: guard.nearestStation2 || '', line2: guard.line2 || '',
+      commuteNotes: guard.commuteNotes || '',
       birthplace: guard.birthplace || '', medicalHistory: guard.medicalHistory || '',
       emergencyName: guard.emergencyName || '', emergencyKana: guard.emergencyKana || '',
       emergencyRelation: guard.emergencyRelation || '', emergencyPostal: guard.emergencyPostal || '',
@@ -239,12 +243,14 @@ export default function GuardsPage() {
       healthInsuranceGrade: guard.healthInsuranceGrade || 0,
       pensionInsurance: guard.pensionInsurance || false, pensionInsuranceGrade: guard.pensionInsuranceGrade || 0,
       nursingInsurance: guard.nursingInsurance || false,
+      employmentInsuranceNumber: guard.employmentInsuranceNumber || '', pensionNumber: guard.pensionNumber || '',
       spouse: guard.spouse || false, spouseDeduction: guard.spouseDeduction || false, dependents: guard.dependents || 0,
       docMyNumber: guard.docMyNumber || false, docIdCard: guard.docIdCard || false,
       docIdentityCert: guard.docIdentityCert || false, docResidenceCard: guard.docResidenceCard || false,
       docResume: guard.docResume || false, docPledge: guard.docPledge || false,
       docPhoto: guard.docPhoto || false, docOther: guard.docOther || false,
       bankName: bank.bank || bank.bankName || '', bankBranch: bank.branch || bank.bankBranch || '',
+      bankCode: bank.bankCode || '', branchCode: bank.branchCode || '',
       bankAccountType: bank.type || bank.bankAccountType || '普通',
       bankAccountNumber: bank.number || bank.bankAccountNumber || '',
       bankAccountHolder: bank.holder || bank.bankAccountHolder || '',
@@ -255,12 +261,12 @@ export default function GuardsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const { bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder, otherCertText, ...rest } = form
+    const { bankName, bankBranch, bankCode, branchCode, bankAccountType, bankAccountNumber, bankAccountHolder, otherCertText, ...rest } = form
     const otherCerts = otherCertText ? otherCertText.split(/[,、\n]/).map(s => s.trim()).filter(Boolean) : []
     const data: any = {
       ...rest,
       certifications: [...rest.certifications, ...otherCerts],
-      bankAccount: bankName ? { bank: bankName, branch: bankBranch, type: bankAccountType, number: bankAccountNumber, holder: bankAccountHolder } : undefined,
+      bankAccount: bankName ? { bank: bankName, branch: bankBranch, bankCode, branchCode, type: bankAccountType, number: bankAccountNumber, holder: bankAccountHolder } : undefined,
       ngGuardIds: form.ngGuardIds.length > 0 ? form.ngGuardIds : undefined,
       ngCompanies: form.ngCompanies.length > 0 ? form.ngCompanies : undefined,
     }
@@ -684,6 +690,10 @@ export default function GuardsPage() {
                     </div>
                   </div>
                   <div>
+                    <label className="form-label">交通費の取り決め</label>
+                    <textarea value={form.commuteNotes} onChange={e => setForm(f => ({ ...f, commuteNotes: e.target.value }))} className="form-input" rows={2} placeholder="例: 上限1日1,000円、定期代支給など" />
+                  </div>
+                  <div>
                     <label className="form-label">本籍地</label>
                     <input type="text" value={form.birthplace} onChange={e => setForm(f => ({ ...f, birthplace: e.target.value }))} className="form-input" />
                   </div>
@@ -923,6 +933,16 @@ export default function GuardsPage() {
                       )}
                     </div>
                     {checkInput('介護保険', 'nursingInsurance')}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="form-label">雇用保険被保険者番号</label>
+                        <input type="text" value={form.employmentInsuranceNumber} onChange={e => setForm(f => ({ ...f, employmentInsuranceNumber: e.target.value }))} className="form-input" maxLength={30} />
+                      </div>
+                      <div>
+                        <label className="form-label">基礎年金番号</label>
+                        <input type="text" value={form.pensionNumber} onChange={e => setForm(f => ({ ...f, pensionNumber: e.target.value }))} className="form-input" maxLength={30} />
+                      </div>
+                    </div>
                   </div>
 
                   <h4 className="text-sm font-semibold text-gray-700 border-b pb-1 mt-4">家族構成</h4>
@@ -1005,6 +1025,17 @@ export default function GuardsPage() {
                     <div>
                       <label className="form-label">支店名</label>
                       <input type="text" value={form.bankBranch} onChange={e => setForm(f => ({ ...f, bankBranch: e.target.value }))} className="form-input" />
+                    </div>
+                  </div>
+                  {/* 全銀振込データ用コード */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label">銀行コード</label>
+                      <input type="text" inputMode="numeric" maxLength={4} placeholder="4桁" value={form.bankCode} onChange={e => setForm(f => ({ ...f, bankCode: e.target.value.replace(/\D/g, '') }))} className="form-input" />
+                    </div>
+                    <div>
+                      <label className="form-label">支店コード</label>
+                      <input type="text" inputMode="numeric" maxLength={3} placeholder="3桁" value={form.branchCode} onChange={e => setForm(f => ({ ...f, branchCode: e.target.value.replace(/\D/g, '') }))} className="form-input" />
                     </div>
                   </div>
                   <div className="grid grid-cols-3 gap-3">

@@ -30,6 +30,25 @@ model Company {
   billingEmail        String?
   lastPaymentAt       DateTime?
 
+  // ─── 会社概要 ───
+  nameKana              String?
+  representative        String?  // 代表者
+  postalCode            String?
+  address               String?
+  phone                 String?
+  email                 String?
+  website               String?
+  securityLicenseNumber String?  // 警備業認定番号
+  // ─── 社会保険・労働保険の事業所情報（取り込み項目は shared/import.ts COMPANY_INSURANCE_FIELDS）───
+  socialInsuranceOfficeSymbol     String?  // 事業所整理記号
+  socialInsuranceOfficeNumber     String?  // 事業所番号（社会保険）
+  healthInsuranceNumber           String?  // 健康保険の番号
+  employmentInsuranceOfficeNumber String?  // 雇用保険 適用事業所番号
+  employmentInsuranceJurisdiction String?  // 雇用保険 管轄区分
+  laborInsuranceNumber            String?  // 労働保険番号
+  laborInsuranceEstablishmentType String?  // 労働保険 設置区分
+  industryClassification          String?  // 産業分類
+
   users         User[]
   guards        Guard[]
   clients       Client[]
@@ -54,6 +73,8 @@ model Company {
   subcontractorPayments SubcontractorPayment[]
   billingSubscriptions  BillingSubscription[]
   billingLogs           BillingLog[]
+  siteRequests          SiteRequest[]
+  importBatches         ImportBatch[]
 }
 
 enum Plan {
@@ -272,6 +293,9 @@ model Guard {
   docOther            Boolean @default(false)
   docWorkPermit       Boolean @default(false)  // 資格外活動許可書
 
+  employmentInsuranceNumber String? // 雇用保険被保険者番号
+  pensionNumber     String?   // 基礎年金番号（社保番号）
+  commuteNotes      String?   // 交通費の取り決め（例: 往復バス500円追加）
   myNumber          String?   // マイナンバー（AES-256暗号化して保存）
   myNumberUpdatedAt DateTime? // 最終更新日時
 
@@ -353,6 +377,7 @@ enum Gender {
 }
 
 enum EmploymentType {
+  EXECUTIVE     // 役員
   FULL_TIME     // 正社員
   PART_TIME     // アルバイト・パート
   CONTRACT      // 契約社員
@@ -430,6 +455,9 @@ model Client {
   overtimeHolidayDayRate Int?
   overtimeHolidayNightRate Int?
   qualificationAllowance Int?
+  seasonalAllowance      Int?     // 季節手当
+  nominationAllowance    Int?     // 指名料
+  contractMethod         String?  // 契約方法（GMO・郵送 等）
   radioAllowance         Int?
   otherAllowance1        Int?
   otherAllowance2        Int?
@@ -479,6 +507,7 @@ model Site {
   lat         Float?
   lng         Float?
   clientName  String?  // 発注元名（clientId未設定時の手入力用）
+  nearestStation String?
   clientPhone String?
   notes       String?
   isActive    Boolean  @default(true)
@@ -497,6 +526,7 @@ model Site {
 
   contracts   Contract[]
   schedules   Schedule[]
+  siteRequests SiteRequest[]
   securityReports SecurityReport[]
   equipmentAssignments EquipmentAssignment[]
 
@@ -564,11 +594,29 @@ model Partner {
   email       String?
   priority    Int         @default(0) // 優先度（高いほど優先）
   isActive    Boolean     @default(true)
+  address     String?
+  website     String?
+  notes       String?
+  // 契約単価（再委託・相互応援の単価。区分は Client の契約単価と同じ）
+  contractDate             DateTime?
+  contractMethod           String?
+  unitPriceDay             Int?
+  unitPriceNight           Int?
+  unitPriceHolidayDay      Int?
+  unitPriceHolidayNight    Int?
+  overtimeDayRate          Int?
+  overtimeNightRate        Int?
+  overtimeHolidayDayRate   Int?
+  overtimeHolidayNightRate Int?
+  qualificationAllowance   Int?
+  seasonalAllowance        Int?
+  nominationAllowance      Int?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
   payments    SubcontractorPayment[]
   reportShares SecurityReportShare[]
+  siteRequests SiteRequest[]
 
   @@index([companyId])
 }
@@ -689,12 +737,66 @@ model Schedule {
   sentAt         DateTime?  // 送信日時
   contractId     String?  // FK to Contract（どの契約に基づくシフトか）
   contract       Contract? @relation(fields: [contractId], references: [id])
+  siteRequestId  String?  // FK to SiteRequest（どの依頼に対する配員か）
+  siteRequest    SiteRequest? @relation(fields: [siteRequestId], references: [id])
 
   attendance  Attendance?
 
   @@index([companyId, date])
   @@index([guardId, date])
   @@index([contractId])
+  @@index([siteRequestId])
+}
+
+// 現場依頼（受注実績）: 1日・1現場の依頼。配員（Schedule）はこれに紐付き、再委託分は協力会社として記録する
+model SiteRequest {
+  id                   String    @id @default(uuid())
+  companyId            String
+  company              Company   @relation(fields: [companyId], references: [id])
+  siteId               String
+  site                 Site      @relation(fields: [siteId], references: [id])
+  date                 DateTime  @db.Date
+  timeLabel            String?   // 元の表記（「巡回」など時刻で表せない依頼も保持）
+  startTime            String?   // "08:30"
+  endTime              String?   // "17:30"
+  shiftType            String    @default("DAY") // DAY / NIGHT
+  status               String    @default("CONFIRMED") // shared/siteRequest.ts SITE_REQUEST_STATUS（稼働 / 予定 / 中止）
+  requestedCount       Int       @default(1)     // 依頼人数
+  qualifiedCount       Int       @default(0)     // うち資格者
+  unitPrice            Int?      // 依頼単価（1人1日・税別）
+  transportFee         Int?      // 交通費単価
+  overtimeRate         Int?      // 残業単価
+  overtimeHours        Float?    // 残業時間
+  overtimeCount        Int?      // 残業人数
+  subcontractPartnerId String?   // 再委託先
+  subcontractPartner   Partner?  @relation(fields: [subcontractPartnerId], references: [id])
+  subcontractCount     Int       @default(0)     // 再委託の人数
+  subcontractUnitPrice Int?      // 再委託単価
+  notes                String?
+  sourceKey            String?   // 取り込み元の行（例: 現場管理#12）。再取り込み時に同じ依頼を更新するための照合キー
+  importBatchId        String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  schedules            Schedule[]
+
+  @@unique([companyId, sourceKey])
+  @@index([companyId, date])
+  @@index([siteId])
+}
+
+// データ取り込みの履歴
+model ImportBatch {
+  id            String   @id @default(uuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  kind          String   // shared/import.ts IMPORT_KINDS のキー
+  sourceName    String   // ファイル名・シート名
+  createdById   String?
+  createdByName String
+  summary       Json     // { created, updated, skipped, errors, ... }
+  createdAt     DateTime @default(now())
+
+  @@index([companyId])
 }
 
 enum ScheduleStatus {

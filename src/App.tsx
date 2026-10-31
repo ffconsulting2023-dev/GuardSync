@@ -21,6 +21,8 @@ import SuperAdminPage from './pages/SuperAdminPage'
 import SecurityReportsPage from './pages/SecurityReportsPage'
 import SharedReportPage from './pages/SharedReportPage'
 import SetupPasswordPage from './pages/SetupPasswordPage'
+import ImportPage from './pages/ImportPage'
+import SiteRequestsPage from './pages/SiteRequestsPage'
 import GuardAppPage from './pages/guard/GuardAppPage'
 import SettingsPage from './pages/SettingsPage'
 import VehiclesPage from './pages/VehiclesPage'
@@ -128,6 +130,8 @@ export default function App() {
                     <Route path="notifications/*" element={<NotificationsPage />} />
                     <Route path="auto-receipts/*" element={<AutoReceiptPage />} />
                     <Route path="settings/*" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
+                    <Route path="import/*" element={<ErrorBoundary><ImportPage /></ErrorBoundary>} />
+                    <Route path="site-requests/*" element={<ErrorBoundary><SiteRequestsPage /></ErrorBoundary>} />
                     <Route path="super-admin/*" element={
                       auth.user?.isSuperAdmin
                         ? <SuperAdminPage />

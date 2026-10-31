@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { format } from 'date-fns'
 import AccountManager from '../components/AccountManager'
+import CompanyProfileForm from '../components/CompanyProfileForm'
 import {
   SUBSCRIPTION_STATUS, PLAN_TYPE, BILLING_LOG_TYPE,
 } from '../lib/constants'
@@ -366,6 +367,16 @@ function BillingTab() {
 // ─────────────────────────────────────────────
 function CompaniesTab() {
   const [accountsFor, setAccountsFor] = useState<{ id: string; name: string } | null>(null)
+  const [newCompany, setNewCompany] = useState({ name: '', code: '' })
+  const qc = useQueryClient()
+  const createCompany = useMutation({
+    mutationFn: () => api.post('/super-admin/companies', newCompany).then(r => r.data),
+    onSuccess: (c: any) => {
+      setNewCompany({ name: '', code: '' })
+      qc.invalidateQueries({ queryKey: ['super-admin-companies'] })
+      setAccountsFor({ id: c.id, name: c.name }) // 作成後そのまま管理者アカウントを発行できるように開く
+    },
+  })
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteResult, setInviteResult] = useState<any>(null)
 
@@ -381,6 +392,16 @@ function CompaniesTab() {
 
   return (
     <div className="space-y-4">
+      <div className="card space-y-3">
+        <h2 className="font-semibold text-gray-800">会社を作成</h2>
+        <p className="text-xs text-gray-500">作成後に「ID発行・管理者設定」で会社の管理者アカウントを発行し、認証用URL・QRコードを渡してください。スプレッドシート等からの移行は「データ取り込み」で取り込み先にこの会社を選んで行えます。</p>
+        <div className="flex flex-wrap gap-2">
+          <input value={newCompany.name} onChange={e => setNewCompany(c => ({ ...c, name: e.target.value }))} placeholder="会社名（例: 株式会社MVV）" className="form-input flex-1 min-w-[12rem]" />
+          <input value={newCompany.code} onChange={e => setNewCompany(c => ({ ...c, code: e.target.value.toUpperCase() }))} placeholder="会社コード（例: MVV）" className="form-input w-40 font-mono" />
+          <button onClick={() => createCompany.mutate()} disabled={!newCompany.name || !newCompany.code || createCompany.isPending} className="btn-primary disabled:opacity-50 whitespace-nowrap">作成</button>
+        </div>
+        {createCompany.isError && <p className="text-sm text-red-600">{(createCompany.error as any)?.response?.data?.error || '作成に失敗しました'}</p>}
+      </div>
       <div className="card">
         <h2 className="font-semibold text-gray-800 mb-3">新規会社招待</h2>
         <div className="flex gap-2">
@@ -458,7 +479,10 @@ function CompaniesTab() {
               </div>
               <button onClick={() => setAccountsFor(null)} className="text-gray-400 hover:text-gray-600" aria-label="閉じる">✕</button>
             </div>
-            <div className="p-6"><AccountManager companyId={accountsFor.id} /></div>
+            <div className="p-6 space-y-6">
+              <AccountManager companyId={accountsFor.id} />
+              <CompanyProfileForm companyId={accountsFor.id} canEdit />
+            </div>
           </div>
         </div>
       )}
