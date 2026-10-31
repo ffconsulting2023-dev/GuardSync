@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { format } from 'date-fns'
 import { useAuth } from '../hooks/useAuth'
+import { hasRole } from '../lib/auth'
 import AuthImage from '../components/AuthImage'
 import ReportView from '../components/report/ReportView'
 import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent, fromSavedContent } from '../components/report/ReportContentForm'
@@ -183,7 +184,7 @@ function PhotoManager({ report, onChanged }: { report: any; onChanged: () => voi
 export default function SecurityReportsPage() {
   const qc = useQueryClient()
   const { user } = useAuth()
-  const canEdit = !!user && (user.isSuperAdmin || EDIT_ROLES.includes(user.role))
+  const canEdit = hasRole(user, ...EDIT_ROLES)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState(EMPTY_FORM)
   const [content, setContent] = useState(EMPTY_REPORT_CONTENT)

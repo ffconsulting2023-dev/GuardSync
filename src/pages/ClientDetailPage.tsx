@@ -542,7 +542,7 @@ export default function ClientDetailPage() {
               )}
 
               {!isNew && tab === 'reportTemplate' && id && (
-                <ReportTemplateEditor clientId={id} canEdit={!!user && (user.isSuperAdmin || ['ADMIN', 'MANAGER'].includes(user.role))} />
+                <ReportTemplateEditor clientId={id} canEdit={hasRole(user, 'ADMIN', 'MANAGER')} />
               )}
 
               {!isNew && tab === 'history' && (
