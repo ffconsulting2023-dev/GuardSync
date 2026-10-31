@@ -39,6 +39,16 @@ model Company {
   email                 String?
   website               String?
   securityLicenseNumber String?  // 警備業認定番号
+  securityLicenseDate   DateTime? @db.Date // 認定年月日
+  securityLicenseExpiry DateTime? @db.Date // 認定の有効期限（認定から5年。警備業法5条）
+  securityLicenseAuthority String? // 認定公安委員会
+  securityServiceCategories String? // 警備業務の区分（1号〜4号）
+  securityEducationManager String?  // 警備員指導教育責任者
+  nameOrigin            String?  // 社名の由来
+  establishedOn         String?  // 設立（「2026年6月」のように年月のみの場合があるため文字列）
+  capital               String?  // 資本金
+  businessDescription   String?  // 事業内容
+  vision                String?  // ビジョン
   // ─── 社会保険・労働保険の事業所情報（取り込み項目は shared/import.ts COMPANY_INSURANCE_FIELDS）───
   socialInsuranceOfficeSymbol     String?  // 事業所整理記号
   socialInsuranceOfficeNumber     String?  // 事業所番号（社会保険）
