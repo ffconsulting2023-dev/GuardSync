@@ -1,0 +1,22 @@
+# ローカル開発用の PostgreSQL（本番・ステージングとは無関係）
+#   起動: npm run db:up    停止: npm run db:down    データごと削除: docker compose -f docker-compose.dev.yml down -v
+services:
+  db:
+    image: postgres:16
+    container_name: guardsync-dev-db
+    environment:
+      POSTGRES_USER: guardsync
+      POSTGRES_PASSWORD: guardsync
+      POSTGRES_DB: guardsync_dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - guardsync-dev-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardsync -d guardsync_dev"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  guardsync-dev-db:
