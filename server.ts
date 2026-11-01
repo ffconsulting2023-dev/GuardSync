@@ -939,14 +939,21 @@ app.get('/api/import/history', authenticate, requireCompanyAdminScope, async (re
 
 const companyProfileSelect = {
   id: true, name: true, code: true, nameKana: true, representative: true, postalCode: true, address: true, phone: true, email: true, website: true, securityLicenseNumber: true,
+  nameOrigin: true, establishedOn: true, capital: true, businessDescription: true, vision: true,
+  securityLicenseDate: true, securityLicenseExpiry: true, securityLicenseAuthority: true, securityServiceCategories: true, securityEducationManager: true,
   socialInsuranceOfficeSymbol: true, socialInsuranceOfficeNumber: true, healthInsuranceNumber: true, employmentInsuranceOfficeNumber: true,
   employmentInsuranceJurisdiction: true, laborInsuranceNumber: true, laborInsuranceEstablishmentType: true, industryClassification: true,
 } as const
 const optText = (max: number) => z.string().trim().max(max).nullable().optional().transform(v => (v ? v : null))
+const optDate = z.union([z.literal(''), z.null(), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]).optional()
+  .transform(v => (v ? new Date(`${v}T00:00:00Z`) : v === undefined ? undefined : null))
 const companyProfileSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
   nameKana: optText(100), representative: optText(100), postalCode: optText(10), address: optText(300),
   phone: optText(30), email: optText(200), website: optText(300), securityLicenseNumber: optText(50),
+  nameOrigin: optText(200), establishedOn: optText(50), capital: optText(50), businessDescription: optText(500), vision: optText(200),
+  securityLicenseAuthority: optText(50), securityServiceCategories: optText(300), securityEducationManager: optText(100),
+  securityLicenseDate: optDate, securityLicenseExpiry: optDate,
   ...Object.fromEntries(Object.keys(COMPANY_INSURANCE_FIELDS).map(k => [k, optText(100)])),
 })
 
