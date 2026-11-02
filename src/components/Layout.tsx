@@ -8,6 +8,7 @@ interface NavItem {
   label: string
   icon: string
   adminOnly?: boolean // 会社の管理者・スーパー管理者のみ表示
+  managerOnly?: boolean // 管理者・マネージャーのみ表示
 }
 
 interface NavGroup {
@@ -23,6 +24,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: '/guards',    label: '隊員管理',   icon: '👷' },
       { path: '/partners',  label: '協力会社',   icon: '🤝' },
+      { path: '/recruitment-report', label: '採用経路別 稼働実績', icon: '📊', managerOnly: true },
       { path: '/vehicles',  label: '車両管理',   icon: '🚗' },
       { path: '/equipment', label: '備品管理',   icon: '📦' },
     ],
@@ -140,7 +142,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   {group.module}
                 </span>
               </div>
-              {group.items.filter(item => !item.adminOnly || hasRole(user, 'ADMIN')).map((item) => (
+              {group.items.filter(item => (!item.adminOnly || hasRole(user, 'ADMIN')) && (!item.managerOnly || hasRole(user, 'ADMIN', 'MANAGER'))).map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}

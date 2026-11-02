@@ -5,12 +5,13 @@ import { useAuth } from '../hooks/useAuth'
 import { hasRole, canIssueAccounts } from '../lib/auth'
 import AccountManager from '../components/AccountManager'
 import CompanyProfileForm from '../components/CompanyProfileForm'
+import RecruitmentSettings from '../components/RecruitmentSettings'
 import { USER_ROLES } from '../lib/constants'
 
 export default function SettingsPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
-  const [tab, setTab] = useState<'lineworks' | 'company' | 'users'>('lineworks')
+  const [tab, setTab] = useState<'lineworks' | 'company' | 'users' | 'recruitment'>('lineworks')
 
   const { data: lwSettings } = useQuery({
     queryKey: ['lw-settings'],
@@ -51,6 +52,7 @@ export default function SettingsPage() {
         {[
           { key: 'lineworks', label: 'LINE Works' },
           { key: 'company', label: '会社情報' },
+          { key: 'recruitment', label: '採用経路' },
           { key: 'users', label: canIssueAccounts(user) ? 'ユーザー・ID発行' : 'ユーザー管理' },
         ].map(t => (
           <button
@@ -154,6 +156,8 @@ export default function SettingsPage() {
       )}
 
       {/* 会社情報 */}
+      {tab === 'recruitment' && <RecruitmentSettings canEdit={hasRole(user, 'ADMIN', 'MANAGER')} />}
+
       {tab === 'company' && (
         <div className="space-y-4">
           <div className="card flex items-center gap-3">

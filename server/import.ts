@@ -12,6 +12,8 @@ import {
 } from '../shared/import'
 export type { Resolution, ImportRequest, ImportResult }
 import { estimateRequestBilling } from '../shared/siteRequest'
+import { RECRUITMENT_AGENCY_CATEGORY } from '../shared/recruitment'
+import { ensureRecruitmentChannels } from './recruitment'
 
 export interface ImportDeps {
   prisma: PrismaClient
@@ -203,6 +205,22 @@ async function importGuards(deps: ImportDeps, companyId: string, actor: ImportAc
     if (mn) myNumberRows.set(mn, [...(myNumberRows.get(mn) ?? []), rowNo])
   }
   const nextNo = await nextEmployeeNumbers(deps.prisma, companyId)
+  // 採用経路: 媒体マスタ → 人材紹介会社（種別が人材紹介会社の取引先）の順に照合し、どちらでもなければ自由記入として保存する
+  await ensureRecruitmentChannels(deps.prisma, companyId)
+  const [channels, agencies] = await Promise.all([
+    deps.prisma.recruitmentChannel.findMany({ where: { companyId }, select: { id: true, name: true } }),
+    deps.prisma.client.findMany({ where: { companyId, category: RECRUITMENT_AGENCY_CATEGORY }, select: { id: true, name: true } }),
+  ])
+  const normChannel = (s: string) => s.normalize('NFKC').replace(/\s/g, '').toLowerCase()
+  const recruitmentOf = (v: string) => {
+    if (!v) return {}
+    const ch = channels.find(c => normChannel(c.name) === normChannel(v))
+    if (ch) return { recruitmentChannelId: ch.id, recruitmentAgencyId: null }
+    const nv = normalizeCompanyName(v)
+    const ag = agencies.find(a => { const na = normalizeCompanyName(a.name); return na === nv || na.startsWith(nv) || nv.startsWith(na) })
+    if (ag) return { recruitmentChannelId: null, recruitmentAgencyId: ag.id }
+    return { recruitmentChannelId: null, recruitmentAgencyId: null, recruitmentNote: v }
+  }
   const ops: ((tx: Prisma.TransactionClient) => Promise<unknown>)[] = []
   const seen = new Map<string, number>()
   let myNumberCount = 0
@@ -276,6 +294,7 @@ async function importGuards(deps: ImportDeps, companyId: string, actor: ImportAc
       commuteNotes: cell(r, m, 'commuteNotes'),
       notes: cell(r, m, 'notes'),
     })
+    Object.assign(data, recruitmentOf(cell(r, m, 'recruitment')))
     if (myNumber) myNumberCount++
     changes.push({
       row: rowNo, action: found ? 'update' : 'create', label: name,
