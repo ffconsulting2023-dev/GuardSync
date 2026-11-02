@@ -81,6 +81,7 @@ export const IMPORT_FIELDS: Record<TableImportKind, FieldDef[]> = {
     f('email', 'メールアドレス', ['メール', 'メアド']),
     f('dormitory', '寮利用', ['寮']),
     f('commuteNotes', '交通費', []),
+    f('recruitment', '採用経路', ['応募経路', '採用媒体', '求人媒体', '紹介会社']),
     f('notes', '備考', []),
   ],
   siteRequests: [

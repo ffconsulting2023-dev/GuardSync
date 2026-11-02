@@ -26,8 +26,13 @@ import {
 } from './shared/account'
 import { IMPORT_ORDER, COMPANY_INSURANCE_FIELDS } from './shared/import'
 import { estimateRequestBilling } from './shared/siteRequest'
+import {
+  RECRUITMENT_AGENCY_CATEGORY, FEE_BASIS, shiftFee, withTax,
+  type FeeRule, type FeeBasis, type WorkShift,
+} from './shared/recruitment'
 import { runImport, ImportError } from './server/import'
 import { parseUpload, fetchGoogleSheet, ParseError } from './server/importParse'
+import { ensureRecruitmentChannels } from './server/recruitment'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1014,6 +1019,181 @@ app.get('/api/site-requests', authenticate, async (req, res) => {
 })
 
 // ─────────────────────────────────────────────
+// 採用経路マスタ API
+// ─────────────────────────────────────────────
+
+// 隊員画面・マスタ画面用: 媒体（無効も含む）と人材紹介会社（取引先の種別が人材紹介会社）
+app.get('/api/recruitment-channels', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  await ensureRecruitmentChannels(prisma, companyId)
+  const [channels, agencies] = await Promise.all([
+    prisma.recruitmentChannel.findMany({ where: { companyId }, include: { _count: { select: { guards: true } } }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
+    prisma.client.findMany({
+      where: { companyId, category: RECRUITMENT_AGENCY_CATEGORY, isActive: true },
+      select: { id: true, name: true, _count: { select: { recruitedGuards: true } } },
+      orderBy: { name: 'asc' },
+    }),
+  ])
+  res.json({ channels, agencies })
+})
+
+const channelNameSchema = z.string().trim().min(1, '媒体名を入力してください').max(50)
+function channelWriteError(e: unknown): string | null {
+  return (e as { code?: string })?.code === 'P2002' ? 'その媒体名は既に登録されています' : null
+}
+
+app.post('/api/recruitment-channels', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const name = channelNameSchema.safeParse(req.body?.name)
+  if (!name.success) { res.status(400).json({ error: name.error.issues[0].message }); return }
+  const last = await prisma.recruitmentChannel.findFirst({ where: { companyId }, orderBy: { sortOrder: 'desc' }, select: { sortOrder: true } })
+  try {
+    res.status(201).json(await prisma.recruitmentChannel.create({ data: { companyId, name: name.data, sortOrder: (last?.sortOrder ?? -1) + 1 } }))
+  } catch (e) {
+    const msg = channelWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+})
+
+app.put('/api/recruitment-channels/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = z.object({ name: channelNameSchema.optional(), isActive: z.boolean().optional(), sortOrder: z.number().int().min(0).max(10000).optional() }).safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  try {
+    const r = await prisma.recruitmentChannel.updateMany({ where: { id: req.params.id, companyId }, data: parsed.data })
+    if (!r.count) { res.status(404).json({ error: '媒体が見つかりません' }); return }
+  } catch (e) {
+    const msg = channelWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+  res.json(await prisma.recruitmentChannel.findFirst({ where: { id: req.params.id, companyId } }))
+})
+
+// ─────────────────────────────────────────────
+// 人材紹介会社の紹介料（単価ルール・採用経路別の稼働実績）
+// ─────────────────────────────────────────────
+
+const ymdDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+const feeRuleSchema = z.object({
+  agencyId: z.string().uuid(),
+  effectiveFrom: ymdDate,
+  effectiveTo: ymdDate.nullable().optional().or(z.literal('')),
+  amountPerShift: z.number().int().min(0).max(1_000_000),
+  nightAmountPerShift: z.number().int().min(0).max(1_000_000).nullable().optional(),
+  maxMonthsFromHire: z.number().int().min(1).max(120).nullable().optional(),
+  basis: z.enum(Object.keys(FEE_BASIS) as [FeeBasis, ...FeeBasis[]]).default('SCHEDULE'),
+  notes: z.string().max(300).nullable().optional(),
+}).refine(r => !r.effectiveTo || r.effectiveTo >= r.effectiveFrom, { message: '適用終了日は適用開始日以降にしてください' })
+const toDate = (v: string) => new Date(`${v}T00:00:00Z`)
+const ymd = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null)
+const toFeeRule = (r: { id: string; agencyId: string; effectiveFrom: Date; effectiveTo: Date | null; amountPerShift: number; nightAmountPerShift: number | null; maxMonthsFromHire: number | null; basis: string }): FeeRule => ({
+  id: r.id, agencyId: r.agencyId, effectiveFrom: ymd(r.effectiveFrom)!, effectiveTo: ymd(r.effectiveTo),
+  amountPerShift: r.amountPerShift, nightAmountPerShift: r.nightAmountPerShift, maxMonthsFromHire: r.maxMonthsFromHire, basis: r.basis as FeeBasis,
+})
+
+app.get('/api/recruitment/fee-rules', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const rules = await prisma.recruitmentFeeRule.findMany({ where: { companyId }, include: { agency: { select: { id: true, name: true } } }, orderBy: [{ agencyId: 'asc' }, { effectiveFrom: 'desc' }] })
+  res.json(rules.map(r => ({ ...toFeeRule(r), notes: r.notes, agency: r.agency })))
+})
+
+async function saveFeeRule(req: express.Request, res: express.Response, id?: string) {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = feeRuleSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const d = parsed.data
+  const agency = await prisma.client.findFirst({ where: { id: d.agencyId, companyId }, select: { id: true } })
+  if (!agency) { res.status(400).json({ error: '人材紹介会社が見つかりません' }); return }
+  const data = {
+    agencyId: d.agencyId, effectiveFrom: toDate(d.effectiveFrom), effectiveTo: d.effectiveTo ? toDate(d.effectiveTo) : null,
+    amountPerShift: d.amountPerShift, nightAmountPerShift: d.nightAmountPerShift ?? null, maxMonthsFromHire: d.maxMonthsFromHire ?? null,
+    basis: d.basis, notes: d.notes || null,
+  }
+  if (id) {
+    const r = await prisma.recruitmentFeeRule.updateMany({ where: { id, companyId }, data })
+    if (!r.count) { res.status(404).json({ error: '単価ルールが見つかりません' }); return }
+    res.json(await prisma.recruitmentFeeRule.findFirst({ where: { id, companyId } }))
+  } else {
+    res.status(201).json(await prisma.recruitmentFeeRule.create({ data: { companyId, ...data } }))
+  }
+}
+app.post('/api/recruitment/fee-rules', authenticate, requireRole('ADMIN', 'MANAGER'), (req, res) => saveFeeRule(req, res))
+app.put('/api/recruitment/fee-rules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), (req, res) => saveFeeRule(req, res, req.params.id))
+app.delete('/api/recruitment/fee-rules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const r = await prisma.recruitmentFeeRule.deleteMany({ where: { id: req.params.id, companyId } })
+  if (!r.count) { res.status(404).json({ error: '単価ルールが見つかりません' }); return }
+  res.json({ success: true })
+})
+
+// 採用経路別の稼働実績と紹介料。勤務は中止を除く配員（ルールで「出勤打刻あり」の場合は打刻のあるもの）。
+// 今日より後の配員は「予定」として件数だけ出し、紹介料には含めない
+app.get('/api/recruitment/report', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const q = z.object({ from: ymdDate, to: ymdDate }).safeParse(req.query)
+  if (!q.success || q.data.to < q.data.from) { res.status(400).json({ error: '期間（from・to: YYYY-MM-DD）を正しく指定してください' }); return }
+  const { from, to } = q.data
+  const today = new Date().toISOString().slice(0, 10)
+
+  const [guards, schedules, firstShifts, ruleRows, channels] = await Promise.all([
+    prisma.guard.findMany({ where: { companyId }, select: { id: true, name: true, employeeNumber: true, joinedAt: true, isActive: true, recruitmentChannelId: true, recruitmentAgencyId: true, recruitmentNote: true, recruitmentAgency: { select: { id: true, name: true } } } }),
+    prisma.schedule.findMany({
+      where: { companyId, status: { not: 'CANCELLED' }, date: { gte: toDate(from), lte: toDate(to) } },
+      select: { guardId: true, date: true, shiftType: true, attendance: { select: { clockInAt: true } } },
+    }),
+    prisma.schedule.groupBy({ by: ['guardId'], where: { companyId, status: { not: 'CANCELLED' } }, _min: { date: true } }),
+    prisma.recruitmentFeeRule.findMany({ where: { companyId } }),
+    prisma.recruitmentChannel.findMany({ where: { companyId }, select: { id: true, name: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } }),
+  ])
+  const rulesByAgency = new Map<string, FeeRule[]>()
+  for (const r of ruleRows) rulesByAgency.set(r.agencyId, [...(rulesByAgency.get(r.agencyId) ?? []), toFeeRule(r)])
+  const firstShift = new Map(firstShifts.map(f => [f.guardId, ymd(f._min.date)]))
+  const shiftsByGuard = new Map<string, WorkShift[]>()
+  for (const s of schedules) {
+    const shift: WorkShift = { guardId: s.guardId, date: ymd(s.date)!, shiftType: s.shiftType, clockedIn: !!s.attendance?.clockInAt }
+    shiftsByGuard.set(s.guardId, [...(shiftsByGuard.get(s.guardId) ?? []), shift])
+  }
+
+  type Row = { id: string; name: string; employeeNumber: string; isActive: boolean; note: string | null; hireDate: string | null; shifts: number; futureShifts: number; fee: number; excluded: Record<string, number> }
+  type Group = { key: string; kind: 'channel' | 'agency' | 'free' | 'none'; name: string; hasRules?: boolean; rows: Row[] }
+  const groups = new Map<string, Group>()
+  const groupOf = (g: typeof guards[number]): Group => {
+    const [key, kind, name] = g.recruitmentChannelId ? [`channel:${g.recruitmentChannelId}`, 'channel' as const, channels.find(c => c.id === g.recruitmentChannelId)?.name ?? '（削除された媒体）']
+      : g.recruitmentAgencyId ? [`agency:${g.recruitmentAgencyId}`, 'agency' as const, g.recruitmentAgency?.name ?? '']
+        : g.recruitmentNote ? ['free', 'free' as const, 'その他（自由記入）'] : ['none', 'none' as const, '未設定']
+    if (!groups.has(key)) groups.set(key, { key, kind, name, rows: [], ...(kind === 'agency' ? { hasRules: !!rulesByAgency.get(g.recruitmentAgencyId!)?.length } : {}) })
+    return groups.get(key)!
+  }
+  for (const g of guards) {
+    const all = shiftsByGuard.get(g.id) ?? []
+    if (!all.length && !g.isActive) continue // 期間中に勤務の無い退職者は出さない
+    const past = all.filter(s => s.date <= today)
+    const hireDate = ymd(g.joinedAt) ?? firstShift.get(g.id) ?? null
+    const row: Row = { id: g.id, name: g.name, employeeNumber: g.employeeNumber, isActive: g.isActive, note: g.recruitmentNote, hireDate, shifts: past.length, futureShifts: all.length - past.length, fee: 0, excluded: {} }
+    if (g.recruitmentAgencyId) {
+      const rules = rulesByAgency.get(g.recruitmentAgencyId) ?? []
+      for (const s of past) {
+        const r = shiftFee(s, rules, hireDate)
+        row.fee += r.fee
+        if (r.reason) row.excluded[r.reason] = (row.excluded[r.reason] ?? 0) + 1
+      }
+    }
+    groupOf(g).rows.push(row)
+  }
+  const order = { agency: 0, channel: 1, free: 2, none: 3 }
+  const result = [...groups.values()]
+    .map(gr => {
+      const shifts = gr.rows.reduce((a, r) => a + r.shifts, 0)
+      const fee = gr.rows.reduce((a, r) => a + r.fee, 0)
+      return { ...gr, rows: gr.rows.sort((a, b) => b.shifts - a.shifts), totals: { guards: gr.rows.length, workingGuards: gr.rows.filter(r => r.shifts).length, shifts, futureShifts: gr.rows.reduce((a, r) => a + r.futureShifts, 0), fee, feeWithTax: withTax(fee) } }
+    })
+    .sort((a, b) => order[a.kind] - order[b.kind] || b.totals.shifts - a.totals.shifts)
+  res.json({ from, to, today, groups: result })
+})
+
+// ─────────────────────────────────────────────
 // 隊員 API
 // ─────────────────────────────────────────────
 
@@ -1028,6 +1208,7 @@ app.get('/api/guards', authenticate, async (req, res) => {
       ...(isActive !== undefined ? { isActive: isActive === 'true' } : {}),
       ...(search ? { OR: [{ name: { contains: String(search) } }, { nameKana: { contains: String(search) } }, { employeeNumber: { contains: String(search) } }] } : {}),
     },
+    include: guardRecruitmentInclude,
     orderBy: { employeeNumber: 'asc' },
   })
 
@@ -1043,7 +1224,7 @@ app.get('/api/guards', authenticate, async (req, res) => {
 app.get('/api/guards/:id', authenticate, async (req, res) => {
   const { companyId, role } = (req as any).user as JwtPayload
   const isPrivileged = ['ADMIN', 'MANAGER', 'SUPER_ADMIN'].includes(role) || (req as any).user.isSuperAdmin
-  const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId }, include: guardRecruitmentInclude })
   if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
   // H-1 & M-9: 権限が低いユーザーには機密フィールドを除外
@@ -1154,12 +1335,29 @@ const guardSchema = z.object({
   employmentInsuranceNumber: z.string().max(30).optional().nullable(),
   pensionNumber: z.string().max(30).optional().nullable(),
   commuteNotes: z.string().max(500).optional().nullable(),
+  recruitmentChannelId: z.string().uuid().nullable().optional(),
+  recruitmentAgencyId: z.string().uuid().nullable().optional(),
+  recruitmentNote: z.string().max(200).nullable().optional(),
 })
+
+// 採用経路: 媒体と人材紹介会社はどちらか一方。指定された相手が自社のものかを確認する
+async function recruitmentError(companyId: string, d: { recruitmentChannelId?: string | null; recruitmentAgencyId?: string | null }): Promise<string | null> {
+  if (d.recruitmentChannelId && d.recruitmentAgencyId) return '採用経路は媒体か人材紹介会社のどちらか一方を選んでください'
+  if (d.recruitmentChannelId && !(await prisma.recruitmentChannel.findFirst({ where: { id: d.recruitmentChannelId, companyId }, select: { id: true } }))) return '採用経路（媒体）が見つかりません'
+  if (d.recruitmentAgencyId && !(await prisma.client.findFirst({ where: { id: d.recruitmentAgencyId, companyId }, select: { id: true } }))) return '採用経路（人材紹介会社）が見つかりません'
+  return null
+}
+const guardRecruitmentInclude = {
+  recruitmentChannel: { select: { id: true, name: true } },
+  recruitmentAgency: { select: { id: true, name: true } },
+} as const
 
 app.post('/api/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const parsed = guardSchema.safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  const recruitErr = await recruitmentError(companyId, parsed.data)
+  if (recruitErr) { res.status(400).json({ error: recruitErr }); return }
 
   const guard = await prisma.guard.create({
     data: { ...parsed.data, companyId, birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined },
@@ -1174,6 +1372,11 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
 
   const parsed = guardSchema.partial().safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  const recruitErr = await recruitmentError(companyId, {
+    recruitmentChannelId: parsed.data.recruitmentChannelId !== undefined ? parsed.data.recruitmentChannelId : existing.recruitmentChannelId,
+    recruitmentAgencyId: parsed.data.recruitmentAgencyId !== undefined ? parsed.data.recruitmentAgencyId : existing.recruitmentAgencyId,
+  })
+  if (recruitErr) { res.status(400).json({ error: recruitErr }); return }
 
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   const updated = await prisma.guard.updateMany({
@@ -1233,7 +1436,7 @@ app.delete('/api/guards/:id/permanent', authenticate, requireRole('ADMIN'), asyn
 const clientSchema = z.object({
   name: z.string().min(1).max(200),
   nameKana: z.string().max(200).optional(),
-  category: z.enum(['GOVERNMENT', 'PRIVATE', 'CONSTRUCTION', 'COMMERCIAL', 'INDIVIDUAL', 'OTHER']).optional(),
+  category: z.enum(['GOVERNMENT', 'PRIVATE', 'CONSTRUCTION', 'COMMERCIAL', 'INDIVIDUAL', 'OTHER', 'RECRUITMENT']).optional(),
   positionTitle: z.string().max(100).optional(),
   contactName: z.string().max(100).optional(),
   phone: z.string().max(20).optional(),

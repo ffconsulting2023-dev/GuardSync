@@ -85,6 +85,41 @@ model Company {
   billingLogs           BillingLog[]
   siteRequests          SiteRequest[]
   importBatches         ImportBatch[]
+  recruitmentChannels   RecruitmentChannel[]
+}
+
+// 採用経路の媒体マスタ（会社ごと。既定値は shared/recruitment.ts DEFAULT_RECRUITMENT_CHANNELS）
+model RecruitmentChannel {
+  id        String   @id @default(uuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  name      String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true) // 使わなくなった媒体は削除せず非表示にする（過去の隊員の採用経路を残すため）
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  guards    Guard[]
+
+  @@unique([companyId, name])
+}
+
+// 人材紹介会社への紹介料の単価ルール（計算は shared/recruitment.ts shiftFee）
+model RecruitmentFeeRule {
+  id                  String    @id @default(uuid())
+  companyId           String
+  agencyId            String    // 人材紹介会社（種別が人材紹介会社の取引先）
+  agency              Client    @relation(fields: [agencyId], references: [id])
+  effectiveFrom       DateTime  @db.Date
+  effectiveTo         DateTime? @db.Date
+  amountPerShift      Int       // 1勤務あたり（税別）
+  nightAmountPerShift Int?      // 夜勤1勤務あたり（空なら amountPerShift）
+  maxMonthsFromHire   Int?      // 入社から何か月までの勤務を対象にするか（空なら期限なし）
+  basis               String    @default("SCHEDULE") // shared/recruitment.ts FEE_BASIS
+  notes               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([companyId, agencyId])
 }
 
 enum Plan {
@@ -306,6 +341,12 @@ model Guard {
   employmentInsuranceNumber String? // 雇用保険被保険者番号
   pensionNumber     String?   // 基礎年金番号（社保番号）
   commuteNotes      String?   // 交通費の取り決め（例: 往復バス500円追加）
+  // 採用経路（媒体・人材紹介会社のどちらか。その他は recruitmentNote のみ。表示は shared/recruitment.ts）
+  recruitmentChannelId String?
+  recruitmentChannel   RecruitmentChannel? @relation(fields: [recruitmentChannelId], references: [id])
+  recruitmentAgencyId  String?
+  recruitmentAgency    Client? @relation("RecruitmentAgency", fields: [recruitmentAgencyId], references: [id])
+  recruitmentNote      String?   // 自由記入（その他）または補足
   myNumber          String?   // マイナンバー（AES-256暗号化して保存）
   myNumberUpdatedAt DateTime? // 最終更新日時
 
@@ -484,6 +525,8 @@ model Client {
   logs        ClientLog[]
   reportTemplate SecurityReportTemplate?
   invoices    Invoice[]
+  recruitedGuards Guard[] @relation("RecruitmentAgency")
+  recruitmentFeeRules RecruitmentFeeRule[]
 
   @@index([companyId])
 }
@@ -1339,6 +1382,7 @@ enum ClientCategory {
   COMMERCIAL    // 商業施設
   INDIVIDUAL    // 個人
   OTHER         // その他
+  RECRUITMENT   // 人材紹介会社（隊員の採用経路の選択肢になる）
 }
 
 // ─────────────────────────────────────────────

@@ -121,6 +121,7 @@ export const CLIENT_CATEGORY: Record<string, { label: string; color: string }> =
   COMMERCIAL:   { label: '商業施設',   color: 'bg-green-100 text-green-700' },
   INDIVIDUAL:   { label: '個人',       color: 'bg-gray-100 text-gray-600' },
   OTHER:        { label: 'その他',     color: 'bg-gray-100 text-gray-500' },
+  RECRUITMENT:  { label: '人材紹介会社', color: 'bg-pink-100 text-pink-700' }, // 隊員の採用経路の選択肢になる
 }
 
 // ─── 隊員クラス ───────────────────────────────
