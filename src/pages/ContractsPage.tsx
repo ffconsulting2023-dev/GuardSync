@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
@@ -16,6 +17,7 @@ const EMPTY_FORM = {
 
 export default function ContractsPage() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState(EMPTY_FORM)
@@ -93,7 +95,15 @@ export default function ContractsPage() {
                         : `¥${c.unitPrice.toLocaleString()} × ${c.guardCount}名`}
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`badge ${STATUS_LABELS[c.status]?.className}`}>{STATUS_LABELS[c.status]?.label}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={`badge ${STATUS_LABELS[c.status]?.className}`}>{STATUS_LABELS[c.status]?.label}</span>
+                        {canEdit && (
+                          <button
+                            onClick={() => navigate('/e-contracts', { state: { createFor: { contractId: c.id, title: `${c.clientName} 警備業務委託契約書` } } })}
+                            className="text-xs text-blue-600 hover:underline whitespace-nowrap"
+                          >電子契約</button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
