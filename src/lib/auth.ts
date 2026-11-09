@@ -3,14 +3,18 @@ import { api } from './api'
 export interface AuthUser {
   id: string
   name: string
-  email: string
+  email: string | null
+  loginId?: string | null
   role: string
   isSuperAdmin?: boolean
+  canIssueAccounts?: boolean
+  guardId?: string | null
   company: { id: string; name: string; plan: string }
 }
 
-export async function login(email: string, password: string): Promise<{ token: string; user: AuthUser }> {
-  const res = await api.post('/auth/login', { email, password })
+// id はログインID またはメールアドレス
+export async function login(id: string, password: string): Promise<{ token: string; user: AuthUser }> {
+  const res = await api.post('/auth/login', { id, password })
   return res.data
 }
 
@@ -35,4 +39,10 @@ export function hasRole(user: AuthUser | null, ...roles: string[]): boolean {
   if (!user) return false
   if (user.isSuperAdmin) return true
   return roles.includes(user.role)
+}
+
+// ID発行（アカウント管理）ができるか。ADMIN は常に可、それ以外は会社ごとに付与された権限
+export function canIssueAccounts(user: AuthUser | null): boolean {
+  if (!user) return false
+  return !!user.isSuperAdmin || user.role === 'ADMIN' || !!user.canIssueAccounts
 }

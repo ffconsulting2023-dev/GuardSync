@@ -5,13 +5,9 @@ import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 import { format } from 'date-fns'
 
-const STATUS_LABELS: Record<string, { label: string; className: string }> = {
-  PENDING:   { label: '申請中',   className: 'badge-warning' },
-  APPROVED:  { label: '承認済み', className: 'badge-info' },
-  PAID:      { label: '支払済み', className: 'badge-success' },
-  REJECTED:  { label: '否認',     className: 'badge-danger' },
-  DEDUCTED:  { label: '差引済み', className: 'badge-gray' },
-}
+import { DAILY_PAY_STATUS } from '../lib/constants'
+
+const STATUS_LABELS = DAILY_PAY_STATUS
 
 export default function DailyPayPage() {
   const { user } = useAuth()

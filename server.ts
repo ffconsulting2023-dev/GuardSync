@@ -4,7 +4,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import path from 'path'
-import { PrismaClient } from '@prisma/client'
+import { PrismaClient, Prisma } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import cron from 'node-cron'
@@ -15,6 +15,25 @@ import crypto from 'crypto'
 import multer from 'multer'
 import fs from 'fs'
 import { PDFDocument as PDFLibDocument, StandardFonts, rgb } from 'pdf-lib'
+import {
+  reportContentSchema, signatureInputSchema, photoInputSchema, shareInputSchema, reportTemplateSchema,
+  validateReportAgainstTemplate, decodePhotoDataUrl, DEFAULT_REPORT_TEMPLATE, MAX_PHOTOS_PER_REPORT, REPORT_FIELD_LABEL,
+  type ReportTemplate, type ReportRevisionAction, type PhotoInput,
+  submissionNoteSchema, PROXY_SUBMISSION_DEFAULT_NOTE,
+} from './shared/securityReport'
+import {
+  PASSWORD_PATTERN, PASSWORD_RULE_TEXT, SETUP_LINK_TTL_DAYS, normalizeLoginId,
+  accountCreateSchema, accountUpdateSchema, passwordSetupSchema, loginIdSchema,
+} from './shared/account'
+import { IMPORT_ORDER, COMPANY_INSURANCE_FIELDS } from './shared/import'
+import { estimateRequestBilling } from './shared/siteRequest'
+import {
+  RECRUITMENT_AGENCY_CATEGORY, FEE_BASIS, shiftFee, withTax,
+  type FeeRule, type FeeBasis, type WorkShift,
+} from './shared/recruitment'
+import { runImport, ImportError } from './server/import'
+import { parseUpload, fetchGoogleSheet, ParseError } from './server/importParse'
+import { ensureRecruitmentChannels } from './server/recruitment'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -317,7 +336,8 @@ function authenticate(req: express.Request, res: express.Response, next: express
   try {
     const payload = jwt.verify(auth.slice(7), JWT_SECRET) as JwtPayload
     ;(req as any).user = payload
-    next()
+    // テナント利用停止チェックを合成（停止会社は全APIを403で拒否、super-adminは除外）
+    checkCompanyActive(req, res, next)
   } catch {
     res.status(401).json({ error: 'トークンが無効です' })
   }
@@ -382,26 +402,27 @@ async function checkCompanyActive(req: express.Request, res: express.Response, n
     next(); return
   }
 
-  const company = await prisma.company.findUnique({
-    where: { id: user.companyId },
-    select: { isActive: true, subscriptionStatus: true },
-  })
-  companyStatusCache.set(user.companyId, {
-    isActive: company?.isActive ?? false,
-    status: company?.subscriptionStatus ?? 'TRIAL',
-    expiresAt: Date.now() + 60_000,
-  })
+  try {
+    const company = await prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { isActive: true, subscriptionStatus: true },
+    })
+    companyStatusCache.set(user.companyId, {
+      isActive: company?.isActive ?? false,
+      status: company?.subscriptionStatus ?? 'TRIAL',
+      expiresAt: Date.now() + 60_000,
+    })
 
-  if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
-    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
-    return
+    if (!company || !company.isActive || company.subscriptionStatus === 'SUSPENDED') {
+      res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+      return
+    }
+    next()
+  } catch (err) {
+    // DB一時障害で全リクエストを止めないよう fail-open（アクセスは許可）
+    logger.error('会社停止チェックに失敗（fail-open）', err, { context: 'checkCompanyActive' })
+    next()
   }
-  next()
-}
-
-// authenticateとテナントチェックを合成したミドルウェア
-function authenticateAndCheck(req: express.Request, res: express.Response, next: express.NextFunction) {
-  authenticate(req, res, () => checkCompanyActive(req, res, next))
 }
 
 // ─────────────────────────────────────────────
@@ -416,25 +437,39 @@ app.get('/api/health', (_req, res) => {
 // 認証 API
 // ─────────────────────────────────────────────
 
+// ログイン欄は「ログインID または メールアドレス」。'@' を含めばメールアドレスとして扱う（ログインIDは '@' 不可）
+// 旧クライアント互換のため email フィールドも受け付ける
 const loginSchema = z.object({
-  email: z.string().email(),
+  id: z.string().trim().min(1).max(254).optional(),
+  email: z.string().trim().min(1).max(254).optional(),
   password: z.string().min(1),
-})
+}).refine(v => !!(v.id || v.email))
 
 app.post('/api/auth/login', async (req, res) => {
   const parsed = loginSchema.safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
 
-  const { email, password } = parsed.data
-  const user = await prisma.user.findUnique({
-    where: { email },
-    include: { company: true },
-  })
+  const { password } = parsed.data
+  const identifier = (parsed.data.id || parsed.data.email)!
+  const user = identifier.includes('@')
+    ? (await prisma.user.findUnique({ where: { email: identifier }, include: { company: true } }))
+      ?? (await prisma.user.findUnique({ where: { email: identifier.toLowerCase() }, include: { company: true } }))
+    : await prisma.user.findUnique({ where: { loginId: normalizeLoginId(identifier) }, include: { company: true } })
 
-  if (!user || !user.isActive) { res.status(401).json({ error: 'メールアドレスまたはパスワードが違います' }); return }
+  const loginError = 'ログインID（メールアドレス）またはパスワードが違います'
+  if (!user || !user.isActive) { res.status(401).json({ error: loginError }); return }
+  if (user.mustSetPassword) {
+    res.status(401).json({ error: 'パスワードが未設定です。管理者から届いた設定用URL（またはQRコード）からパスワードを設定してください。' }); return
+  }
 
   const valid = await bcrypt.compare(password, user.password)
-  if (!valid) { res.status(401).json({ error: 'メールアドレスまたはパスワードが違います' }); return }
+  if (!valid) { res.status(401).json({ error: loginError }); return }
+
+  // 会社が利用停止中の場合はログインを拒否（super-adminは除外）
+  if (!user.isSuperAdmin && (!user.company.isActive || user.company.subscriptionStatus === 'SUSPENDED')) {
+    res.status(403).json({ error: 'ご利用中のアカウントは現在停止されています。お支払い状況をご確認ください。', code: 'COMPANY_SUSPENDED' })
+    return
+  }
 
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } })
 
@@ -447,7 +482,7 @@ app.post('/api/auth/login', async (req, res) => {
 
   res.json({
     token,
-    user: { id: user.id, name: user.name, email: user.email, role: user.role, company: { id: user.company.id, name: user.company.name, plan: user.company.plan } },
+    user: { id: user.id, name: user.name, email: user.email, loginId: user.loginId, role: user.role, company: { id: user.company.id, name: user.company.name, plan: user.company.plan } },
   })
 })
 
@@ -455,7 +490,10 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
   const { userId } = (req as any).user as JwtPayload
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, name: true, email: true, role: true, isSuperAdmin: true, company: { select: { id: true, name: true, plan: true } } },
+    select: {
+      id: true, name: true, email: true, loginId: true, role: true, isSuperAdmin: true, canIssueAccounts: true, guardId: true,
+      company: { select: { id: true, name: true, plan: true } },
+    },
   })
   if (!user) { res.status(404).json({ error: 'ユーザーが見つかりません' }); return }
   res.json(user)
@@ -480,10 +518,9 @@ app.post('/api/auth/register', async (req, res) => {
   const { token, name, password } = req.body
   if (!token || !name || !password) { res.status(400).json({ error: '必須項目が不足しています' }); return }
 
-  // H-6: パスワード強度要件（8文字以上、大文字・小文字・数字を含む）
-  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/
-  if (!passwordRegex.test(password)) {
-    res.status(400).json({ error: 'パスワードは8文字以上で、大文字・小文字・数字を含む必要があります' })
+  // H-6: パスワード強度要件（規則は shared/account.ts）
+  if (!PASSWORD_PATTERN.test(password)) {
+    res.status(400).json({ error: `パスワードは${PASSWORD_RULE_TEXT}` })
     return
   }
 
@@ -522,7 +559,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
 
   // ユーザー存在の有無を外部に漏らさないため、常に200を返す
   const user = await prisma.user.findUnique({ where: { email: email.toLowerCase().trim() } })
-  if (!user || !user.isActive) { res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' }); return }
+  if (!user || !user.isActive || !user.email) { res.json({ message: '登録済みのメールアドレスにリセット用URLを送信しました' }); return }
 
   // 既存の未使用トークンを無効化
   await prisma.passwordResetToken.updateMany({
@@ -555,9 +592,8 @@ app.post('/api/auth/reset-password', async (req, res) => {
   if (!token || !password || !passwordConfirm) { res.status(400).json({ error: '必須項目が不足しています' }); return }
   if (password !== passwordConfirm) { res.status(400).json({ error: 'パスワードが一致しません' }); return }
 
-  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/
-  if (!passwordRegex.test(password)) {
-    res.status(400).json({ error: 'パスワードは8文字以上で、大文字・小文字・数字を含めてください' }); return
+  if (!PASSWORD_PATTERN.test(password)) {
+    res.status(400).json({ error: `パスワードは${PASSWORD_RULE_TEXT}` }); return
   }
 
   const resetToken = await prisma.passwordResetToken.findUnique({
@@ -570,10 +606,592 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 
   const hashed = await bcrypt.hash(password, 12)
-  await prisma.user.update({ where: { id: resetToken.userId }, data: { password: hashed } })
+  await prisma.user.update({ where: { id: resetToken.userId }, data: { password: hashed, mustSetPassword: false } })
   await prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } })
 
   res.json({ message: 'パスワードを更新しました。新しいパスワードでログインしてください。' })
+})
+
+// ─────────────────────────────────────────────
+// アカウント発行 API（ログインID・パスワード設定用URL/QR）
+// 規則は shared/account.ts が正（SSOT）
+// ─────────────────────────────────────────────
+
+// 設定用URLは同じ事業所のWi-Fiから複数の隊員が続けて使うため、ログインより緩い上限にする
+const setupLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { error: '試行回数の上限に達しました。しばらくしてからお試しください。' } })
+const hashSetupToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex')
+const appBaseUrl = () => (process.env.APP_URL || 'https://guardsync.jp').replace(/\/+$/, '')
+
+interface AccountActor { userId: string; name: string; isSuperAdmin: boolean; isCompanyAdmin: boolean; companyId: string }
+
+// ID発行者のみ通す。スーパー管理者は ?companyId= / body.companyId で対象会社を指定でき、それ以外は自社のみ
+async function requireAccountIssuer(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const jwtUser = (req as any).user as JwtPayload
+  const me = await prisma.user.findUnique({ where: { id: jwtUser.userId }, select: { id: true, name: true, role: true, canIssueAccounts: true, isSuperAdmin: true, isActive: true } })
+  if (!me || !me.isActive) { res.status(401).json({ error: '認証が必要です' }); return }
+  const isSuperAdmin = me.isSuperAdmin
+  if (!isSuperAdmin && me.role !== 'ADMIN' && !(me.canIssueAccounts && me.role !== 'GUARD')) {
+    res.status(403).json({ error: 'ID発行の権限がありません（会社の管理者に権限付与を依頼してください）' }); return
+  }
+  const requested = (req.query.companyId as string) || (req.body && typeof req.body.companyId === 'string' ? req.body.companyId : '')
+  const companyId = isSuperAdmin && requested ? requested : jwtUser.companyId
+  if (isSuperAdmin && requested && !(await prisma.company.findUnique({ where: { id: requested }, select: { id: true } }))) {
+    res.status(404).json({ error: '会社が見つかりません' }); return
+  }
+  ;(req as any).accountActor = { userId: me.id, name: me.name, isSuperAdmin, isCompanyAdmin: isSuperAdmin || me.role === 'ADMIN', companyId } satisfies AccountActor
+  next()
+}
+
+const accountSelect = {
+  id: true, name: true, loginId: true, email: true, role: true, isActive: true, canIssueAccounts: true,
+  mustSetPassword: true, lastLoginAt: true, createdAt: true, guardId: true,
+  guard: { select: { id: true, name: true, employeeNumber: true } },
+  setupTokens: { where: { usedAt: null }, select: { expiresAt: true, createdAt: true }, orderBy: { createdAt: 'desc' as const }, take: 1 },
+} as const
+
+function isUniqueViolation(e: unknown, field: string) {
+  const err = e as { code?: string; meta?: { target?: string[] | string } }
+  if (err?.code !== 'P2002') return false
+  const t = err.meta?.target
+  return Array.isArray(t) ? t.includes(field) : typeof t === 'string' ? t.includes(field) : true
+}
+
+// ログインID・メール・隊員紐付けの重複チェック（DBの一意制約に加えて事前に分かりやすく返す）
+async function accountConflict(data: { loginId?: string; email?: string | null; guardId?: string | null }, excludeUserId?: string): Promise<string | null> {
+  const not = excludeUserId ? { NOT: { id: excludeUserId } } : {}
+  if (data.loginId && await prisma.user.findFirst({ where: { loginId: data.loginId, ...not }, select: { id: true } })) return 'このログインIDは既に使用されています'
+  if (data.email && await prisma.user.findFirst({ where: { email: data.email, ...not }, select: { id: true } })) return 'このメールアドレスは既に登録されています'
+  if (data.guardId && await prisma.user.findFirst({ where: { guardId: data.guardId, ...not }, select: { id: true } })) return 'この隊員には既に別のアカウントが紐付いています'
+  return null
+}
+
+function accountWriteError(e: unknown): string | null {
+  if (isUniqueViolation(e, 'loginId')) return 'このログインIDは既に使用されています'
+  if (isUniqueViolation(e, 'email')) return 'このメールアドレスは既に登録されています'
+  if (isUniqueViolation(e, 'guardId')) return 'この隊員には既に別のアカウントが紐付いています'
+  return null
+}
+
+// アカウント一覧＋紐付け候補の隊員
+app.get('/api/accounts', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const [users, guards, company] = await Promise.all([
+    prisma.user.findMany({ where: { companyId: actor.companyId, isSuperAdmin: false }, select: accountSelect, orderBy: [{ isActive: 'desc' }, { name: 'asc' }] }),
+    prisma.guard.findMany({ where: { companyId: actor.companyId, isActive: true }, select: { id: true, name: true, employeeNumber: true, email: true, userAccount: { select: { id: true } } }, orderBy: { employeeNumber: 'asc' } }),
+    prisma.company.findUnique({ where: { id: actor.companyId }, select: { id: true, name: true } }),
+  ])
+  res.json({
+    company,
+    actor: { isCompanyAdmin: actor.isCompanyAdmin },
+    users: users.map(({ setupTokens, ...u }) => ({ ...u, pendingSetupExpiresAt: setupTokens[0]?.expiresAt ?? null })),
+    guards: guards.map(({ userAccount, ...g }) => ({ ...g, linkedUserId: userAccount?.id ?? null })),
+  })
+})
+
+// ログインIDの利用可否（入力中の重複チェック用）
+app.get('/api/accounts/login-id-availability', authenticate, requireAccountIssuer, async (req, res) => {
+  const parsed = loginIdSchema.safeParse(String(req.query.loginId ?? ''))
+  if (!parsed.success) { res.json({ valid: false, available: false, message: parsed.error.issues[0]?.message }); return }
+  const exclude = typeof req.query.excludeUserId === 'string' ? req.query.excludeUserId : undefined
+  const taken = await prisma.user.findFirst({ where: { loginId: parsed.data, ...(exclude ? { NOT: { id: exclude } } : {}) }, select: { id: true } })
+  res.json({ valid: true, available: !taken, loginId: parsed.data, message: taken ? 'このログインIDは既に使用されています' : '使用できます' })
+})
+
+app.post('/api/accounts', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const parsed = accountCreateSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const d = parsed.data
+  if (!actor.isCompanyAdmin && (d.role === 'ADMIN' || d.canIssueAccounts)) {
+    res.status(403).json({ error: '管理者アカウントの作成・ID発行権限の付与は会社の管理者のみ可能です' }); return
+  }
+  if (d.guardId && !(await prisma.guard.findFirst({ where: { id: d.guardId, companyId: actor.companyId }, select: { id: true } }))) {
+    res.status(400).json({ error: '紐付ける隊員が見つかりません' }); return
+  }
+  const conflict = await accountConflict(d)
+  if (conflict) { res.status(409).json({ error: conflict }); return }
+  try {
+    const user = await prisma.user.create({
+      data: {
+        companyId: actor.companyId, name: d.name, loginId: d.loginId, email: d.email ?? null, role: d.role,
+        guardId: d.guardId ?? null, canIssueAccounts: d.role !== 'GUARD' && !!d.canIssueAccounts,
+        // 本人が設定用URLでパスワードを決めるまでログイン不可（推測不能なランダム値をハッシュ化）
+        password: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12), mustSetPassword: true,
+      },
+      select: accountSelect,
+    })
+    logger.info('アカウント発行', { companyId: actor.companyId, userId: user.id, by: actor.userId })
+    res.status(201).json(user)
+  } catch (e) {
+    const msg = accountWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+})
+
+app.patch('/api/accounts/:id', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const target = await prisma.user.findFirst({ where: { id: req.params.id, companyId: actor.companyId, isSuperAdmin: false } })
+  if (!target) { res.status(404).json({ error: 'アカウントが見つかりません' }); return }
+  const parsed = accountUpdateSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const d = parsed.data
+  const touchesAdmin = target.role === 'ADMIN' || d.role === 'ADMIN' || d.canIssueAccounts !== undefined
+  if (!actor.isCompanyAdmin && touchesAdmin) {
+    res.status(403).json({ error: '管理者アカウントの変更・ID発行権限の変更は会社の管理者のみ可能です' }); return
+  }
+  if (target.id === actor.userId && (d.isActive === false || (d.role && d.role !== target.role))) {
+    res.status(400).json({ error: '自分自身の無効化・ロール変更はできません' }); return
+  }
+  const role = d.role ?? target.role
+  const guardId = d.guardId !== undefined ? d.guardId : target.guardId
+  if (role === 'GUARD' && !guardId) { res.status(400).json({ error: '隊員アカウントは紐付ける隊員を選択してください' }); return }
+  if (d.guardId && !(await prisma.guard.findFirst({ where: { id: d.guardId, companyId: actor.companyId }, select: { id: true } }))) {
+    res.status(400).json({ error: '紐付ける隊員が見つかりません' }); return
+  }
+  const conflict = await accountConflict({ loginId: d.loginId, email: d.email, guardId: d.guardId }, target.id)
+  if (conflict) { res.status(409).json({ error: conflict }); return }
+  try {
+    const user = await prisma.user.update({
+      where: { id: target.id },
+      data: {
+        ...(d.name !== undefined ? { name: d.name } : {}),
+        ...(d.loginId !== undefined ? { loginId: d.loginId } : {}),
+        ...(d.email !== undefined ? { email: d.email ?? null } : {}),
+        ...(d.role !== undefined ? { role: d.role } : {}),
+        ...(d.guardId !== undefined ? { guardId: d.guardId } : {}),
+        ...(d.canIssueAccounts !== undefined ? { canIssueAccounts: d.canIssueAccounts } : {}),
+        ...(role === 'GUARD' ? { canIssueAccounts: false } : {}),
+        ...(d.isActive !== undefined ? { isActive: d.isActive } : {}),
+      },
+      select: accountSelect,
+    })
+    // 無効化したアカウントの未使用の設定用URLは失効させる
+    if (d.isActive === false) await prisma.accountSetupToken.updateMany({ where: { userId: target.id, usedAt: null }, data: { usedAt: new Date() } })
+    res.json(user)
+  } catch (e) {
+    const msg = accountWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+})
+
+// パスワード設定用URLの発行（再発行すると以前のURLは無効）。sendEmail=true ならメールも送信
+app.post('/api/accounts/:id/setup-link', authenticate, requireAccountIssuer, async (req, res) => {
+  const actor = (req as any).accountActor as AccountActor
+  const target = await prisma.user.findFirst({ where: { id: req.params.id, companyId: actor.companyId, isSuperAdmin: false }, include: { company: { select: { name: true } } } })
+  if (!target) { res.status(404).json({ error: 'アカウントが見つかりません' }); return }
+  if (!target.isActive) { res.status(400).json({ error: '無効化されたアカウントには発行できません' }); return }
+  if (!actor.isCompanyAdmin && target.role === 'ADMIN') { res.status(403).json({ error: '管理者アカウントのURL発行は会社の管理者のみ可能です' }); return }
+  const sendMail = req.body?.sendEmail === true
+  if (sendMail && !target.email) { res.status(400).json({ error: 'メールアドレスが未登録のため送信できません（URLまたはQRコードで渡してください）' }); return }
+
+  const token = crypto.randomBytes(32).toString('base64url')
+  const expiresAt = new Date(Date.now() + SETUP_LINK_TTL_DAYS * 24 * 60 * 60 * 1000)
+  await prisma.$transaction([
+    prisma.accountSetupToken.updateMany({ where: { userId: target.id, usedAt: null }, data: { usedAt: new Date() } }),
+    prisma.accountSetupToken.create({ data: { userId: target.id, tokenHash: hashSetupToken(token), expiresAt, createdByName: actor.name } }),
+  ])
+  const url = `${appBaseUrl()}/setup-password?token=${token}`
+
+  let emailSent = false
+  if (sendMail && target.email) {
+    const expiresLabel = expiresAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+    emailSent = await sendEmail(target.email, '【GuardSync】パスワード設定のご案内', `
+<div style="font-family:sans-serif;line-height:1.7;color:#1f2937;max-width:600px">
+  <p>${escapeHtml(target.name)} 様</p>
+  <p>${escapeHtml(target.company.name)} より GuardSync のアカウントが発行されました。下のボタンからパスワードを設定してください。</p>
+  <p><strong>ログインID:</strong> ${escapeHtml(target.loginId ?? target.email)}</p>
+  <p style="margin:24px 0"><a href="${url}" style="background:#1e3a5f;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:bold">パスワードを設定する</a></p>
+  <p style="word-break:break-all;font-size:13px">${url}</p>
+  <p style="color:#6b7280;font-size:13px">有効期限: ${escapeHtml(expiresLabel)}（${SETUP_LINK_TTL_DAYS}日間）。心当たりがない場合は破棄してください。</p>
+</div>`, `GuardSync パスワード設定のご案内\nログインID: ${target.loginId ?? target.email}\n${url}\n有効期限: ${expiresLabel}`)
+  }
+  logger.info('パスワード設定URL発行', { companyId: actor.companyId, userId: target.id, by: actor.userId, emailSent })
+  res.json({ url, expiresAt, emailSent, loginId: target.loginId, name: target.name })
+})
+
+// 設定用URLの内容確認（認証不要）
+app.get('/api/auth/setup/:token', setupLimiter, async (req, res) => {
+  const t = await prisma.accountSetupToken.findUnique({
+    where: { tokenHash: hashSetupToken(req.params.token) },
+    include: { user: { select: { name: true, loginId: true, email: true, isActive: true, company: { select: { name: true } } } } },
+  })
+  if (!t || t.usedAt || t.expiresAt < new Date() || !t.user.isActive) {
+    res.status(410).json({ error: 'このURLは無効か、有効期限が切れています。管理者に再発行を依頼してください。' }); return
+  }
+  res.json({ name: t.user.name, loginId: t.user.loginId ?? t.user.email, companyName: t.user.company.name, expiresAt: t.expiresAt })
+})
+
+// 設定用URLからのパスワード設定（認証不要）
+app.post('/api/auth/setup/:token', setupLimiter, async (req, res) => {
+  const parsed = passwordSetupSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const t = await prisma.accountSetupToken.findUnique({ where: { tokenHash: hashSetupToken(req.params.token) }, include: { user: { select: { id: true, isActive: true, loginId: true, email: true } } } })
+  if (!t || t.usedAt || t.expiresAt < new Date() || !t.user.isActive) {
+    res.status(410).json({ error: 'このURLは無効か、有効期限が切れています。管理者に再発行を依頼してください。' }); return
+  }
+  const hashed = await bcrypt.hash(parsed.data.password, 12)
+  // 使用済み化を条件付き更新で行い、同じURLの同時使用で二重設定されないようにする
+  const used = await prisma.accountSetupToken.updateMany({ where: { id: t.id, usedAt: null }, data: { usedAt: new Date() } })
+  if (used.count === 0) { res.status(410).json({ error: 'このURLは既に使用されています' }); return }
+  await prisma.user.update({ where: { id: t.user.id }, data: { password: hashed, mustSetPassword: false } })
+  res.json({ message: 'パスワードを設定しました。ログインしてください。', loginId: t.user.loginId ?? t.user.email })
+})
+
+// ─────────────────────────────────────────────
+// データ取り込み API（CSV・Excel・Googleスプレッドシート）
+// マイナンバー・口座情報を含むため、会社の管理者（ADMIN）とスーパー管理者のみ。
+// スーパー管理者は ?companyId= で対象会社を指定できる（会社立ち上げ時の移行用）
+// ─────────────────────────────────────────────
+
+interface CompanyAdminScope { companyId: string; userId: string; name: string; isSuperAdmin: boolean }
+
+async function requireCompanyAdminScope(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const jwtUser = (req as any).user as JwtPayload
+  const me = await prisma.user.findUnique({ where: { id: jwtUser.userId }, select: { id: true, name: true, role: true, isSuperAdmin: true, isActive: true } })
+  if (!me || !me.isActive) { res.status(401).json({ error: '認証が必要です' }); return }
+  if (!me.isSuperAdmin && me.role !== 'ADMIN') { res.status(403).json({ error: '会社の管理者のみ実行できます' }); return }
+  const requested = typeof req.query.companyId === 'string' ? req.query.companyId : ''
+  const companyId = me.isSuperAdmin && requested ? requested : jwtUser.companyId
+  if (me.isSuperAdmin && requested && !(await prisma.company.findUnique({ where: { id: requested }, select: { id: true } }))) {
+    res.status(404).json({ error: '会社が見つかりません' }); return
+  }
+  ;(req as any).adminScope = { companyId, userId: me.id, name: me.name, isSuperAdmin: me.isSuperAdmin } satisfies CompanyAdminScope
+  next()
+}
+
+const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } })
+const importDeps = () => ({ prisma, encrypt, canEncrypt: (process.env.ENCRYPTION_KEY?.length ?? 0) >= 32 })
+
+// 既存の相手に紐付ける指示は ID 必須（server/import.ts の Resolution と同じ形）
+const linkTo = <A extends string>(action: A) => z.object({ action: z.literal(action), id: z.string().uuid() })
+const createOrSkip = <A extends string>(action: A) => z.object({ action: z.literal(action) })
+const resolutionSchema = z.discriminatedUnion('action', [
+  linkTo('client'), linkTo('partner'), linkTo('guard'), linkTo('clientFromPartner'),
+  createOrSkip('newGuard'), createOrSkip('skip'),
+  z.object({ action: z.literal('newClient'), name: z.string().trim().max(100).optional() }),
+  z.object({ action: z.literal('newPartner'), name: z.string().trim().max(100).optional() }),
+])
+
+const importRequestSchema = z.object({
+  kind: z.enum(IMPORT_ORDER as [typeof IMPORT_ORDER[number], ...typeof IMPORT_ORDER[number][]]),
+  sourceName: z.string().max(300),
+  rows: z.array(z.array(z.string().max(5000)).max(80)).max(5000),
+  headerRow: z.number().int().min(-1).max(50),
+  mapping: z.record(z.string(), z.number().int().min(0).max(79)),
+  clientResolutions: z.record(z.string(), resolutionSchema).optional(),
+  peopleResolutions: z.record(z.string(), resolutionSchema).optional(),
+  siteClientOverrides: z.record(z.string(), resolutionSchema).optional(),
+})
+
+function importErrorResponse(res: express.Response, e: unknown) {
+  if (e instanceof ImportError || e instanceof ParseError) { res.status(400).json({ error: e.message }); return }
+  throw e
+}
+
+// ファイル（CSV・Excel）→ シート一覧（取り込み種別と列の自動判定付き）
+app.post('/api/import/parse', authenticate, requireCompanyAdminScope, importUpload.single('file'), async (req, res) => {
+  const file = (req as any).file as Express.Multer.File | undefined
+  if (!file) { res.status(400).json({ error: 'ファイルを選択してください' }); return }
+  try {
+    // multer はファイル名を latin1 として扱うため UTF-8 に戻す
+    const name = Buffer.from(file.originalname, 'latin1').toString('utf8')
+    res.json({ sourceName: name, sheets: await parseUpload(file.buffer, name) })
+  } catch (e) { importErrorResponse(res, e) }
+})
+
+// Googleスプレッドシートの URL → シート一覧
+app.post('/api/import/parse-url', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const url = typeof req.body?.url === 'string' ? req.body.url : ''
+  try {
+    res.json(await fetchGoogleSheet(url))
+  } catch (e) { importErrorResponse(res, e) }
+})
+
+async function handleImport(req: express.Request, res: express.Response, commit: boolean) {
+  const scope = (req as any).adminScope as CompanyAdminScope
+  const parsed = importRequestSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '取り込み内容が不正です' }); return }
+  try {
+    const result = await runImport(importDeps(), scope.companyId, { userId: scope.userId, name: scope.name }, parsed.data, commit)
+    if (commit) logger.info('データ取り込み', { companyId: scope.companyId, kind: parsed.data.kind, by: scope.userId, summary: result.summary })
+    res.json(result)
+  } catch (e) { importErrorResponse(res, e) }
+}
+app.post('/api/import/preview', authenticate, requireCompanyAdminScope, (req, res) => handleImport(req, res, false))
+app.post('/api/import/commit', authenticate, requireCompanyAdminScope, (req, res) => handleImport(req, res, true))
+
+// 名寄せの選択肢（対象会社の取引先・協力会社・隊員）。スーパー管理者が他社を移行する場合も対象会社の一覧を返す
+app.get('/api/import/directory', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const { companyId } = (req as any).adminScope as CompanyAdminScope
+  const [company, clients, partners, guards] = await Promise.all([
+    prisma.company.findUnique({ where: { id: companyId }, select: { id: true, name: true, code: true } }),
+    prisma.client.findMany({ where: { companyId }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.partner.findMany({ where: { companyId }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    prisma.guard.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true, employeeNumber: true }, orderBy: { employeeNumber: 'asc' } }),
+  ])
+  res.json({ company, clients, partners, guards, canEncryptMyNumber: importDeps().canEncrypt })
+})
+
+app.get('/api/import/history', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const scope = (req as any).adminScope as CompanyAdminScope
+  res.json(await prisma.importBatch.findMany({ where: { companyId: scope.companyId }, orderBy: { createdAt: 'desc' }, take: 50 }))
+})
+
+// ─────────────────────────────────────────────
+// 会社情報（会社概要・社保／雇用保険の事業所情報）
+// ─────────────────────────────────────────────
+
+const companyProfileSelect = {
+  id: true, name: true, code: true, nameKana: true, representative: true, postalCode: true, address: true, phone: true, email: true, website: true, securityLicenseNumber: true,
+  nameOrigin: true, establishedOn: true, capital: true, businessDescription: true, vision: true,
+  securityLicenseDate: true, securityLicenseExpiry: true, securityLicenseAuthority: true, securityServiceCategories: true, securityEducationManager: true,
+  socialInsuranceOfficeSymbol: true, socialInsuranceOfficeNumber: true, healthInsuranceNumber: true, employmentInsuranceOfficeNumber: true,
+  employmentInsuranceJurisdiction: true, laborInsuranceNumber: true, laborInsuranceEstablishmentType: true, industryClassification: true,
+} as const
+const optText = (max: number) => z.string().trim().max(max).nullable().optional().transform(v => (v ? v : null))
+const optDate = z.union([z.literal(''), z.null(), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]).optional()
+  .transform(v => (v ? new Date(`${v}T00:00:00Z`) : v === undefined ? undefined : null))
+const companyProfileSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  nameKana: optText(100), representative: optText(100), postalCode: optText(10), address: optText(300),
+  phone: optText(30), email: optText(200), website: optText(300), securityLicenseNumber: optText(50),
+  nameOrigin: optText(200), establishedOn: optText(50), capital: optText(50), businessDescription: optText(500), vision: optText(200),
+  securityLicenseAuthority: optText(50), securityServiceCategories: optText(300), securityEducationManager: optText(100),
+  securityLicenseDate: optDate, securityLicenseExpiry: optDate,
+  ...Object.fromEntries(Object.keys(COMPANY_INSURANCE_FIELDS).map(k => [k, optText(100)])),
+})
+
+app.get('/api/company/profile', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const companyId = user.isSuperAdmin && typeof req.query.companyId === 'string' ? req.query.companyId : user.companyId
+  const company = await prisma.company.findUnique({ where: { id: companyId }, select: companyProfileSelect })
+  if (!company) { res.status(404).json({ error: '会社が見つかりません' }); return }
+  res.json(company)
+})
+
+app.put('/api/company/profile', authenticate, requireCompanyAdminScope, async (req, res) => {
+  const scope = (req as any).adminScope as CompanyAdminScope
+  const parsed = companyProfileSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
+  const data = Object.fromEntries(Object.entries(parsed.data).filter(([k]) => k in req.body))
+  res.json(await prisma.company.update({ where: { id: scope.companyId }, data, select: companyProfileSelect }))
+})
+
+// スーパー管理者: 会社の作成（作成後、「ID発行・管理者設定」で会社の管理者アカウントを発行する）
+app.post('/api/super-admin/companies', authenticate, requireSuperAdmin, async (req, res) => {
+  const parsed = z.object({
+    name: z.string().trim().min(1).max(100),
+    code: z.string().trim().toUpperCase().regex(/^[A-Z0-9_-]{2,20}$/, '会社コードは半角英数字と _ - の2〜20文字で入力してください'),
+  }).safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  if (await prisma.company.findUnique({ where: { code: parsed.data.code }, select: { id: true } })) {
+    res.status(409).json({ error: 'この会社コードは既に使われています' }); return
+  }
+  const company = await prisma.company.create({ data: { name: parsed.data.name, code: parsed.data.code } })
+  logger.info('会社作成', { companyId: company.id, code: company.code, by: ((req as any).user as JwtPayload).userId })
+  res.status(201).json(company)
+})
+
+// ─────────────────────────────────────────────
+// 現場依頼（受注実績）
+// ─────────────────────────────────────────────
+
+app.get('/api/site-requests', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const month = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : null
+  if (!month) { res.status(400).json({ error: 'month（YYYY-MM）を指定してください' }); return }
+  const [y, m] = month.split('-').map(Number)
+  const requests = await prisma.siteRequest.findMany({
+    where: {
+      companyId,
+      date: { gte: new Date(Date.UTC(y, m - 1, 1)), lt: new Date(Date.UTC(y, m, 1)) },
+      ...(typeof req.query.clientId === 'string' ? { site: { clientId: req.query.clientId } } : {}),
+    },
+    include: {
+      site: { select: { id: true, name: true, nearestStation: true, client: { select: { id: true, name: true, qualificationAllowance: true } } } },
+      subcontractPartner: { select: { id: true, name: true } },
+      schedules: { select: { id: true, guard: { select: { id: true, name: true } } } },
+    },
+    orderBy: [{ date: 'asc' }, { startTime: 'asc' }],
+  })
+  res.json(requests.map(r => ({ ...r, billingEstimate: estimateRequestBilling(r, r.site.client?.qualificationAllowance) })))
+})
+
+// ─────────────────────────────────────────────
+// 採用経路マスタ API
+// ─────────────────────────────────────────────
+
+// 隊員画面・マスタ画面用: 媒体（無効も含む）と人材紹介会社（取引先の種別が人材紹介会社）
+app.get('/api/recruitment-channels', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  await ensureRecruitmentChannels(prisma, companyId)
+  const [channels, agencies] = await Promise.all([
+    prisma.recruitmentChannel.findMany({ where: { companyId }, include: { _count: { select: { guards: true } } }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] }),
+    prisma.client.findMany({
+      where: { companyId, category: RECRUITMENT_AGENCY_CATEGORY, isActive: true },
+      select: { id: true, name: true, _count: { select: { recruitedGuards: true } } },
+      orderBy: { name: 'asc' },
+    }),
+  ])
+  res.json({ channels, agencies })
+})
+
+const channelNameSchema = z.string().trim().min(1, '媒体名を入力してください').max(50)
+function channelWriteError(e: unknown): string | null {
+  return (e as { code?: string })?.code === 'P2002' ? 'その媒体名は既に登録されています' : null
+}
+
+app.post('/api/recruitment-channels', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const name = channelNameSchema.safeParse(req.body?.name)
+  if (!name.success) { res.status(400).json({ error: name.error.issues[0].message }); return }
+  const last = await prisma.recruitmentChannel.findFirst({ where: { companyId }, orderBy: { sortOrder: 'desc' }, select: { sortOrder: true } })
+  try {
+    res.status(201).json(await prisma.recruitmentChannel.create({ data: { companyId, name: name.data, sortOrder: (last?.sortOrder ?? -1) + 1 } }))
+  } catch (e) {
+    const msg = channelWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+})
+
+app.put('/api/recruitment-channels/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = z.object({ name: channelNameSchema.optional(), isActive: z.boolean().optional(), sortOrder: z.number().int().min(0).max(10000).optional() }).safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  try {
+    const r = await prisma.recruitmentChannel.updateMany({ where: { id: req.params.id, companyId }, data: parsed.data })
+    if (!r.count) { res.status(404).json({ error: '媒体が見つかりません' }); return }
+  } catch (e) {
+    const msg = channelWriteError(e)
+    if (msg) { res.status(409).json({ error: msg }); return }
+    throw e
+  }
+  res.json(await prisma.recruitmentChannel.findFirst({ where: { id: req.params.id, companyId } }))
+})
+
+// ─────────────────────────────────────────────
+// 人材紹介会社の紹介料（単価ルール・採用経路別の稼働実績）
+// ─────────────────────────────────────────────
+
+const ymdDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+const feeRuleSchema = z.object({
+  agencyId: z.string().uuid(),
+  effectiveFrom: ymdDate,
+  effectiveTo: ymdDate.nullable().optional().or(z.literal('')),
+  amountPerShift: z.number().int().min(0).max(1_000_000),
+  nightAmountPerShift: z.number().int().min(0).max(1_000_000).nullable().optional(),
+  maxMonthsFromHire: z.number().int().min(1).max(120).nullable().optional(),
+  basis: z.enum(Object.keys(FEE_BASIS) as [FeeBasis, ...FeeBasis[]]).default('SCHEDULE'),
+  notes: z.string().max(300).nullable().optional(),
+}).refine(r => !r.effectiveTo || r.effectiveTo >= r.effectiveFrom, { message: '適用終了日は適用開始日以降にしてください' })
+const toDate = (v: string) => new Date(`${v}T00:00:00Z`)
+const ymd = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null)
+const toFeeRule = (r: { id: string; agencyId: string; effectiveFrom: Date; effectiveTo: Date | null; amountPerShift: number; nightAmountPerShift: number | null; maxMonthsFromHire: number | null; basis: string }): FeeRule => ({
+  id: r.id, agencyId: r.agencyId, effectiveFrom: ymd(r.effectiveFrom)!, effectiveTo: ymd(r.effectiveTo),
+  amountPerShift: r.amountPerShift, nightAmountPerShift: r.nightAmountPerShift, maxMonthsFromHire: r.maxMonthsFromHire, basis: r.basis as FeeBasis,
+})
+
+app.get('/api/recruitment/fee-rules', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const rules = await prisma.recruitmentFeeRule.findMany({ where: { companyId }, include: { agency: { select: { id: true, name: true } } }, orderBy: [{ agencyId: 'asc' }, { effectiveFrom: 'desc' }] })
+  res.json(rules.map(r => ({ ...toFeeRule(r), notes: r.notes, agency: r.agency })))
+})
+
+async function saveFeeRule(req: express.Request, res: express.Response, id?: string) {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = feeRuleSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '入力値が不正です' }); return }
+  const d = parsed.data
+  const agency = await prisma.client.findFirst({ where: { id: d.agencyId, companyId }, select: { id: true } })
+  if (!agency) { res.status(400).json({ error: '人材紹介会社が見つかりません' }); return }
+  const data = {
+    agencyId: d.agencyId, effectiveFrom: toDate(d.effectiveFrom), effectiveTo: d.effectiveTo ? toDate(d.effectiveTo) : null,
+    amountPerShift: d.amountPerShift, nightAmountPerShift: d.nightAmountPerShift ?? null, maxMonthsFromHire: d.maxMonthsFromHire ?? null,
+    basis: d.basis, notes: d.notes || null,
+  }
+  if (id) {
+    const r = await prisma.recruitmentFeeRule.updateMany({ where: { id, companyId }, data })
+    if (!r.count) { res.status(404).json({ error: '単価ルールが見つかりません' }); return }
+    res.json(await prisma.recruitmentFeeRule.findFirst({ where: { id, companyId } }))
+  } else {
+    res.status(201).json(await prisma.recruitmentFeeRule.create({ data: { companyId, ...data } }))
+  }
+}
+app.post('/api/recruitment/fee-rules', authenticate, requireRole('ADMIN', 'MANAGER'), (req, res) => saveFeeRule(req, res))
+app.put('/api/recruitment/fee-rules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), (req, res) => saveFeeRule(req, res, req.params.id))
+app.delete('/api/recruitment/fee-rules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const r = await prisma.recruitmentFeeRule.deleteMany({ where: { id: req.params.id, companyId } })
+  if (!r.count) { res.status(404).json({ error: '単価ルールが見つかりません' }); return }
+  res.json({ success: true })
+})
+
+// 採用経路別の稼働実績と紹介料。勤務は中止を除く配員（ルールで「出勤打刻あり」の場合は打刻のあるもの）。
+// 今日より後の配員は「予定」として件数だけ出し、紹介料には含めない
+app.get('/api/recruitment/report', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const q = z.object({ from: ymdDate, to: ymdDate }).safeParse(req.query)
+  if (!q.success || q.data.to < q.data.from) { res.status(400).json({ error: '期間（from・to: YYYY-MM-DD）を正しく指定してください' }); return }
+  const { from, to } = q.data
+  const today = new Date().toISOString().slice(0, 10)
+
+  const [guards, schedules, firstShifts, ruleRows, channels] = await Promise.all([
+    prisma.guard.findMany({ where: { companyId }, select: { id: true, name: true, employeeNumber: true, joinedAt: true, isActive: true, recruitmentChannelId: true, recruitmentAgencyId: true, recruitmentNote: true, recruitmentAgency: { select: { id: true, name: true } } } }),
+    prisma.schedule.findMany({
+      where: { companyId, status: { not: 'CANCELLED' }, date: { gte: toDate(from), lte: toDate(to) } },
+      select: { guardId: true, date: true, shiftType: true, attendance: { select: { clockInAt: true } } },
+    }),
+    prisma.schedule.groupBy({ by: ['guardId'], where: { companyId, status: { not: 'CANCELLED' } }, _min: { date: true } }),
+    prisma.recruitmentFeeRule.findMany({ where: { companyId } }),
+    prisma.recruitmentChannel.findMany({ where: { companyId }, select: { id: true, name: true, sortOrder: true }, orderBy: { sortOrder: 'asc' } }),
+  ])
+  const rulesByAgency = new Map<string, FeeRule[]>()
+  for (const r of ruleRows) rulesByAgency.set(r.agencyId, [...(rulesByAgency.get(r.agencyId) ?? []), toFeeRule(r)])
+  const firstShift = new Map(firstShifts.map(f => [f.guardId, ymd(f._min.date)]))
+  const shiftsByGuard = new Map<string, WorkShift[]>()
+  for (const s of schedules) {
+    const shift: WorkShift = { guardId: s.guardId, date: ymd(s.date)!, shiftType: s.shiftType, clockedIn: !!s.attendance?.clockInAt }
+    shiftsByGuard.set(s.guardId, [...(shiftsByGuard.get(s.guardId) ?? []), shift])
+  }
+
+  type Row = { id: string; name: string; employeeNumber: string; isActive: boolean; note: string | null; hireDate: string | null; shifts: number; futureShifts: number; fee: number; excluded: Record<string, number> }
+  type Group = { key: string; kind: 'channel' | 'agency' | 'free' | 'none'; name: string; hasRules?: boolean; rows: Row[] }
+  const groups = new Map<string, Group>()
+  const groupOf = (g: typeof guards[number]): Group => {
+    const [key, kind, name] = g.recruitmentChannelId ? [`channel:${g.recruitmentChannelId}`, 'channel' as const, channels.find(c => c.id === g.recruitmentChannelId)?.name ?? '（削除された媒体）']
+      : g.recruitmentAgencyId ? [`agency:${g.recruitmentAgencyId}`, 'agency' as const, g.recruitmentAgency?.name ?? '']
+        : g.recruitmentNote ? ['free', 'free' as const, 'その他（自由記入）'] : ['none', 'none' as const, '未設定']
+    if (!groups.has(key)) groups.set(key, { key, kind, name, rows: [], ...(kind === 'agency' ? { hasRules: !!rulesByAgency.get(g.recruitmentAgencyId!)?.length } : {}) })
+    return groups.get(key)!
+  }
+  for (const g of guards) {
+    const all = shiftsByGuard.get(g.id) ?? []
+    if (!all.length && !g.isActive) continue // 期間中に勤務の無い退職者は出さない
+    const past = all.filter(s => s.date <= today)
+    const hireDate = ymd(g.joinedAt) ?? firstShift.get(g.id) ?? null
+    const row: Row = { id: g.id, name: g.name, employeeNumber: g.employeeNumber, isActive: g.isActive, note: g.recruitmentNote, hireDate, shifts: past.length, futureShifts: all.length - past.length, fee: 0, excluded: {} }
+    if (g.recruitmentAgencyId) {
+      const rules = rulesByAgency.get(g.recruitmentAgencyId) ?? []
+      for (const s of past) {
+        const r = shiftFee(s, rules, hireDate)
+        row.fee += r.fee
+        if (r.reason) row.excluded[r.reason] = (row.excluded[r.reason] ?? 0) + 1
+      }
+    }
+    groupOf(g).rows.push(row)
+  }
+  const order = { agency: 0, channel: 1, free: 2, none: 3 }
+  const result = [...groups.values()]
+    .map(gr => {
+      const shifts = gr.rows.reduce((a, r) => a + r.shifts, 0)
+      const fee = gr.rows.reduce((a, r) => a + r.fee, 0)
+      return { ...gr, rows: gr.rows.sort((a, b) => b.shifts - a.shifts), totals: { guards: gr.rows.length, workingGuards: gr.rows.filter(r => r.shifts).length, shifts, futureShifts: gr.rows.reduce((a, r) => a + r.futureShifts, 0), fee, feeWithTax: withTax(fee) } }
+    })
+    .sort((a, b) => order[a.kind] - order[b.kind] || b.totals.shifts - a.totals.shifts)
+  res.json({ from, to, today, groups: result })
 })
 
 // ─────────────────────────────────────────────
@@ -591,6 +1209,7 @@ app.get('/api/guards', authenticate, async (req, res) => {
       ...(isActive !== undefined ? { isActive: isActive === 'true' } : {}),
       ...(search ? { OR: [{ name: { contains: String(search) } }, { nameKana: { contains: String(search) } }, { employeeNumber: { contains: String(search) } }] } : {}),
     },
+    include: guardRecruitmentInclude,
     orderBy: { employeeNumber: 'asc' },
   })
 
@@ -606,7 +1225,7 @@ app.get('/api/guards', authenticate, async (req, res) => {
 app.get('/api/guards/:id', authenticate, async (req, res) => {
   const { companyId, role } = (req as any).user as JwtPayload
   const isPrivileged = ['ADMIN', 'MANAGER', 'SUPER_ADMIN'].includes(role) || (req as any).user.isSuperAdmin
-  const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  const guard = await prisma.guard.findFirst({ where: { id: req.params.id, companyId }, include: guardRecruitmentInclude })
   if (!guard) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
   // H-1 & M-9: 権限が低いユーザーには機密フィールドを除外
@@ -628,7 +1247,7 @@ const guardSchema = z.object({
   email: z.string().email().optional().or(z.literal('')),
   address: z.string().optional(),
   certifications: z.array(z.string()).optional(),
-  employmentType: z.enum(['FULL_TIME', 'PART_TIME', 'CONTRACT', 'DISPATCH']).optional(),
+  employmentType: z.enum(['EXECUTIVE', 'FULL_TIME', 'PART_TIME', 'CONTRACT', 'DISPATCH']).optional(),
   dailyPayEnabled: z.boolean().optional(),
   lineWorksId: z.string().optional(),
   // 住所（構造化）
@@ -714,12 +1333,32 @@ const guardSchema = z.object({
   docOther: z.boolean().optional(),
   // 銀行口座
   bankAccount: z.any().optional(),
+  employmentInsuranceNumber: z.string().max(30).optional().nullable(),
+  pensionNumber: z.string().max(30).optional().nullable(),
+  commuteNotes: z.string().max(500).optional().nullable(),
+  recruitmentChannelId: z.string().uuid().nullable().optional(),
+  recruitmentAgencyId: z.string().uuid().nullable().optional(),
+  recruitmentNote: z.string().max(200).nullable().optional(),
 })
+
+// 採用経路: 媒体と人材紹介会社はどちらか一方。指定された相手が自社のものかを確認する
+async function recruitmentError(companyId: string, d: { recruitmentChannelId?: string | null; recruitmentAgencyId?: string | null }): Promise<string | null> {
+  if (d.recruitmentChannelId && d.recruitmentAgencyId) return '採用経路は媒体か人材紹介会社のどちらか一方を選んでください'
+  if (d.recruitmentChannelId && !(await prisma.recruitmentChannel.findFirst({ where: { id: d.recruitmentChannelId, companyId }, select: { id: true } }))) return '採用経路（媒体）が見つかりません'
+  if (d.recruitmentAgencyId && !(await prisma.client.findFirst({ where: { id: d.recruitmentAgencyId, companyId }, select: { id: true } }))) return '採用経路（人材紹介会社）が見つかりません'
+  return null
+}
+const guardRecruitmentInclude = {
+  recruitmentChannel: { select: { id: true, name: true } },
+  recruitmentAgency: { select: { id: true, name: true } },
+} as const
 
 app.post('/api/guards', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const parsed = guardSchema.safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  const recruitErr = await recruitmentError(companyId, parsed.data)
+  if (recruitErr) { res.status(400).json({ error: recruitErr }); return }
 
   const guard = await prisma.guard.create({
     data: { ...parsed.data, companyId, birthDate: parsed.data.birthDate ? new Date(parsed.data.birthDate) : undefined },
@@ -734,6 +1373,11 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
 
   const parsed = guardSchema.partial().safeParse(req.body)
   if (!parsed.success) { res.status(400).json({ error: parsed.error.errors }); return }
+  const recruitErr = await recruitmentError(companyId, {
+    recruitmentChannelId: parsed.data.recruitmentChannelId !== undefined ? parsed.data.recruitmentChannelId : existing.recruitmentChannelId,
+    recruitmentAgencyId: parsed.data.recruitmentAgencyId !== undefined ? parsed.data.recruitmentAgencyId : existing.recruitmentAgencyId,
+  })
+  if (recruitErr) { res.status(400).json({ error: recruitErr }); return }
 
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   const updated = await prisma.guard.updateMany({
@@ -745,12 +1389,43 @@ app.put('/api/guards/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async 
   res.json(guard)
 })
 
+// アーカイブ（論理削除）
 app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
   const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
   if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
 
-  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false } })
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: false, leftAt: new Date() } })
+  res.json({ success: true })
+})
+
+// アーカイブ一覧取得
+app.get('/api/guards/archived', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const guards = await prisma.guard.findMany({
+    where: { companyId, isActive: false },
+    orderBy: { leftAt: 'desc' },
+  })
+  res.json(guards)
+})
+
+// 復元
+app.put('/api/guards/:id/restore', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId } })
+  if (!existing) { res.status(404).json({ error: '隊員が見つかりません' }); return }
+
+  await prisma.guard.update({ where: { id: req.params.id }, data: { isActive: true, leftAt: null } })
+  res.json({ success: true })
+})
+
+// 完全削除（ADMIN のみ）
+app.delete('/api/guards/:id/permanent', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const existing = await prisma.guard.findFirst({ where: { id: req.params.id, companyId, isActive: false } })
+  if (!existing) { res.status(404).json({ error: 'アーカイブ済み隊員が見つかりません' }); return }
+
+  await prisma.guard.delete({ where: { id: req.params.id } })
   res.json({ success: true })
 })
 
@@ -762,7 +1437,7 @@ app.delete('/api/guards/:id', authenticate, requireRole('ADMIN'), async (req, re
 const clientSchema = z.object({
   name: z.string().min(1).max(200),
   nameKana: z.string().max(200).optional(),
-  category: z.enum(['GOVERNMENT', 'PRIVATE', 'CONSTRUCTION', 'COMMERCIAL', 'INDIVIDUAL', 'OTHER']).optional(),
+  category: z.enum(['GOVERNMENT', 'PRIVATE', 'CONSTRUCTION', 'COMMERCIAL', 'INDIVIDUAL', 'OTHER', 'RECRUITMENT']).optional(),
   positionTitle: z.string().max(100).optional(),
   contactName: z.string().max(100).optional(),
   phone: z.string().max(20).optional(),
@@ -803,6 +1478,9 @@ const clientSchema = z.object({
   overtimeHolidayDayRate: z.number().int().min(0).max(9999999).optional().nullable(),
   overtimeHolidayNightRate: z.number().int().min(0).max(9999999).optional().nullable(),
   qualificationAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  seasonalAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  nominationAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
+  contractMethod: z.string().max(50).optional().nullable(),
   radioAllowance: z.number().int().min(0).max(9999999).optional().nullable(),
   otherAllowance1: z.number().int().min(0).max(9999999).optional().nullable(),
   otherAllowance2: z.number().int().min(0).max(9999999).optional().nullable(),
@@ -909,6 +1587,7 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
     unitPriceDay, unitPriceNight, unitPriceHolidayDay, unitPriceHolidayNight,
     overtimeDayRate, overtimeNightRate, overtimeHolidayDayRate, overtimeHolidayNightRate,
     qualificationAllowance, radioAllowance, otherAllowance1, otherAllowance2,
+    seasonalAllowance, nominationAllowance, contractMethod,
     invoiceRegistrationNumber } = parsed.data
   const { subContacts, documents, contractDate, isActive } = req.body
 
@@ -935,6 +1614,10 @@ app.put('/api/clients/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async
       radioAllowance: radioAllowance != null ? Number(radioAllowance) : null,
       otherAllowance1: otherAllowance1 != null ? Number(otherAllowance1) : null,
       otherAllowance2: otherAllowance2 != null ? Number(otherAllowance2) : null,
+      // 後から追加した項目は、送られてきた場合だけ更新する（古い画面からの更新で消さないため）
+      seasonalAllowance: seasonalAllowance !== undefined ? seasonalAllowance : undefined,
+      nominationAllowance: nominationAllowance !== undefined ? nominationAllowance : undefined,
+      contractMethod: contractMethod !== undefined ? (contractMethod || null) : undefined,
       invoiceRegistrationNumber, isActive,
     },
   })
@@ -991,7 +1674,7 @@ app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req
   const { companyId } = (req as any).user as JwtPayload
   const { name, address, lat, lng, clientId, clientName, clientPhone, notes,
     siteCode, requiredCount, requiredQualifiedA, requiredQualifiedB,
-    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions } = req.body
+    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions, nearestStation } = req.body
   if (!name || !address) { res.status(400).json({ error: '現場名と住所は必須です' }); return }
 
   const site = await prisma.site.create({
@@ -1003,6 +1686,7 @@ app.post('/api/sites', authenticate, requireRole('ADMIN', 'MANAGER'), async (req
       requiredQualifiedB: requiredQualifiedB != null ? Number(requiredQualifiedB) : 0,
       assemblyTime: assemblyTime || null, defaultStartTime: defaultStartTime || null,
       defaultEndTime: defaultEndTime || null, assemblyPlace: assemblyPlace || null, cautions: cautions || null,
+      nearestStation: nearestStation || null,
     },
     include: { client: true },
   })
@@ -1016,7 +1700,7 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
 
   const { name, address, lat, lng, clientId, clientName, clientPhone, notes, isActive,
     siteCode, requiredCount, requiredQualifiedA, requiredQualifiedB,
-    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions } = req.body
+    assemblyTime, defaultStartTime, defaultEndTime, assemblyPlace, cautions, nearestStation } = req.body
   // H-5: TOCTOU対策 - updateManyでcompanyId条件を追加
   await prisma.site.updateMany({
     where: { id: req.params.id, companyId },
@@ -1031,6 +1715,7 @@ app.put('/api/sites/:id', authenticate, requireRole('ADMIN', 'MANAGER'), async (
       defaultEndTime: defaultEndTime !== undefined ? (defaultEndTime || null) : undefined,
       assemblyPlace: assemblyPlace !== undefined ? (assemblyPlace || null) : undefined,
       cautions: cautions !== undefined ? (cautions || null) : undefined,
+      nearestStation: nearestStation !== undefined ? (nearestStation || null) : undefined,
     },
   })
   const site = await prisma.site.findFirst({ where: { id: req.params.id, companyId }, include: { client: true } })
@@ -1106,6 +1791,16 @@ app.post('/api/schedules', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERAT
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
 
+  // 同日同一隊員の重複チェック（CANCELLED除く）
+  const duplicate = await prisma.schedule.findFirst({
+    where: { companyId, guardId, date: new Date(date), status: { not: 'CANCELLED' } },
+    include: { site: { select: { name: true } } },
+  })
+  if (duplicate) {
+    res.status(409).json({ error: `この隊員はすでに「${duplicate.site?.name ?? '別現場'}」に配員済みです` })
+    return
+  }
+
   const schedule = await prisma.schedule.create({
     data: { companyId, guardId, siteId, date: new Date(date), startTime, endTime, notes,
       contractId: contractId || null },
@@ -1143,9 +1838,31 @@ app.delete('/api/schedules/:id', authenticate, requireRole('ADMIN', 'MANAGER'), 
 // 出退勤 API
 // ─────────────────────────────────────────────
 
+// HH:mm 文字列 + 基準日 → Date
+function buildDateTime(dateBase: Date, timeStr: string, allowNextDay = false, referenceAt?: Date): Date {
+  const [h, m] = timeStr.split(':').map(Number)
+  const dt = new Date(dateBase)
+  dt.setHours(h, m, 0, 0)
+  if (allowNextDay && referenceAt && dt <= referenceAt) {
+    dt.setDate(dt.getDate() + 1)
+  }
+  return dt
+}
+
+// HH:mm → 分数
+function timeToMin(t: string): number {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+// Date → HH:mm
+function dateToHHMM(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 app.post('/api/attendance/clock-in', authenticate, async (req, res) => {
-  const { userId, companyId } = (req as any).user as JwtPayload
-  const { scheduleId } = req.body
+  const { companyId } = (req as any).user as JwtPayload
+  const { scheduleId, clockInTime } = req.body  // clockInTime: "HH:mm"（省略時は現在時刻）
   if (!scheduleId) { res.status(400).json({ error: 'scheduleIdは必須です' }); return }
 
   const schedule = await prisma.schedule.findFirst({ where: { id: scheduleId, companyId } })
@@ -1154,25 +1871,81 @@ app.post('/api/attendance/clock-in', authenticate, async (req, res) => {
   const existing = await prisma.attendance.findUnique({ where: { scheduleId } })
   if (existing?.clockInAt) { res.status(409).json({ error: '既に出勤打刻済みです' }); return }
 
+  const actualClockInAt = clockInTime
+    ? buildDateTime(schedule.date, clockInTime)
+    : new Date()
+
+  // 早出残業 = 予定開始より前に出勤した分
+  const earlyOvertimeMin = Math.max(0, timeToMin(schedule.startTime) - timeToMin(dateToHHMM(actualClockInAt)))
+
   const attendance = existing
-    ? await prisma.attendance.update({ where: { scheduleId }, data: { clockInAt: new Date(), status: 'CLOCKED_IN' } })
-    : await prisma.attendance.create({ data: { companyId, guardId: schedule.guardId, scheduleId, clockInAt: new Date(), status: 'CLOCKED_IN' } })
+    ? await prisma.attendance.update({ where: { scheduleId }, data: { clockInAt: actualClockInAt, earlyOvertimeMin, status: 'CLOCKED_IN' } })
+    : await prisma.attendance.create({ data: { companyId, guardId: schedule.guardId, scheduleId, clockInAt: actualClockInAt, earlyOvertimeMin, status: 'CLOCKED_IN' } })
 
   res.json(attendance)
 })
 
 app.post('/api/attendance/clock-out', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { scheduleId, breakMinutes } = req.body
+  const { scheduleId, breakMinutes, clockOutTime } = req.body  // clockOutTime: "HH:mm"（省略時は現在時刻）
   if (!scheduleId) { res.status(400).json({ error: 'scheduleIdは必須です' }); return }
 
-  const attendance = await prisma.attendance.findFirst({ where: { scheduleId, companyId } })
+  const attendance = await prisma.attendance.findFirst({
+    where: { scheduleId, companyId },
+    include: { schedule: true },
+  })
   if (!attendance?.clockInAt) { res.status(400).json({ error: '出勤打刻がありません' }); return }
+
+  const actualClockOutAt = clockOutTime
+    ? buildDateTime(attendance.schedule.date, clockOutTime, true, attendance.clockInAt)
+    : new Date()
+
+  // 遅出残業 = 予定終了より後まで勤務した分
+  const lateOvertimeMin = Math.max(0, timeToMin(dateToHHMM(actualClockOutAt)) - timeToMin(attendance.schedule.endTime))
 
   const updated = await prisma.attendance.update({
     where: { id: attendance.id },
-    data: { clockOutAt: new Date(), breakMinutes: Number(breakMinutes) || 0, status: 'COMPLETED' },
+    data: {
+      clockOutAt: actualClockOutAt,
+      breakMinutes: Number(breakMinutes) || 0,
+      lateOvertimeMin,
+      status: 'COMPLETED',
+    },
   })
+  res.json(updated)
+})
+
+// 打刻時刻の修正（出勤・退勤どちらも更新可）
+app.put('/api/attendance/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const { clockInTime, clockOutTime, breakMinutes } = req.body
+
+  const attendance = await prisma.attendance.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { schedule: true },
+  })
+  if (!attendance) { res.status(404).json({ error: '打刻データが見つかりません' }); return }
+
+  const update: Record<string, unknown> = {}
+
+  if (clockInTime) {
+    const actualClockInAt = buildDateTime(attendance.schedule.date, clockInTime)
+    update.clockInAt = actualClockInAt
+    update.earlyOvertimeMin = Math.max(0, timeToMin(attendance.schedule.startTime) - timeToMin(dateToHHMM(actualClockInAt)))
+  }
+
+  if (clockOutTime) {
+    const base = update.clockInAt instanceof Date ? update.clockInAt : attendance.clockInAt ?? new Date()
+    const actualClockOutAt = buildDateTime(attendance.schedule.date, clockOutTime, true, base)
+    update.clockOutAt = actualClockOutAt
+    update.lateOvertimeMin = Math.max(0, timeToMin(dateToHHMM(actualClockOutAt)) - timeToMin(attendance.schedule.endTime))
+  }
+
+  if (breakMinutes !== undefined) {
+    update.breakMinutes = Number(breakMinutes) || 0
+  }
+
+  const updated = await prisma.attendance.update({ where: { id: req.params.id }, data: update })
   res.json(updated)
 })
 
@@ -1879,13 +2652,44 @@ app.get('/api/partners', authenticate, async (req, res) => {
   res.json(partners)
 })
 
+const yenField = z.number().int().min(0).max(9999999).nullable().optional()
+const partnerSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  type: z.enum(['GROUP', 'PREFERRED', 'GENERAL']).optional(),
+  contactName: z.string().max(100).nullable().optional(),
+  phone: z.string().max(30).nullable().optional(),
+  email: z.string().max(200).nullable().optional(),
+  priority: z.number().int().min(0).max(100).optional(),
+  isActive: z.boolean().optional(),
+  address: z.string().max(300).nullable().optional(),
+  website: z.string().max(300).nullable().optional(),
+  notes: z.string().max(3000).nullable().optional(),
+  contractDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional().or(z.literal('')),
+  contractMethod: z.string().max(50).nullable().optional(),
+  unitPriceDay: yenField, unitPriceNight: yenField, unitPriceHolidayDay: yenField, unitPriceHolidayNight: yenField,
+  overtimeDayRate: yenField, overtimeNightRate: yenField, overtimeHolidayDayRate: yenField, overtimeHolidayNightRate: yenField,
+  qualificationAllowance: yenField, seasonalAllowance: yenField, nominationAllowance: yenField,
+})
+const partnerData = (d: Partial<z.infer<typeof partnerSchema>>) => ({
+  ...d,
+  ...(d.contractDate !== undefined ? { contractDate: d.contractDate ? new Date(`${d.contractDate}T00:00:00Z`) : null } : {}),
+})
+
 app.post('/api/partners', authenticate, requireRole('ADMIN'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { name, type = 'GENERAL', contactName, phone, email, priority = 0 } = req.body
-  if (!name) { res.status(400).json({ error: '会社名は必須です' }); return }
-
-  const partner = await prisma.partner.create({ data: { companyId, name, type, contactName, phone, email, priority } })
+  const parsed = partnerSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '会社名は必須です' }); return }
+  const partner = await prisma.partner.create({ data: { companyId, ...partnerData(parsed.data) } as Prisma.PartnerUncheckedCreateInput })
   res.status(201).json(partner)
+})
+
+app.put('/api/partners/:id', authenticate, requireRole('ADMIN'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = partnerSchema.partial().safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '入力値が不正です' }); return }
+  const result = await prisma.partner.updateMany({ where: { id: req.params.id, companyId }, data: partnerData(parsed.data) as Prisma.PartnerUpdateManyMutationInput })
+  if (!result.count) { res.status(404).json({ error: '協力会社が見つかりません' }); return }
+  res.json(await prisma.partner.findFirst({ where: { id: req.params.id, companyId } }))
 })
 
 // ─────────────────────────────────────────────
@@ -1916,7 +2720,33 @@ app.post('/api/super-admin/invite', authenticate, requireSuperAdmin, async (req,
 
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
   const invitation = await prisma.invitation.create({ data: { email, expiresAt } })
-  res.json({ token: invitation.token, registrationUrl: `/register?token=${invitation.token}` })
+
+  // 招待リンク（相対パスはフロント表示用に維持、絶対URLはメール本文用）
+  const registrationPath = `/register?token=${invitation.token}`
+  const baseUrl = (process.env.APP_URL || 'https://guardsync.jp').replace(/\/+$/, '')
+  const inviteUrl = `${baseUrl}${registrationPath}`
+  const expiresLabel = expiresAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })
+
+  // 招待メール送信（SMTP未設定時は sendEmail 内でスキップし false を返す）
+  const subject = 'GuardSync 会社アカウント登録のご案内'
+  const html = `
+    <div style="font-family:sans-serif;line-height:1.7;color:#1f2937">
+      <p>GuardSync への会社アカウント登録のご案内です。</p>
+      <p>以下のボタンから、貴社の管理者アカウントを登録してください。</p>
+      <p style="margin:24px 0">
+        <a href="${inviteUrl}" style="background:#e67e22;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:bold">アカウント登録を開始する</a>
+      </p>
+      <p>ボタンが開けない場合は、次のURLをブラウザに貼り付けてください:</p>
+      <p style="word-break:break-all"><a href="${inviteUrl}">${inviteUrl}</a></p>
+      <p style="color:#6b7280;font-size:13px">この招待リンクの有効期限は ${expiresLabel}（7日間）です。心当たりがない場合は破棄してください。</p>
+      <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">
+      <p style="color:#9ca3af;font-size:12px">GuardSync 警備会社向け統合管理システム</p>
+    </div>`
+  const text = `GuardSync 会社アカウント登録のご案内\n\n以下のURLから貴社の管理者アカウントを登録してください:\n${inviteUrl}\n\n有効期限: ${expiresLabel}（7日間）`
+
+  const emailSent = await sendEmail(email, subject, html, text)
+
+  res.json({ token: invitation.token, registrationUrl: registrationPath, inviteUrl, email, emailSent })
 })
 
 // ─────────────────────────────────────────────
@@ -2646,35 +3476,188 @@ app.get('/api/guards/:id/schedule', authenticate, async (req, res) => {
 
 // ─────────────────────────────────────────────
 // 管制機能 - 警備報告書 API
+// 項目定義・検証は shared/securityReport.ts が正（SSOT）
 // ─────────────────────────────────────────────
 
+// 操作者名（修正履歴用）
+async function reportActor(user: JwtPayload): Promise<{ actorName: string; actorUserId: string }> {
+  const u = await prisma.user.findUnique({ where: { id: user.userId }, select: { name: true } })
+  return { actorName: u?.name || 'ユーザー', actorUserId: user.userId }
+}
+
+async function logReportRevision(
+  db: Pick<typeof prisma, 'securityReportRevision'>,
+  report: { id: string; companyId: string },
+  action: ReportRevisionAction,
+  actor: { actorName: string; actorUserId?: string | null },
+  changes?: unknown,
+) {
+  await db.securityReportRevision.create({
+    data: {
+      reportId: report.id, companyId: report.companyId, action,
+      actorName: actor.actorName, actorUserId: actor.actorUserId ?? null,
+      ...(changes !== undefined ? { changes: changes as any } : {}),
+    },
+  })
+}
+
+// 現場→顧客の帳票設定（未設定ならデフォルト）
+async function reportTemplateForSite(siteId: string, companyId: string): Promise<ReportTemplate> {
+  const site = await prisma.site.findFirst({
+    where: { id: siteId, companyId },
+    select: { client: { select: { reportTemplate: { select: { settings: true } } } } },
+  })
+  const parsed = reportTemplateSchema.safeParse(site?.client?.reportTemplate?.settings ?? {})
+  return parsed.success ? parsed.data : DEFAULT_REPORT_TEMPLATE
+}
+
+function diffReportContent(before: Record<string, unknown>, after: Record<string, unknown>) {
+  return Object.keys(REPORT_FIELD_LABEL)
+    .filter(k => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
+    .map(field => ({ field, before: before[field] ?? null, after: after[field] ?? null }))
+}
+
+function photoCreateData(p: PhotoInput, report: { id: string; companyId: string }) {
+  const { mimeType, base64 } = decodePhotoDataUrl(p.dataUrl)
+  return {
+    reportId: report.id, companyId: report.companyId, mimeType,
+    data: Buffer.from(base64, 'base64'),
+    caption: p.caption || null, lat: p.lat ?? null, lng: p.lng ?? null,
+  }
+}
+
+// ログインユーザーに対応する隊員（User と Guard は別テーブルのため、同一ID → 同一メールアドレスの順で突き合わせる）
+async function linkedGuardForUser(user: JwtPayload): Promise<{ id: string; name: string } | null> {
+  // 1. アカウント発行時の明示的な紐付け（User.guardId）
+  const u0 = await prisma.user.findUnique({ where: { id: user.userId }, select: { guard: { select: { id: true, name: true, companyId: true, isActive: true } } } })
+  if (u0?.guard && u0.guard.companyId === user.companyId && u0.guard.isActive) return { id: u0.guard.id, name: u0.guard.name }
+  // 2. 旧仕様（Guard.id = User.id）
+  const byId = await prisma.guard.findFirst({ where: { id: user.userId, companyId: user.companyId }, select: { id: true, name: true } })
+  if (byId) return byId
+  const u = await prisma.user.findUnique({ where: { id: user.userId }, select: { email: true } })
+  if (!u?.email) return null
+  const byEmail = await prisma.guard.findMany({
+    where: { companyId: user.companyId, isActive: true, email: { equals: u.email, mode: 'insensitive' } },
+    select: { id: true, name: true },
+    take: 2,
+  })
+  return byEmail.length === 1 ? byEmail[0] : null // 同じメールの隊員が複数いる場合は特定できないため紐付けない
+}
+
+// 隊員アプリ：ログイン中のユーザーに紐付く隊員
+app.get('/api/guard-app/me', authenticate, async (req, res) => {
+  res.json({ guard: await linkedGuardForUser((req as any).user as JwtPayload) })
+})
+
+const photoMetaSelect = { id: true, caption: true, lat: true, lng: true, mimeType: true, createdAt: true } as const
+const isReportLocked = (r: { signedAt: Date | null; approvedAt: Date | null }) => !!(r.signedAt || r.approvedAt)
+
 app.get('/api/security-reports', authenticate, async (req, res) => {
-  const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, from, to } = req.query
+  const user = (req as any).user as JwtPayload
+  const { companyId } = user
+  const { guardId, siteId, from, to, mine } = req.query
+
+  // mine=1: 自分に紐付く隊員の報告書＋自分が提出した報告書（隊員アプリ用）
+  let mineFilter = {}
+  if (mine === '1') {
+    const linked = await linkedGuardForUser(user)
+    mineFilter = { OR: [{ submittedByUserId: user.userId }, ...(linked ? [{ guardId: linked.id }] : [])] }
+  }
 
   const reports = await prisma.securityReport.findMany({
     where: {
       companyId,
+      ...mineFilter,
       ...(guardId ? { guardId: String(guardId) } : {}),
       ...(siteId ? { siteId: String(siteId) } : {}),
       ...(from || to ? { reportDate: { ...(from ? { gte: new Date(String(from)) } : {}), ...(to ? { lte: new Date(String(to)) } : {}) } } : {}),
     },
-    include: { guard: true, site: true },
+    include: { guard: true, site: { include: { client: true } }, _count: { select: { photos: true } } },
+    omit: { signatureImage: true, approvalToken: true },
     orderBy: { reportDate: 'desc' },
   })
-  res.json(reports)
+  res.json(reports.map(r => ({ ...r, hasSignature: !!r.signedAt })))
 })
 
-app.post('/api/security-reports', authenticate, async (req, res) => {
+// 詳細（署名画像・写真メタ・帳票設定を含む）
+app.get('/api/security-reports/:id', authenticate, async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { guardId, siteId, reportDate, content, clientEmail } = req.body
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId },
+    include: {
+      guard: true, site: { include: { client: true } },
+      photos: { select: photoMetaSelect, orderBy: { createdAt: 'asc' } },
+    },
+    omit: { approvalToken: true },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  res.json({ ...report, template: await reportTemplateForSite(report.siteId, companyId) })
+})
+
+// 報告書作成（写真・サインを同時に受け付ける）
+app.post('/api/security-reports', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const { companyId } = user
+  const { guardId, siteId, reportDate, content, clientEmail, signature, photos, submissionNote } = req.body
   if (!guardId || !siteId || !reportDate || !content) {
     res.status(400).json({ error: '必須項目が不足しています' }); return
   }
+  const parsedContent = reportContentSchema.safeParse(content)
+  if (!parsedContent.success) { res.status(400).json({ error: '報告内容が不正です' }); return }
+  const parsedSig = signature ? signatureInputSchema.safeParse(signature) : null
+  if (parsedSig && !parsedSig.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+  const parsedNote = submissionNoteSchema.safeParse(submissionNote ?? '')
+  if (!parsedNote.success) { res.status(400).json({ error: '備考は300文字以内で入力してください' }); return }
+  const parsedPhotos = z.array(photoInputSchema).max(MAX_PHOTOS_PER_REPORT).safeParse(photos ?? [])
+  if (!parsedPhotos.success) { res.status(400).json({ error: `写真が不正です（最大${MAX_PHOTOS_PER_REPORT}枚）` }); return }
 
-  const report = await prisma.securityReport.create({
-    data: { companyId, guardId, siteId, reportDate: new Date(reportDate), content },
-    include: { guard: true, site: true, company: true },
+  // 他社の隊員・現場を指定できないよう所属を検証
+  const [guardOk, siteOk] = await Promise.all([
+    prisma.guard.findFirst({ where: { id: guardId, companyId }, select: { id: true, name: true } }),
+    prisma.site.findFirst({ where: { id: siteId, companyId }, select: { id: true } }),
+  ])
+  if (!guardOk || !siteOk) { res.status(400).json({ error: '隊員または現場が不正です' }); return }
+
+  const template = await reportTemplateForSite(siteId, companyId)
+  const tplErrors = validateReportAgainstTemplate(parsedContent.data, template, parsedPhotos.data.length)
+  if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
+
+  const actor = await reportActor(user)
+  // 提出したアカウントが報告対象の隊員本人でなければ代理提出として記録する（拒否はしない）
+  const linked = await linkedGuardForUser(user)
+  const asProxy = linked?.id !== guardOk.id
+  const note = parsedNote.data.trim() || (asProxy ? PROXY_SUBMISSION_DEFAULT_NOTE : '')
+  const report = await prisma.$transaction(async tx => {
+    const created = await tx.securityReport.create({
+      data: {
+        companyId, guardId, siteId, reportDate: new Date(reportDate), content: parsedContent.data,
+        submittedByUserId: actor.actorUserId, submittedByName: actor.actorName,
+        submittedAsProxy: asProxy, submissionNote: note || null,
+        ...(parsedSig?.success ? {
+          signerName: parsedSig.data.signerName,
+          signerTitle: parsedSig.data.signerTitle || null,
+          signatureImage: parsedSig.data.signatureImage,
+          signedAt: new Date(),
+          signedLat: parsedSig.data.lat ?? null,
+          signedLng: parsedSig.data.lng ?? null,
+        } : {}),
+      },
+      include: { guard: true, site: true, company: true },
+      omit: { signatureImage: true },
+    })
+    if (parsedPhotos.data.length) {
+      await tx.securityReportPhoto.createMany({ data: parsedPhotos.data.map(p => photoCreateData(p, created)) })
+    }
+    await logReportRevision(tx, created, 'CREATE', actor, {
+      guard: guardOk.name,
+      proxy: asProxy,
+      ...(note ? { note } : {}),
+      ...(parsedPhotos.data.length ? { photos: parsedPhotos.data.length } : {}),
+    })
+    if (parsedSig?.success) {
+      await logReportRevision(tx, created, 'SIGN', { actorName: parsedSig.data.signerName }, { signerTitle: parsedSig.data.signerTitle || null })
+    }
+    return created
   })
 
   // 発注元への承認依頼メール
@@ -2682,30 +3665,292 @@ app.post('/api/security-reports', authenticate, async (req, res) => {
     const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
     const approvalUrl = `${baseUrl}/api/security-reports/approve/${report.approvalToken}`
     const dateStr = new Date(reportDate).toLocaleDateString('ja-JP')
-    const subject = `【承認依頼】${dateStr} ${(report as any).site.name} 警備報告書`
+    const subject = `【承認依頼】${dateStr} ${report.site.name} ${template.title}`
     const html = `
 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
   <div style="background:#1e3a5f;color:white;padding:16px;border-radius:8px 8px 0 0">
-    <h2 style="margin:0;font-size:18px">警備報告書 承認依頼</h2>
+    <h2 style="margin:0;font-size:18px">${escapeHtml(template.title)} 承認依頼</h2>
   </div>
   <div style="background:white;border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 8px 8px">
     <p>担当者様</p>
-    <p>下記の警備報告書のご確認・承認をお願いします。</p>
+    <p>下記の${escapeHtml(template.title)}のご確認・承認をお願いします。</p>
     <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
       <p><strong>報告日:</strong> ${escapeHtml(dateStr)}</p>
-      <p><strong>現場:</strong> ${escapeHtml((report as any).site.name)}</p>
-      <p><strong>担当隊員:</strong> ${escapeHtml((report as any).guard.name)}</p>
+      <p><strong>現場:</strong> ${escapeHtml(report.site.name)}</p>
+      <p><strong>担当隊員:</strong> ${escapeHtml(report.guard.name)}</p>
     </div>
     <div style="text-align:center;margin:24px 0">
       <a href="${approvalUrl}" style="background:#27ae60;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">報告書を承認する</a>
     </div>
-    <p style="font-size:12px;color:#999">${(report as any).company.name} | GuardSync</p>
+    <p style="font-size:12px;color:#999">${escapeHtml(report.company.name)} | GuardSync</p>
   </div>
 </div>`
     await sendEmail(clientEmail, subject, html)
   }
 
-  res.status(201).json(report)
+  const { approvalToken: _t, company: _c, ...safe } = report
+  res.status(201).json(safe)
+})
+
+// 報告書の修正（サイン・承認前のみ。サイン後の改変はサインの意味を失うため不可）
+app.put('/api/security-reports/:id', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId: user.companyId },
+    include: { _count: { select: { photos: true } } },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: 'サイン・承認済みの報告書は修正できません' }); return }
+
+  const parsed = reportContentSchema.safeParse(req.body.content)
+  if (!parsed.success) { res.status(400).json({ error: '報告内容が不正です' }); return }
+  const template = await reportTemplateForSite(report.siteId, user.companyId)
+  const tplErrors = validateReportAgainstTemplate(parsed.data, template, report._count.photos)
+  if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
+
+  const newDate = req.body.reportDate ? new Date(req.body.reportDate) : report.reportDate
+  if (isNaN(newDate.getTime())) { res.status(400).json({ error: '報告日が不正です' }); return }
+  const fmt = (d: Date) => d.toISOString().slice(0, 10)
+  const changes = diffReportContent(
+    { ...(report.content as Record<string, unknown>), reportDate: fmt(report.reportDate) },
+    { ...parsed.data, reportDate: fmt(newDate) },
+  )
+  if (!changes.length) { res.json({ success: true, changed: 0 }); return }
+
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReport.update({ where: { id: report.id }, data: { content: parsed.data, reportDate: newDate } })
+    await logReportRevision(tx, report, 'UPDATE', actor, changes)
+  })
+  res.json({ success: true, changed: changes.length })
+})
+
+// 修正履歴
+app.get('/api/security-reports/:id/revisions', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const revisions = await prisma.securityReportRevision.findMany({
+    where: { reportId: req.params.id, companyId },
+    orderBy: { createdAt: 'asc' },
+  })
+  res.json(revisions)
+})
+
+// 現場写真の追加（サイン前のみ）
+app.post('/api/security-reports/:id/photos', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId: user.companyId },
+    include: { _count: { select: { photos: true } } },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: 'サイン・承認済みの報告書には写真を追加できません' }); return }
+  const parsed = z.array(photoInputSchema).min(1).safeParse(req.body.photos)
+  if (!parsed.success) { res.status(400).json({ error: '写真が不正です' }); return }
+  if (report._count.photos + parsed.data.length > MAX_PHOTOS_PER_REPORT) {
+    res.status(400).json({ error: `写真は1報告書あたり${MAX_PHOTOS_PER_REPORT}枚までです` }); return
+  }
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReportPhoto.createMany({ data: parsed.data.map(p => photoCreateData(p, report)) })
+    await logReportRevision(tx, report, 'PHOTO_ADD', actor, { count: parsed.data.length })
+  })
+  res.status(201).json({ success: true })
+})
+
+app.delete('/api/security-reports/:id/photos/:photoId', authenticate, async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const report = await prisma.securityReport.findFirst({ where: { id: req.params.id, companyId: user.companyId } })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: 'サイン・承認済みの報告書の写真は削除できません' }); return }
+  const photo = await prisma.securityReportPhoto.findFirst({ where: { id: req.params.photoId, reportId: report.id }, select: { id: true, caption: true } })
+  if (!photo) { res.status(404).json({ error: '写真が見つかりません' }); return }
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReportPhoto.delete({ where: { id: photo.id } })
+    await logReportRevision(tx, report, 'PHOTO_DELETE', actor, { caption: photo.caption })
+  })
+  res.json({ success: true })
+})
+
+app.get('/api/security-reports/:id/photos/:photoId', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const photo = await prisma.securityReportPhoto.findFirst({ where: { id: req.params.photoId, reportId: req.params.id, companyId } })
+  if (!photo) { res.status(404).json({ error: '写真が見つかりません' }); return }
+  res.setHeader('Content-Type', photo.mimeType)
+  res.setHeader('Cache-Control', 'private, max-age=3600')
+  res.send(Buffer.from(photo.data))
+})
+
+// 現場監督のタッチサイン登録（隊員のスマートフォンから現場で取得）
+app.post('/api/security-reports/:id/sign', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const parsed = signatureInputSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '署名内容が不正です' }); return }
+  const report = await prisma.securityReport.findFirst({
+    where: { id: req.params.id, companyId },
+    include: { _count: { select: { photos: true } } },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (isReportLocked(report)) { res.status(409).json({ error: '既にサイン済みです' }); return }
+  // 帳票設定変更後でも、サイン時点で必須条件を満たしていることを保証する
+  const template = await reportTemplateForSite(report.siteId, companyId)
+  const content = reportContentSchema.safeParse(report.content)
+  const tplErrors = content.success ? validateReportAgainstTemplate(content.data, template, report._count.photos) : []
+  if (tplErrors.length) { res.status(400).json({ error: tplErrors.join(' / ') }); return }
+
+  const { signerName, signerTitle, signatureImage, lat, lng } = parsed.data
+  await prisma.$transaction(async tx => {
+    await tx.securityReport.update({
+      where: { id: report.id },
+      data: { signerName, signerTitle: signerTitle || null, signatureImage, signedAt: new Date(), signedLat: lat ?? null, signedLng: lng ?? null },
+    })
+    await logReportRevision(tx, report, 'SIGN', { actorName: signerName }, { signerTitle: signerTitle || null })
+  })
+  res.json({ success: true })
+})
+
+// ─────────────────────────────────────────────
+// 協力会社への共有（閲覧専用・期限付きリンク）
+// ─────────────────────────────────────────────
+
+app.get('/api/security-reports/:id/shares', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const shares = await prisma.securityReportShare.findMany({
+    where: { reportId: req.params.id, companyId },
+    include: { partner: { select: { id: true, name: true, email: true } } },
+    omit: { token: true },
+    orderBy: { createdAt: 'desc' },
+  })
+  res.json(shares)
+})
+
+app.post('/api/security-reports/:id/shares', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const parsed = shareInputSchema.safeParse(req.body)
+  if (!parsed.success) { res.status(400).json({ error: '共有先が不正です' }); return }
+  const [report, partner] = await Promise.all([
+    prisma.securityReport.findFirst({ where: { id: req.params.id, companyId: user.companyId }, include: { site: true, company: true } }),
+    prisma.partner.findFirst({ where: { id: parsed.data.partnerId, companyId: user.companyId, isActive: true } }),
+  ])
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  if (!partner) { res.status(400).json({ error: '協力会社が見つかりません' }); return }
+
+  const actor = await reportActor(user)
+  const expiresAt = new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1000)
+  const share = await prisma.$transaction(async tx => {
+    const s = await tx.securityReportShare.create({
+      data: { reportId: report.id, companyId: user.companyId, partnerId: partner.id, expiresAt, createdByName: actor.actorName },
+    })
+    await logReportRevision(tx, report, 'SHARE', actor, { partner: partner.name, expiresAt })
+    return s
+  })
+
+  const baseUrl = process.env.APP_URL || 'https://guardsync.up.railway.app'
+  const shareUrl = `${baseUrl}/shared/report/${share.token}`
+  let emailed = false
+  if (partner.email) {
+    const dateStr = report.reportDate.toLocaleDateString('ja-JP')
+    emailed = await sendEmail(partner.email, `【共有】${dateStr} ${report.site.name} 警備報告書`, `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
+  <p>${escapeHtml(partner.contactName || partner.name)} 様</p>
+  <p>${escapeHtml(report.company.name)}より警備報告書が共有されました。下記リンクから閲覧できます（${escapeHtml(expiresAt.toLocaleDateString('ja-JP'))}まで有効）。</p>
+  <div style="background:#f5f6fa;border-radius:8px;padding:16px;margin:16px 0;font-size:14px">
+    <p><strong>報告日:</strong> ${escapeHtml(dateStr)}</p>
+    <p><strong>現場:</strong> ${escapeHtml(report.site.name)}</p>
+  </div>
+  <p style="text-align:center"><a href="${shareUrl}" style="background:#1e3a5f;color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:bold">報告書を閲覧する</a></p>
+  <p style="font-size:12px;color:#999">GuardSync</p>
+</div>`)
+  }
+  res.status(201).json({ id: share.id, shareUrl, expiresAt, emailed })
+})
+
+app.delete('/api/security-reports/:id/shares/:shareId', authenticate, requireRole('ADMIN', 'MANAGER', 'OPERATOR'), async (req, res) => {
+  const user = (req as any).user as JwtPayload
+  const share = await prisma.securityReportShare.findFirst({
+    where: { id: req.params.shareId, reportId: req.params.id, companyId: user.companyId, revokedAt: null },
+    include: { partner: { select: { name: true } }, report: { select: { id: true, companyId: true } } },
+  })
+  if (!share) { res.status(404).json({ error: '共有が見つかりません' }); return }
+  const actor = await reportActor(user)
+  await prisma.$transaction(async tx => {
+    await tx.securityReportShare.update({ where: { id: share.id }, data: { revokedAt: new Date() } })
+    await logReportRevision(tx, share.report, 'SHARE_REVOKE', actor, { partner: share.partner.name })
+  })
+  res.json({ success: true })
+})
+
+async function findActiveShare(token: string) {
+  const share = await prisma.securityReportShare.findUnique({ where: { token } })
+  if (!share || share.revokedAt || share.expiresAt < new Date()) return null
+  return share
+}
+
+// 共有リンクからの閲覧（認証不要・閲覧のみ）
+app.get('/api/public/report-shares/:token', async (req, res) => {
+  const share = await findActiveShare(req.params.token)
+  if (!share) { res.status(404).json({ error: 'リンクが無効か、有効期限が切れています' }); return }
+  const report = await prisma.securityReport.findUnique({
+    where: { id: share.reportId },
+    select: {
+      reportDate: true, content: true, siteId: true, companyId: true,
+      signerName: true, signerTitle: true, signatureImage: true, signedAt: true, approvedAt: true, approvedBy: true,
+      submittedByName: true, submittedAsProxy: true, submissionNote: true,
+      guard: { select: { name: true } },
+      site: { select: { name: true, address: true, clientName: true, client: { select: { name: true } } } },
+      company: { select: { name: true } },
+      photos: { select: { id: true, caption: true }, orderBy: { createdAt: 'asc' } },
+    },
+  })
+  if (!report) { res.status(404).json({ error: '報告書が見つかりません' }); return }
+  await prisma.securityReportShare.update({ where: { id: share.id }, data: { viewCount: { increment: 1 }, lastViewedAt: new Date() } })
+  const { siteId, companyId, ...rest } = report
+  res.json({ ...rest, template: await reportTemplateForSite(siteId, companyId), expiresAt: share.expiresAt })
+})
+
+app.get('/api/public/report-shares/:token/photos/:photoId', async (req, res) => {
+  const share = await findActiveShare(req.params.token)
+  if (!share) { res.status(404).end(); return }
+  const photo = await prisma.securityReportPhoto.findFirst({ where: { id: req.params.photoId, reportId: share.reportId } })
+  if (!photo) { res.status(404).end(); return }
+  res.setHeader('Content-Type', photo.mimeType)
+  res.setHeader('Cache-Control', 'private, max-age=600')
+  res.send(Buffer.from(photo.data))
+})
+
+// ─────────────────────────────────────────────
+// 顧客別の帳票設定
+// ─────────────────────────────────────────────
+
+app.get('/api/clients/:id/report-template', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId }, select: { reportTemplate: true } })
+  if (!client) { res.status(404).json({ error: '顧客が見つかりません' }); return }
+  const parsed = reportTemplateSchema.safeParse(client.reportTemplate?.settings ?? {})
+  res.json({ settings: parsed.success ? parsed.data : DEFAULT_REPORT_TEMPLATE, isDefault: !client.reportTemplate })
+})
+
+app.put('/api/clients/:id/report-template', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  const client = await prisma.client.findFirst({ where: { id: req.params.id, companyId }, select: { id: true } })
+  if (!client) { res.status(404).json({ error: '顧客が見つかりません' }); return }
+  const parsed = reportTemplateSchema.safeParse(req.body.settings)
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message || '帳票設定が不正です' }); return }
+  for (const f of parsed.data.customFields) {
+    if (f.type === 'select' && f.options.length === 0) { res.status(400).json({ error: `「${f.label}」の選択肢を入力してください` }); return }
+  }
+  const saved = await prisma.securityReportTemplate.upsert({
+    where: { clientId: client.id },
+    create: { companyId, clientId: client.id, settings: parsed.data },
+    update: { settings: parsed.data },
+  })
+  res.json({ settings: saved.settings, isDefault: false })
+})
+
+// 現場に適用される帳票設定（隊員アプリ・作成フォーム用）
+app.get('/api/sites/:id/report-template', authenticate, async (req, res) => {
+  const { companyId } = (req as any).user as JwtPayload
+  res.json(await reportTemplateForSite(req.params.id, companyId))
 })
 
 // メールリンクによる承認（認証不要）
@@ -2715,9 +3960,10 @@ app.post('/api/security-reports/approve/:token', async (req, res) => {
   if (report.approvedAt) { res.status(409).json({ error: '既に承認済みです' }); return }
 
   const { approvedBy } = req.body
-  await prisma.securityReport.update({
-    where: { id: report.id },
-    data: { approvedAt: new Date(), approvedBy: approvedBy || '承認者' },
+  const name = typeof approvedBy === 'string' && approvedBy.trim() ? approvedBy.trim().slice(0, 50) : '承認者'
+  await prisma.$transaction(async tx => {
+    await tx.securityReport.update({ where: { id: report.id }, data: { approvedAt: new Date(), approvedBy: name } })
+    await logReportRevision(tx, report, 'APPROVE', { actorName: name })
   })
   res.json({ success: true, message: '警備報告書が承認されました' })
 })
@@ -3796,9 +5042,10 @@ app.post('/api/payroll/bank-transfer', authenticate, requireRole('ADMIN'), async
     if (!ba) continue
 
     const record = '2'                                      // データ区分(1)
-      + padRight(ba.bank || '', 4)                          // 被仕向銀行番号(4)
+      // 銀行・支店はコードを優先（bank/branch には名称が入っている場合があるため、数字のときだけコードとみなす）
+      + padRight(ba.bankCode || (/^\d{4}$/.test(ba.bank || '') ? ba.bank : ''), 4) // 被仕向銀行番号(4)
       + padRight('', 15)                                    // 被仕向銀行名(15)
-      + padRight(ba.branch || '', 3)                        // 被仕向支店番号(3)
+      + padRight(ba.branchCode || (/^\d{3}$/.test(ba.branch || '') ? ba.branch : ''), 3) // 被仕向支店番号(3)
       + padRight('', 15)                                    // 被仕向支店名(15)
       + '0000'                                              // 手形交換所番号(4)
       + (ba.type === '当座' ? '2' : '1')                     // 預金種目(1)
@@ -6324,7 +7571,7 @@ function calculateAssignmentScore(
 // POST /api/dispatch/optimize - 最適人材配置
 app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const { companyId } = (req as any).user as JwtPayload
-  const { date, siteIds, guardIds, mode = 'balanced' } = req.body
+  const { date, siteIds, guardIds, mode = 'balanced', respectSurvey = false } = req.body
 
   if (!date) { res.status(400).json({ error: 'date は必須です' }); return }
 
@@ -6377,7 +7624,26 @@ app.post('/api/dispatch/optimize', authenticate, requireRole('ADMIN', 'MANAGER')
     select: { guardId: true },
   })
   const busyGuardIds = new Set(busyGuardSchedules.map((s) => s.guardId))
-  const availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+  let availableGuards = allGuards.filter((g) => !busyGuardIds.has(g.id))
+
+  // 2.5. シフト調査連動フィルタ（respectSurvey=trueの場合、出勤可の隊員のみ）
+  if (respectSurvey) {
+    const survey = await prisma.shiftSurvey.findFirst({
+      where: { companyId, startDate: { lte: targetDate }, endDate: { gte: targetDate } },
+      include: { responses: { select: { guardId: true, answers: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    if (survey) {
+      const dateStr = date as string
+      const surveyAvailableIds = new Set<string>()
+      for (const resp of survey.responses) {
+        const answers = resp.answers as Array<{ date: string; available: boolean }>
+        const ans = answers.find(a => a.date === dateStr)
+        if (ans?.available) surveyAvailableIds.add(resp.guardId)
+      }
+      availableGuards = availableGuards.filter(g => surveyAvailableIds.has(g.id))
+    }
+  }
 
   // 3. 過去の配置回数を集計（各隊員×各現場）
   const pastSchedules = await prisma.schedule.findMany({
@@ -7161,22 +8427,25 @@ app.get('/api/equipment/site-shortage', authenticate, async (req, res) => {
       const deployed = eq.assignments
         .filter((a) => a.siteId === site.id)
         .reduce((sum, a) => sum + a.quantity, 0)
-      // 基本的な必要数: トランシーバー→隊員数分、その他→1セットを基準
-      const needed = eq.category === 'RADIO' ? site.requiredCount : (deployed > 0 ? deployed : 0)
+      // 必要数を算出できるのはトランシーバー(RADIO)のみ（隊員数=requiredCount基準）。
+      // それ以外のカテゴリは現場ごとの必要数の基準が無いため過不足判定は行わず、配備数のみ表示する。
+      const trackShortage = eq.category === 'RADIO'
       return {
         equipmentId: eq.id,
         equipmentName: eq.name,
         category: eq.category,
         deployed,
-        needed: eq.category === 'RADIO' ? site.requiredCount : deployed,
-        shortage: eq.category === 'RADIO' ? Math.max(0, site.requiredCount - deployed) : 0,
+        trackShortage,
+        needed: trackShortage ? site.requiredCount : null,
+        shortage: trackShortage ? Math.max(0, site.requiredCount - deployed) : null,
       }
     })
     return {
       siteId: site.id,
       siteName: site.name,
       requiredGuards: site.requiredCount,
-      items: items.filter((i) => i.deployed > 0 || i.needed > 0),
+      // RADIOは必要数がある限り表示、その他は配備済みのもののみ表示
+      items: items.filter((i) => i.deployed > 0 || (i.needed ?? 0) > 0),
     }
   })
 

@@ -1,11 +1,14 @@
 import React, { useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { hasRole } from '../lib/auth'
 
 interface NavItem {
   path: string
   label: string
   icon: string
+  adminOnly?: boolean // 会社の管理者・スーパー管理者のみ表示
+  managerOnly?: boolean // 管理者・マネージャーのみ表示
 }
 
 interface NavGroup {
@@ -21,7 +24,9 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: '/guards',    label: '隊員管理',   icon: '👷' },
       { path: '/partners',  label: '協力会社',   icon: '🤝' },
+      { path: '/recruitment-report', label: '採用経路別 稼働実績', icon: '📊', managerOnly: true },
       { path: '/vehicles',  label: '車両管理',   icon: '🚗' },
+      { path: '/equipment', label: '備品管理',   icon: '📦' },
     ],
   },
   {
@@ -58,6 +63,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: '/clients',                label: '取引先',   icon: '🏢' },
       { path: '/sites',                  label: '現場管理', icon: '📍' },
+      { path: '/site-requests',          label: '受注実績', icon: '🗓️' },
       { path: '/contracts',              label: '契約管理', icon: '📄' },
       { path: '/invoices',               label: '請求管理', icon: '💴' },
       { path: '/subcontractor-payments', label: '支払管理', icon: '📑' },
@@ -72,6 +78,7 @@ const NAV_GROUPS: NavGroup[] = [
       { path: '/reports',        label: '警備報告書',     icon: '📝' },
       { path: '/notifications',  label: '通知管理',       icon: '🔔' },
       { path: '/auto-receipts',  label: '自動受付',       icon: '📨' },
+      { path: '/import',         label: 'データ取り込み', icon: '📥', adminOnly: true },
       { path: '/settings',       label: '設定',           icon: '⚙️' },
     ],
   },
@@ -113,6 +120,20 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         {/* ナビゲーション */}
         <nav className="flex-1 overflow-y-auto py-2">
+          {user?.isSuperAdmin && (
+            <NavLink
+              to="/super-admin"
+              onClick={() => setSidebarOpen(false)}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors mb-1 border-b border-[#2d5282] ${
+                  isActive ? 'bg-red-800 text-white font-medium' : 'text-red-300 hover:bg-red-900/30 hover:text-white'
+                }`
+              }
+            >
+              <span className="text-base">🔒</span>
+              スーパー管理者
+            </NavLink>
+          )}
           {NAV_GROUPS.map((group, groupIndex) => (
             <div key={group.moduleKey}>
               {groupIndex > 0 && <div className="border-t border-[#2d5282] my-1" />}
@@ -121,7 +142,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   {group.module}
                 </span>
               </div>
-              {group.items.map((item) => (
+              {group.items.filter(item => (!item.adminOnly || hasRole(user, 'ADMIN')) && (!item.managerOnly || hasRole(user, 'ADMIN', 'MANAGER'))).map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}
@@ -139,20 +160,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               ))}
             </div>
           ))}
-          {user?.isSuperAdmin && (
-            <NavLink
-              to="/super-admin"
-              onClick={() => setSidebarOpen(false)}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors mt-2 border-t border-[#2d5282] ${
-                  isActive ? 'bg-red-800 text-white font-medium' : 'text-red-300 hover:bg-red-900/30 hover:text-white'
-                }`
-              }
-            >
-              <span className="text-base">🔒</span>
-              スーパー管理者
-            </NavLink>
-          )}
         </nav>
 
         {/* ユーザー情報 */}

@@ -4,13 +4,10 @@ import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
-const STATUS_LABELS: Record<string, string> = {
-  DRAFT: '未入力', IN_REVIEW: '確認中', CONFIRMED: '確認済み', PAID: '支払済み',
-}
-const STATUS_COLORS: Record<string, string> = {
-  DRAFT: 'bg-gray-100 text-gray-600', IN_REVIEW: 'bg-yellow-100 text-yellow-700',
-  CONFIRMED: 'bg-blue-100 text-blue-700', PAID: 'bg-green-100 text-green-700',
-}
+import { PAYROLL_STATUS } from '../lib/constants'
+
+const STATUS_LABELS = Object.fromEntries(Object.entries(PAYROLL_STATUS).map(([k, v]) => [k, v.label]))
+const STATUS_COLORS = Object.fromEntries(Object.entries(PAYROLL_STATUS).map(([k, v]) => [k, v.className]))
 
 interface PayrollData {
   id: string
@@ -74,13 +71,9 @@ export default function PayrollPage() {
   }
 
   const handleSave = (id: string) => {
-    const grossPay = (editData.basicPay || 0) + (editData.overtimePay || 0) + (editData.holidayPay || 0) +
-      (editData.positionAllowance || 0) + (editData.qualificationAllowance || 0) + (editData.leaderAllowance || 0) +
-      (editData.commuteAllowance || 0) + (editData.travelExpense || 0) + (editData.otherAllowance || 0)
-    const totalDeduction = (editData.healthInsurance || 0) + (editData.pension || 0) + (editData.employmentIns || 0) +
-      (editData.incomeTax || 0) + (editData.residentTax || 0) + (editData.otherDeduction || 0)
-    const netPay = grossPay - totalDeduction + (editData.yearEndAdj || 0)
-    updateMut.mutate({ id, data: { ...editData, grossPay, totalDeduction, netPay } })
+    // grossPay/totalDeduction/netPay はサーバー側で計算するため送信しない
+    const { grossPay: _g, totalDeduction: _t, netPay: _n, taxableTotal: _tx, nonTaxableTotal: _nt, ...payload } = editData
+    updateMut.mutate({ id, data: payload })
   }
 
   const draftCount = payrolls.filter(p => p.status === 'DRAFT').length

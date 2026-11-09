@@ -1,0 +1,68 @@
+name: Deploy to Sakura VPS (staging)
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-sakura-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx prisma generate
+
+      - name: Build (frontend + server + obfuscate)
+        env:
+          VITE_API_URL: https://staging.guardsync.jp
+          VITE_GOOGLE_MAPS_API_KEY: ${{ secrets.VITE_GOOGLE_MAPS_API_KEY }}
+        run: npm run build
+
+      - name: Bundle PDF font into dist (if committed)
+        run: |
+          mkdir -p dist/fonts
+          if [ -f fonts/NotoSansJP-Regular.ttf ]; then
+            cp fonts/NotoSansJP-Regular.ttf dist/fonts/NotoSansJP-Regular.ttf
+            echo "PDF font bundled into dist/fonts"
+          else
+            echo "WARN: fonts/NotoSansJP-Regular.ttf not found; PDF Japanese may render as tofu"
+          fi
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p 22 -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync build artifacts to VPS (staging)
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/id_deploy -p 22" \
+            dist package.json package-lock.json prisma Dockerfile \
+            ubuntu@${{ secrets.VPS_HOST }}:/opt/guardsync-staging/current/
+
+      - name: Build image, sync schema (db push), restart (staging)
+        run: |
+          ssh -i ~/.ssh/id_deploy -p 22 ubuntu@${{ secrets.VPS_HOST }} 'set -e
+            cd /opt/guardsync-staging
+            docker compose build app
+            docker compose up -d db
+            # 既存テーブルへの一意制約など db push が警告で止まる変更を先に冪等SQLで適用（prisma/predeploy.sql）
+            docker compose run --rm app npx prisma db execute --file prisma/predeploy.sql --schema prisma/schema.prisma
+            docker compose run --rm app npx prisma db push
+            docker compose up -d app
+            sleep 5
+            curl -fsS http://127.0.0.1:3001/api/health && echo'

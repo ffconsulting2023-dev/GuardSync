@@ -30,6 +30,35 @@ model Company {
   billingEmail        String?
   lastPaymentAt       DateTime?
 
+  // ─── 会社概要 ───
+  nameKana              String?
+  representative        String?  // 代表者
+  postalCode            String?
+  address               String?
+  phone                 String?
+  email                 String?
+  website               String?
+  securityLicenseNumber String?  // 警備業認定番号
+  securityLicenseDate   DateTime? @db.Date // 認定年月日
+  securityLicenseExpiry DateTime? @db.Date // 認定の有効期限（認定から5年。警備業法5条）
+  securityLicenseAuthority String? // 認定公安委員会
+  securityServiceCategories String? // 警備業務の区分（1号〜4号）
+  securityEducationManager String?  // 警備員指導教育責任者
+  nameOrigin            String?  // 社名の由来
+  establishedOn         String?  // 設立（「2026年6月」のように年月のみの場合があるため文字列）
+  capital               String?  // 資本金
+  businessDescription   String?  // 事業内容
+  vision                String?  // ビジョン
+  // ─── 社会保険・労働保険の事業所情報（取り込み項目は shared/import.ts COMPANY_INSURANCE_FIELDS）───
+  socialInsuranceOfficeSymbol     String?  // 事業所整理記号
+  socialInsuranceOfficeNumber     String?  // 事業所番号（社会保険）
+  healthInsuranceNumber           String?  // 健康保険の番号
+  employmentInsuranceOfficeNumber String?  // 雇用保険 適用事業所番号
+  employmentInsuranceJurisdiction String?  // 雇用保険 管轄区分
+  laborInsuranceNumber            String?  // 労働保険番号
+  laborInsuranceEstablishmentType String?  // 労働保険 設置区分
+  industryClassification          String?  // 産業分類
+
   users         User[]
   guards        Guard[]
   clients       Client[]
@@ -54,6 +83,43 @@ model Company {
   subcontractorPayments SubcontractorPayment[]
   billingSubscriptions  BillingSubscription[]
   billingLogs           BillingLog[]
+  siteRequests          SiteRequest[]
+  importBatches         ImportBatch[]
+  recruitmentChannels   RecruitmentChannel[]
+}
+
+// 採用経路の媒体マスタ（会社ごと。既定値は shared/recruitment.ts DEFAULT_RECRUITMENT_CHANNELS）
+model RecruitmentChannel {
+  id        String   @id @default(uuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  name      String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true) // 使わなくなった媒体は削除せず非表示にする（過去の隊員の採用経路を残すため）
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  guards    Guard[]
+
+  @@unique([companyId, name])
+}
+
+// 人材紹介会社への紹介料の単価ルール（計算は shared/recruitment.ts shiftFee）
+model RecruitmentFeeRule {
+  id                  String    @id @default(uuid())
+  companyId           String
+  agencyId            String    // 人材紹介会社（種別が人材紹介会社の取引先）
+  agency              Client    @relation(fields: [agencyId], references: [id])
+  effectiveFrom       DateTime  @db.Date
+  effectiveTo         DateTime? @db.Date
+  amountPerShift      Int       // 1勤務あたり（税別）
+  nightAmountPerShift Int?      // 夜勤1勤務あたり（空なら amountPerShift）
+  maxMonthsFromHire   Int?      // 入社から何か月までの勤務を対象にするか（空なら期限なし）
+  basis               String    @default("SCHEDULE") // shared/recruitment.ts FEE_BASIS
+  notes               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([companyId, agencyId])
 }
 
 enum Plan {
@@ -80,7 +146,8 @@ model Invitation {
 
 model User {
   id          String   @id @default(uuid())
-  email       String   @unique
+  email       String?  @unique // 隊員などメールを持たないアカウントは null（ログインIDでログイン）
+  loginId     String?  @unique // 自由設定のログインID（システム全体で一意・小文字で保存。規則は shared/account.ts）
   password    String
   name        String
   role        UserRole @default(OPERATOR)
@@ -92,7 +159,16 @@ model User {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // ID発行権限（ADMIN は常に可。それ以外は会社ごとに付与）
+  canIssueAccounts Boolean @default(false)
+  // 発行直後でパスワード未設定（設定用URLからの設定待ち）
+  mustSetPassword  Boolean @default(false)
+  // 隊員アカウントの紐付け先（隊員アプリはこの隊員として動作）
+  guardId     String?  @unique
+  guard       Guard?   @relation(fields: [guardId], references: [id])
+
   passwordResetTokens  PasswordResetToken[]
+  setupTokens          AccountSetupToken[]
   createdContracts     Contract[]
   createdInvoices      Invoice[]
   approvedDailyPays    DailyPayRequest[] @relation("ApprovedBy")
@@ -107,6 +183,21 @@ enum UserRole {
   MANAGER       // 管理者（配員・請求）
   OPERATOR      // オペレーター（管制）
   VIEWER        // 閲覧のみ
+  GUARD         // 隊員（隊員アプリのみ）
+}
+
+// パスワード設定用URL（管理者が発行。メール・URLコピー・QRで本人に渡す）
+model AccountSetupToken {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash     String    @unique // URLのトークンは保存せずSHA-256のみ保持
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdByName String
+  createdAt     DateTime  @default(now())
+
+  @@index([userId])
 }
 
 // ─────────────────────────────────────────────
@@ -247,9 +338,19 @@ model Guard {
   docOther            Boolean @default(false)
   docWorkPermit       Boolean @default(false)  // 資格外活動許可書
 
+  employmentInsuranceNumber String? // 雇用保険被保険者番号
+  pensionNumber     String?   // 基礎年金番号（社保番号）
+  commuteNotes      String?   // 交通費の取り決め（例: 往復バス500円追加）
+  // 採用経路（媒体・人材紹介会社のどちらか。その他は recruitmentNote のみ。表示は shared/recruitment.ts）
+  recruitmentChannelId String?
+  recruitmentChannel   RecruitmentChannel? @relation(fields: [recruitmentChannelId], references: [id])
+  recruitmentAgencyId  String?
+  recruitmentAgency    Client? @relation("RecruitmentAgency", fields: [recruitmentAgencyId], references: [id])
+  recruitmentNote      String?   // 自由記入（その他）または補足
   myNumber          String?   // マイナンバー（AES-256暗号化して保存）
   myNumberUpdatedAt DateTime? // 最終更新日時
 
+  userAccount     User?       // 隊員アプリのログインアカウント
   schedules       Schedule[]
   attendances     Attendance[]
   dailyPayRequests DailyPayRequest[]
@@ -327,6 +428,7 @@ enum Gender {
 }
 
 enum EmploymentType {
+  EXECUTIVE     // 役員
   FULL_TIME     // 正社員
   PART_TIME     // アルバイト・パート
   CONTRACT      // 契約社員
@@ -404,6 +506,9 @@ model Client {
   overtimeHolidayDayRate Int?
   overtimeHolidayNightRate Int?
   qualificationAllowance Int?
+  seasonalAllowance      Int?     // 季節手当
+  nominationAllowance    Int?     // 指名料
+  contractMethod         String?  // 契約方法（GMO・郵送 等）
   radioAllowance         Int?
   otherAllowance1        Int?
   otherAllowance2        Int?
@@ -418,7 +523,10 @@ model Client {
 
   sites       Site[]
   logs        ClientLog[]
+  reportTemplate SecurityReportTemplate?
   invoices    Invoice[]
+  recruitedGuards Guard[] @relation("RecruitmentAgency")
+  recruitmentFeeRules RecruitmentFeeRule[]
 
   @@index([companyId])
 }
@@ -452,6 +560,7 @@ model Site {
   lat         Float?
   lng         Float?
   clientName  String?  // 発注元名（clientId未設定時の手入力用）
+  nearestStation String?
   clientPhone String?
   notes       String?
   isActive    Boolean  @default(true)
@@ -470,6 +579,7 @@ model Site {
 
   contracts   Contract[]
   schedules   Schedule[]
+  siteRequests SiteRequest[]
   securityReports SecurityReport[]
   equipmentAssignments EquipmentAssignment[]
 
@@ -537,10 +647,29 @@ model Partner {
   email       String?
   priority    Int         @default(0) // 優先度（高いほど優先）
   isActive    Boolean     @default(true)
+  address     String?
+  website     String?
+  notes       String?
+  // 契約単価（再委託・相互応援の単価。区分は Client の契約単価と同じ）
+  contractDate             DateTime?
+  contractMethod           String?
+  unitPriceDay             Int?
+  unitPriceNight           Int?
+  unitPriceHolidayDay      Int?
+  unitPriceHolidayNight    Int?
+  overtimeDayRate          Int?
+  overtimeNightRate        Int?
+  overtimeHolidayDayRate   Int?
+  overtimeHolidayNightRate Int?
+  qualificationAllowance   Int?
+  seasonalAllowance        Int?
+  nominationAllowance      Int?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
   payments    SubcontractorPayment[]
+  reportShares SecurityReportShare[]
+  siteRequests SiteRequest[]
 
   @@index([companyId])
 }
@@ -661,12 +790,66 @@ model Schedule {
   sentAt         DateTime?  // 送信日時
   contractId     String?  // FK to Contract（どの契約に基づくシフトか）
   contract       Contract? @relation(fields: [contractId], references: [id])
+  siteRequestId  String?  // FK to SiteRequest（どの依頼に対する配員か）
+  siteRequest    SiteRequest? @relation(fields: [siteRequestId], references: [id])
 
   attendance  Attendance?
 
   @@index([companyId, date])
   @@index([guardId, date])
   @@index([contractId])
+  @@index([siteRequestId])
+}
+
+// 現場依頼（受注実績）: 1日・1現場の依頼。配員（Schedule）はこれに紐付き、再委託分は協力会社として記録する
+model SiteRequest {
+  id                   String    @id @default(uuid())
+  companyId            String
+  company              Company   @relation(fields: [companyId], references: [id])
+  siteId               String
+  site                 Site      @relation(fields: [siteId], references: [id])
+  date                 DateTime  @db.Date
+  timeLabel            String?   // 元の表記（「巡回」など時刻で表せない依頼も保持）
+  startTime            String?   // "08:30"
+  endTime              String?   // "17:30"
+  shiftType            String    @default("DAY") // DAY / NIGHT
+  status               String    @default("CONFIRMED") // shared/siteRequest.ts SITE_REQUEST_STATUS（稼働 / 予定 / 中止）
+  requestedCount       Int       @default(1)     // 依頼人数
+  qualifiedCount       Int       @default(0)     // うち資格者
+  unitPrice            Int?      // 依頼単価（1人1日・税別）
+  transportFee         Int?      // 交通費単価
+  overtimeRate         Int?      // 残業単価
+  overtimeHours        Float?    // 残業時間
+  overtimeCount        Int?      // 残業人数
+  subcontractPartnerId String?   // 再委託先
+  subcontractPartner   Partner?  @relation(fields: [subcontractPartnerId], references: [id])
+  subcontractCount     Int       @default(0)     // 再委託の人数
+  subcontractUnitPrice Int?      // 再委託単価
+  notes                String?
+  sourceKey            String?   // 取り込み元の行（例: 現場管理#12）。再取り込み時に同じ依頼を更新するための照合キー
+  importBatchId        String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  schedules            Schedule[]
+
+  @@unique([companyId, sourceKey])
+  @@index([companyId, date])
+  @@index([siteId])
+}
+
+// データ取り込みの履歴
+model ImportBatch {
+  id            String   @id @default(uuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  kind          String   // shared/import.ts IMPORT_KINDS のキー
+  sourceName    String   // ファイル名・シート名
+  createdById   String?
+  createdByName String
+  summary       Json     // { created, updated, skipped, errors, ... }
+  createdAt     DateTime @default(now())
+
+  @@index([companyId])
 }
 
 enum ScheduleStatus {
@@ -937,9 +1120,86 @@ model SecurityReport {
   approvalToken String? @unique @default(uuid()) // メールリンク承認用
   approvedAt  DateTime?
   approvedBy  String?
+  // 現場監督の手書きサイン（承認者名は signerName、署名日時は signedAt が正）
+  signerName     String?
+  signerTitle    String?
+  signatureImage String?  @db.Text // PNG data URL
+  signedAt       DateTime?
+  signedLat      Float?   // サイン取得位置
+  signedLng      Float?
+  // 提出者（報告対象の隊員と異なる場合は submittedAsProxy=true、理由は submissionNote）
+  submittedByUserId String?
+  submittedByName   String?
+  submittedAsProxy  Boolean  @default(false)
+  submissionNote    String?
   pdfPath     String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  photos      SecurityReportPhoto[]
+  revisions   SecurityReportRevision[]
+  shares      SecurityReportShare[]
+}
+
+// 現場写真（Railwayのディスクは再デプロイで消えるためDBに保存。端末側で縮小済み）
+model SecurityReportPhoto {
+  id        String         @id @default(uuid())
+  reportId  String
+  report    SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  companyId String
+  mimeType  String
+  data      Bytes
+  caption   String?
+  lat       Float?
+  lng       Float?
+  createdAt DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+// 修正履歴・承認履歴（追記のみ）
+model SecurityReportRevision {
+  id          String         @id @default(uuid())
+  reportId    String
+  report      SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  companyId   String
+  action      String         // shared/securityReport.ts REPORT_REVISION_ACTION のキー
+  actorName   String
+  actorUserId String?
+  changes     Json?          // [{ field, before, after }] または補足情報
+  createdAt   DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+// 協力会社への閲覧専用共有リンク
+model SecurityReportShare {
+  id            String         @id @default(uuid())
+  reportId      String
+  report        SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  companyId     String
+  partnerId     String
+  partner       Partner        @relation(fields: [partnerId], references: [id])
+  token         String         @unique @default(uuid())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  viewCount     Int            @default(0)
+  lastViewedAt  DateTime?
+  createdByName String
+  createdAt     DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+// 顧客別の帳票設定（settings の構造は shared/securityReport.ts reportTemplateSchema が正）
+model SecurityReportTemplate {
+  id        String   @id @default(uuid())
+  companyId String
+  clientId  String   @unique
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  settings  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─────────────────────────────────────────────
@@ -1179,6 +1439,7 @@ enum ClientCategory {
   COMMERCIAL    // 商業施設
   INDIVIDUAL    // 個人
   OTHER         // その他
+  RECRUITMENT   // 人材紹介会社（隊員の採用経路の選択肢になる）
 }
 
 // ─────────────────────────────────────────────

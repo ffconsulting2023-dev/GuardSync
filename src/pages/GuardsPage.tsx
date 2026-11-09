@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
+import { recruitmentToSelect, selectToRecruitment, recruitmentLabel, type RecruitmentSelectValue } from '../../shared/recruitment'
 
 import {
   EMPLOYMENT_TYPE, GENDER, PREFECTURES, GUARD_CLASSES, SKILL_OPTIONS, PAY_TYPE,
@@ -46,6 +47,8 @@ interface GuardFormData {
   // 住所
   postalCode: string; prefecture: string; city: string; addressDetail: string; buildingName: string
   nearestStation1: string; line1: string; nearestStation2: string; line2: string
+  commuteNotes: string
+  recruitment: RecruitmentSelectValue; recruitmentNote: string
   birthplace: string; medicalHistory: string
   // 緊急連絡先
   emergencyName: string; emergencyKana: string; emergencyRelation: string
@@ -61,13 +64,14 @@ interface GuardFormData {
   // 社会保険
   employmentInsurance: boolean; healthInsurance: boolean; healthInsuranceGrade: number
   pensionInsurance: boolean; pensionInsuranceGrade: number; nursingInsurance: boolean
+  employmentInsuranceNumber: string; pensionNumber: string
   // 家族
   spouse: boolean; spouseDeduction: boolean; dependents: number
   // 書類
   docMyNumber: boolean; docIdCard: boolean; docIdentityCert: boolean; docResidenceCard: boolean
   docResume: boolean; docPledge: boolean; docPhoto: boolean; docOther: boolean
   // 銀行口座
-  bankName: string; bankBranch: string; bankAccountType: string; bankAccountNumber: string; bankAccountHolder: string
+  bankName: string; bankBranch: string; bankCode: string; branchCode: string; bankAccountType: string; bankAccountNumber: string; bankAccountHolder: string
 }
 
 const EMPTY_FORM: GuardFormData = {
@@ -76,7 +80,7 @@ const EMPTY_FORM: GuardFormData = {
   lineWorksId: '',
   guardClass: '', skills: [], nationality: '', financialIssues: false, mbti: '', dormitory: '', notes: '',
   postalCode: '', prefecture: '', city: '', addressDetail: '', buildingName: '',
-  nearestStation1: '', line1: '', nearestStation2: '', line2: '', birthplace: '', medicalHistory: '',
+  nearestStation1: '', line1: '', nearestStation2: '', line2: '', commuteNotes: '', recruitment: '', recruitmentNote: '', birthplace: '', medicalHistory: '',
   emergencyName: '', emergencyKana: '', emergencyRelation: '',
   emergencyPostal: '', emergencyPrefecture: '', emergencyCity: '', emergencyAddressDetail: '',
   ngGuardIds: [], ngCompanies: [], ngConditions: '',
@@ -87,16 +91,18 @@ const EMPTY_FORM: GuardFormData = {
   otherAllowance1: 0, otherAllowance2: 0, otherAllowanceName1: '', otherAllowanceName2: '',
   employmentInsurance: false, healthInsurance: false, healthInsuranceGrade: 0,
   pensionInsurance: false, pensionInsuranceGrade: 0, nursingInsurance: false,
+  employmentInsuranceNumber: '', pensionNumber: '',
   spouse: false, spouseDeduction: false, dependents: 0,
   docMyNumber: false, docIdCard: false, docIdentityCert: false, docResidenceCard: false,
   docResume: false, docPledge: false, docPhoto: false, docOther: false,
-  bankName: '', bankBranch: '', bankAccountType: '普通', bankAccountNumber: '', bankAccountHolder: '',
+  bankName: '', bankBranch: '', bankCode: '', branchCode: '', bankAccountType: '普通', bankAccountNumber: '', bankAccountHolder: '',
 }
 
 export default function GuardsPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
+  const [showArchive, setShowArchive] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editTarget, setEditTarget] = useState<any>(null)
   const [form, setForm] = useState<GuardFormData>(EMPTY_FORM)
@@ -107,6 +113,11 @@ export default function GuardsPage() {
   const [compatType, setCompatType] = useState<'GOOD' | 'BAD' | 'NG'>('GOOD')
   const [compatReason, setCompatReason] = useState('')
 
+  // 採用経路の選択肢（媒体マスタ・人材紹介会社）
+  const { data: recruitment } = useQuery({
+    queryKey: ['recruitment-channels'],
+    queryFn: () => api.get('/recruitment-channels').then(r => r.data),
+  })
   const { data: guards = [], isLoading } = useQuery({
     queryKey: ['guards', search],
     queryFn: () => api.get(`/guards?isActive=true${search ? `&search=${encodeURIComponent(search)}` : ''}`).then(r => r.data),
@@ -122,9 +133,25 @@ export default function GuardsPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['guards'] }); setShowForm(false); setEditTarget(null) },
   })
 
-  const deleteMutation = useMutation({
+  const { data: archivedGuards = [] } = useQuery({
+    queryKey: ['guards-archived'],
+    queryFn: () => api.get('/guards/archived').then(r => r.data),
+    enabled: showArchive,
+  })
+
+  const archiveMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/guards/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['guards'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['guards'] }); qc.invalidateQueries({ queryKey: ['guards-archived'] }) },
+  })
+
+  const restoreMutation = useMutation({
+    mutationFn: (id: string) => api.put(`/guards/${id}/restore`, {}),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['guards'] }); qc.invalidateQueries({ queryKey: ['guards-archived'] }) },
+  })
+
+  const permanentDeleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/guards/${id}/permanent`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['guards-archived'] }),
   })
 
   // 相性データ
@@ -203,6 +230,8 @@ export default function GuardsPage() {
       city: guard.city || '', addressDetail: guard.addressDetail || '', buildingName: guard.buildingName || '',
       nearestStation1: guard.nearestStation1 || '', line1: guard.line1 || '',
       nearestStation2: guard.nearestStation2 || '', line2: guard.line2 || '',
+      commuteNotes: guard.commuteNotes || '',
+      recruitment: recruitmentToSelect(guard), recruitmentNote: guard.recruitmentNote || '',
       birthplace: guard.birthplace || '', medicalHistory: guard.medicalHistory || '',
       emergencyName: guard.emergencyName || '', emergencyKana: guard.emergencyKana || '',
       emergencyRelation: guard.emergencyRelation || '', emergencyPostal: guard.emergencyPostal || '',
@@ -222,12 +251,14 @@ export default function GuardsPage() {
       healthInsuranceGrade: guard.healthInsuranceGrade || 0,
       pensionInsurance: guard.pensionInsurance || false, pensionInsuranceGrade: guard.pensionInsuranceGrade || 0,
       nursingInsurance: guard.nursingInsurance || false,
+      employmentInsuranceNumber: guard.employmentInsuranceNumber || '', pensionNumber: guard.pensionNumber || '',
       spouse: guard.spouse || false, spouseDeduction: guard.spouseDeduction || false, dependents: guard.dependents || 0,
       docMyNumber: guard.docMyNumber || false, docIdCard: guard.docIdCard || false,
       docIdentityCert: guard.docIdentityCert || false, docResidenceCard: guard.docResidenceCard || false,
       docResume: guard.docResume || false, docPledge: guard.docPledge || false,
       docPhoto: guard.docPhoto || false, docOther: guard.docOther || false,
       bankName: bank.bank || bank.bankName || '', bankBranch: bank.branch || bank.bankBranch || '',
+      bankCode: bank.bankCode || '', branchCode: bank.branchCode || '',
       bankAccountType: bank.type || bank.bankAccountType || '普通',
       bankAccountNumber: bank.number || bank.bankAccountNumber || '',
       bankAccountHolder: bank.holder || bank.bankAccountHolder || '',
@@ -238,14 +269,16 @@ export default function GuardsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const { bankName, bankBranch, bankAccountType, bankAccountNumber, bankAccountHolder, otherCertText, ...rest } = form
+    const { bankName, bankBranch, bankCode, branchCode, bankAccountType, bankAccountNumber, bankAccountHolder, otherCertText, recruitment, recruitmentNote, ...rest } = form
     const otherCerts = otherCertText ? otherCertText.split(/[,、\n]/).map(s => s.trim()).filter(Boolean) : []
     const data: any = {
       ...rest,
       certifications: [...rest.certifications, ...otherCerts],
-      bankAccount: bankName ? { bank: bankName, branch: bankBranch, type: bankAccountType, number: bankAccountNumber, holder: bankAccountHolder } : undefined,
+      bankAccount: bankName ? { bank: bankName, branch: bankBranch, bankCode, branchCode, type: bankAccountType, number: bankAccountNumber, holder: bankAccountHolder } : undefined,
       ngGuardIds: form.ngGuardIds.length > 0 ? form.ngGuardIds : undefined,
       ngCompanies: form.ngCompanies.length > 0 ? form.ngCompanies : undefined,
+      ...selectToRecruitment(recruitment),
+      recruitmentNote: recruitmentNote.trim() || null,
     }
     if (editTarget) {
       updateMutation.mutate({ id: editTarget.id, data })
@@ -255,6 +288,7 @@ export default function GuardsPage() {
   }
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
+  const isAdmin = hasRole(user, 'ADMIN')
 
   const sections = [
     { label: '基本情報', icon: '1' },
@@ -307,7 +341,12 @@ export default function GuardsPage() {
         <h1 className="text-xl font-bold text-gray-800">隊員管理</h1>
         <div className="flex gap-2">
           <a href={`${import.meta.env.VITE_API_URL || ''}/api/export/guards`} download className="btn-secondary text-sm">CSV</a>
-          {canEdit && (
+          {isAdmin && (
+            <button onClick={() => setShowArchive(v => !v)} className={`btn-secondary text-sm ${showArchive ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}>
+              {showArchive ? '▶ 有効隊員を表示' : '📦 アーカイブ'}
+            </button>
+          )}
+          {canEdit && !showArchive && (
             <button onClick={() => { setEditTarget(null); setForm(EMPTY_FORM); setActiveSection(0); setShowForm(true) }} className="btn-primary text-sm">
               + 隊員登録
             </button>
@@ -315,12 +354,73 @@ export default function GuardsPage() {
         </div>
       </div>
 
-      <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
-        className="form-input" placeholder="名前・読み・社員番号で検索..." />
+      {!showArchive && (
+        <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+          className="form-input" placeholder="名前・読み・社員番号で検索..." />
+      )}
 
-      {isLoading ? (
+      {showArchive ? (
+        /* ── アーカイブビュー ── */
+        <div className="card overflow-x-auto p-0">
+          <div className="px-4 py-3 bg-yellow-50 border-b border-yellow-100">
+            <p className="text-sm text-yellow-700 font-medium">📦 アーカイブ済み隊員（管理者のみ表示）</p>
+            <p className="text-xs text-yellow-600 mt-0.5">復元または完全削除が可能です。完全削除は取り消せません。</p>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50">
+              <tr className="border-b border-gray-100">
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">社員番号</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500">名前</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">雇用形態</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">電話番号</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden lg:table-cell">アーカイブ日</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {archivedGuards.length === 0 ? (
+                <tr><td colSpan={6} className="text-center py-12 text-gray-400">アーカイブ済み隊員はいません</td></tr>
+              ) : (
+                archivedGuards.map((g: any) => (
+                  <tr key={g.id} className="hover:bg-yellow-50 opacity-75">
+                    <td className="px-4 py-3 text-gray-600">{g.employeeNumber}</td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p className="font-medium text-gray-500">{g.name}</p>
+                        <p className="text-xs text-gray-400">{g.nameKana}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 hidden md:table-cell">
+                      <span className="badge badge-gray">{EMPLOYMENT_LABELS[g.employmentType]}</span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-500 hidden md:table-cell">{g.phone || '-'}</td>
+                    <td className="px-4 py-3 text-gray-400 text-xs hidden lg:table-cell">
+                      {g.leftAt ? new Date(g.leftAt).toLocaleDateString('ja-JP') : '-'}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => { if (window.confirm(`${g.name}を復元しますか？`)) restoreMutation.mutate(g.id) }}
+                          disabled={restoreMutation.isPending}
+                          className="text-green-600 hover:text-green-800 text-xs disabled:opacity-50"
+                        >復元</button>
+                        <button
+                          onClick={() => { if (window.confirm(`${g.name}を完全削除しますか？\nこの操作は取り消せません。`)) permanentDeleteMutation.mutate(g.id) }}
+                          disabled={permanentDeleteMutation.isPending}
+                          className="text-red-500 hover:text-red-700 text-xs disabled:opacity-50"
+                        >完全削除</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : isLoading ? (
         <div className="text-center py-12 text-gray-400">読み込み中...</div>
       ) : (
+        /* ── 通常の有効隊員リスト ── */
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
             <thead className="bg-gray-50">
@@ -349,6 +449,7 @@ export default function GuardsPage() {
                     </td>
                     <td className="px-4 py-3 hidden md:table-cell">
                       <span className="badge badge-info">{EMPLOYMENT_LABELS[g.employmentType]}</span>
+                      {recruitmentLabel(g) && <p className="text-[11px] text-gray-400 mt-0.5">採用: {recruitmentLabel(g)}</p>}
                     </td>
                     <td className="px-4 py-3 text-gray-600 hidden md:table-cell">{g.phone || '-'}</td>
                     <td className="px-4 py-3 hidden lg:table-cell">
@@ -361,7 +462,7 @@ export default function GuardsPage() {
                       {canEdit && (
                         <div className="flex items-center justify-end gap-2">
                           <button onClick={() => openEdit(g)} className="text-blue-600 hover:text-blue-800 text-xs">編集</button>
-                          <button onClick={() => { if (window.confirm(`${g.name}を無効化しますか？`)) deleteMutation.mutate(g.id) }} className="text-red-500 hover:text-red-700 text-xs">削除</button>
+                          <button onClick={() => { if (window.confirm(`${g.name}をアーカイブしますか？\n（後から復元できます）`)) archiveMutation.mutate(g.id) }} className="text-yellow-600 hover:text-yellow-800 text-xs">アーカイブ</button>
                         </div>
                       )}
                     </td>
@@ -409,6 +510,30 @@ export default function GuardsPage() {
                       <select value={form.employmentType} onChange={e => setForm(f => ({ ...f, employmentType: e.target.value }))} className="form-input">
                         {Object.entries(EMPLOYMENT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                       </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label">採用経路</label>
+                      <select value={form.recruitment} onChange={e => setForm(f => ({ ...f, recruitment: e.target.value as RecruitmentSelectValue }))} className="form-input">
+                        <option value="">未設定</option>
+                        <optgroup label="媒体">
+                          {(recruitment?.channels ?? []).filter((c: any) => c.isActive || form.recruitment === `channel:${c.id}`).map((c: any) => <option key={c.id} value={`channel:${c.id}`}>{c.name}</option>)}
+                        </optgroup>
+                        <optgroup label="人材紹介会社">
+                          {(recruitment?.agencies ?? []).map((a: any) => <option key={a.id} value={`agency:${a.id}`}>{a.name}</option>)}
+                          {editTarget?.recruitmentAgency && !(recruitment?.agencies ?? []).some((a: any) => a.id === editTarget.recruitmentAgency.id) && (
+                            <option value={`agency:${editTarget.recruitmentAgency.id}`}>{editTarget.recruitmentAgency.name}</option>
+                          )}
+                        </optgroup>
+                        <option value="free">その他（自由記入）</option>
+                      </select>
+                      <p className="text-[11px] text-gray-400 mt-0.5">媒体は 設定 → 採用経路 で追加できます。人材紹介会社は取引先の種別を「人材紹介会社」にすると表示されます。</p>
+                    </div>
+                    <div>
+                      <label className="form-label">{form.recruitment === 'free' ? '採用経路（自由記入）' : '採用経路の補足'}</label>
+                      <input type="text" value={form.recruitmentNote} onChange={e => setForm(f => ({ ...f, recruitmentNote: e.target.value }))} className="form-input"
+                        placeholder={form.recruitment === 'free' ? '例: 知人の紹介' : '例: 担当者名・求人番号（任意）'} maxLength={200} required={form.recruitment === 'free'} />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -598,6 +723,10 @@ export default function GuardsPage() {
                       <label className="form-label">路線2</label>
                       <input type="text" value={form.line2} onChange={e => setForm(f => ({ ...f, line2: e.target.value }))} className="form-input" />
                     </div>
+                  </div>
+                  <div>
+                    <label className="form-label">交通費の取り決め</label>
+                    <textarea value={form.commuteNotes} onChange={e => setForm(f => ({ ...f, commuteNotes: e.target.value }))} className="form-input" rows={2} placeholder="例: 上限1日1,000円、定期代支給など" />
                   </div>
                   <div>
                     <label className="form-label">本籍地</label>
@@ -839,6 +968,16 @@ export default function GuardsPage() {
                       )}
                     </div>
                     {checkInput('介護保険', 'nursingInsurance')}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="form-label">雇用保険被保険者番号</label>
+                        <input type="text" value={form.employmentInsuranceNumber} onChange={e => setForm(f => ({ ...f, employmentInsuranceNumber: e.target.value }))} className="form-input" maxLength={30} />
+                      </div>
+                      <div>
+                        <label className="form-label">基礎年金番号</label>
+                        <input type="text" value={form.pensionNumber} onChange={e => setForm(f => ({ ...f, pensionNumber: e.target.value }))} className="form-input" maxLength={30} />
+                      </div>
+                    </div>
                   </div>
 
                   <h4 className="text-sm font-semibold text-gray-700 border-b pb-1 mt-4">家族構成</h4>
@@ -921,6 +1060,17 @@ export default function GuardsPage() {
                     <div>
                       <label className="form-label">支店名</label>
                       <input type="text" value={form.bankBranch} onChange={e => setForm(f => ({ ...f, bankBranch: e.target.value }))} className="form-input" />
+                    </div>
+                  </div>
+                  {/* 全銀振込データ用コード */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label">銀行コード</label>
+                      <input type="text" inputMode="numeric" maxLength={4} placeholder="4桁" value={form.bankCode} onChange={e => setForm(f => ({ ...f, bankCode: e.target.value.replace(/\D/g, '') }))} className="form-input" />
+                    </div>
+                    <div>
+                      <label className="form-label">支店コード</label>
+                      <input type="text" inputMode="numeric" maxLength={3} placeholder="3桁" value={form.branchCode} onChange={e => setForm(f => ({ ...f, branchCode: e.target.value.replace(/\D/g, '') }))} className="form-input" />
                     </div>
                   </div>
                   <div className="grid grid-cols-3 gap-3">

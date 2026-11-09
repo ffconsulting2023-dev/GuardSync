@@ -8,13 +8,16 @@ import { api } from '../../lib/api'
 import { useAuth } from '../../hooks/useAuth'
 import { format, addMonths, subMonths } from 'date-fns'
 import { ja } from 'date-fns/locale'
+import SignaturePad from '../../components/SignaturePad'
+import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent } from '../../components/report/ReportContentForm'
+import {
+  REPORT_STATUS, reportStatus, DEFAULT_REPORT_TEMPLATE, validateReportAgainstTemplate, PROXY_SUBMISSION_LABEL,
+  type PhotoInput, type ReportTemplate,
+} from '../../../shared/securityReport'
 
 type Tab = 'today' | 'schedule' | 'attendance' | 'reports'
 
-const EMPTY_REPORT = {
-  guardId: '', siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd'),
-  weather: '晴れ', incidents: '', specialNotes: '',
-}
+const EMPTY_REPORT = { guardId: '', siteId: '', reportDate: format(new Date(), 'yyyy-MM-dd'), submissionNote: '' }
 
 export default function GuardAppPage() {
   const { user, logout } = useAuth()
@@ -22,24 +25,38 @@ export default function GuardAppPage() {
   const [viewMonth, setViewMonth] = useState(new Date())
   const [reportForm, setReportForm] = useState(EMPTY_REPORT)
   const [showReportForm, setShowReportForm] = useState(false)
+  const [reportContent, setReportContent] = useState(EMPTY_REPORT_CONTENT)
+  const [reportPhotos, setReportPhotos] = useState<PhotoInput[]>([])
+  const [reportError, setReportError] = useState('')
+  const [signTarget, setSignTarget] = useState<string | null>(null) // サイン対象の既存報告書ID
+  const [signDraft, setSignDraft] = useState<any>(null)            // 提出時に取得したサイン
+  const [showPad, setShowPad] = useState(false)
   const qc = useQueryClient()
+
+  // ログインユーザーに紐付く隊員（User.id と Guard.id は別物のため、サーバーで同一ID→メールアドレスの順に突き合わせる）
+  const { data: me, isLoading: meLoading } = useQuery<{ guard: { id: string; name: string } | null }>({
+    queryKey: ['guard-app-me', user?.id],
+    queryFn: () => api.get('/guard-app/me').then(r => r.data),
+    enabled: !!user?.id,
+  })
+  const myGuardId = me?.guard?.id
 
   // 今日のシフト
   const today = format(new Date(), 'yyyy-MM-dd')
   const { data: todaySchedules = [] } = useQuery({
-    queryKey: ['guard-today', user?.id, today],
-    queryFn: () => api.get(`/guards/${user?.id}/schedule?year=${new Date().getFullYear()}&month=${new Date().getMonth() + 1}`).then(r =>
+    queryKey: ['guard-today', myGuardId, today],
+    queryFn: () => api.get(`/guards/${myGuardId}/schedule?year=${new Date().getFullYear()}&month=${new Date().getMonth() + 1}`).then(r =>
       r.data.schedules.filter((s: any) => s.date.split('T')[0] === today)
     ),
-    enabled: !!user?.id,
+    enabled: !!myGuardId,
     refetchInterval: 30000,
   })
 
   // 月間スケジュール
   const { data: monthData } = useQuery({
-    queryKey: ['guard-schedule', user?.id, format(viewMonth, 'yyyy-MM')],
-    queryFn: () => api.get(`/guards/${user?.id}/schedule?year=${viewMonth.getFullYear()}&month=${viewMonth.getMonth() + 1}`).then(r => r.data),
-    enabled: !!user?.id && tab === 'schedule',
+    queryKey: ['guard-schedule', myGuardId, format(viewMonth, 'yyyy-MM')],
+    queryFn: () => api.get(`/guards/${myGuardId}/schedule?year=${viewMonth.getFullYear()}&month=${viewMonth.getMonth() + 1}`).then(r => r.data),
+    enabled: !!myGuardId && tab === 'schedule',
   })
 
   // 出退勤打刻
@@ -56,9 +73,17 @@ export default function GuardAppPage() {
   // 報告書取得
   const { data: myReports = [] } = useQuery({
     queryKey: ['guard-reports', user?.id],
-    queryFn: () => api.get(`/security-reports?guardId=${user?.id}`).then(r => r.data),
+    queryFn: () => api.get('/security-reports?mine=1').then(r => r.data),
     enabled: !!user?.id && tab === 'reports',
   })
+
+  // 隊員一覧（報告対象の隊員を選ぶため。紐付けが無い・他の隊員の分を提出する場合に使う）
+  const { data: activeGuards = [] } = useQuery({
+    queryKey: ['guards-active'],
+    queryFn: () => api.get('/guards?isActive=true').then(r => r.data),
+    enabled: showReportForm,
+  })
+  const isProxy = !!reportForm.guardId && reportForm.guardId !== myGuardId
 
   // 現場取得（報告書用）
   const { data: mySites = [] } = useQuery({
@@ -67,13 +92,33 @@ export default function GuardAppPage() {
     enabled: tab === 'reports',
   })
 
+  // 現場の発注元ごとの帳票設定
+  const { data: reportTemplate = DEFAULT_REPORT_TEMPLATE } = useQuery<ReportTemplate>({
+    queryKey: ['site-report-template', reportForm.siteId],
+    queryFn: () => api.get(`/sites/${reportForm.siteId}/report-template`).then(r => r.data),
+    enabled: showReportForm && !!reportForm.siteId,
+  })
+
+  const signMutation = useMutation({
+    mutationFn: (v: any) => api.post(`/security-reports/${signTarget}/sign`, v),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['guard-reports'] })
+      setSignTarget(null)
+      setShowPad(false)
+    },
+  })
+
   const submitReportMutation = useMutation({
     mutationFn: (data: any) => api.post('/security-reports', data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['guard-reports'] })
       setShowReportForm(false)
       setReportForm(EMPTY_REPORT)
+      setReportContent(EMPTY_REPORT_CONTENT)
+      setReportPhotos([])
+      setSignDraft(null)
     },
+    onError: (e: any) => setReportError(e.response?.data?.error || '提出に失敗しました。通信状況をご確認ください。'),
   })
 
   const TAB_ITEMS = [
@@ -129,6 +174,13 @@ export default function GuardAppPage() {
               <h2 className="text-xl font-bold text-gray-800">今日の出動</h2>
             </div>
 
+            {!meLoading && !myGuardId && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                このアカウントは隊員登録と紐付いていないため、シフト・出退勤を表示できません。
+                管理者に「設定 → ユーザー・ID発行」でこのアカウント（{user?.loginId ?? user?.email}）と隊員の紐付けを依頼してください。
+                報告書は隊員を選んで提出できます（提出者として記録されます）。
+              </div>
+            )}
             {todaySchedules.length === 0 ? (
               <div className="card text-center py-12">
                 <p className="text-4xl mb-3">😊</p>
@@ -345,7 +397,8 @@ export default function GuardAppPage() {
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-gray-800">警備報告書</h2>
               <button onClick={() => {
-                setReportForm({ ...EMPTY_REPORT, guardId: user?.id || '' })
+                setReportForm({ ...EMPTY_REPORT, guardId: myGuardId ?? '' })
+                setReportError('')
                 setShowReportForm(true)
               }} className="btn-primary text-sm">+ 提出</button>
             </div>
@@ -362,12 +415,20 @@ export default function GuardAppPage() {
                     <div className="flex items-start justify-between">
                       <div>
                         <p className="font-medium text-gray-800">{rep.site?.name}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.weather}</p>
+                        {rep.guardId !== myGuardId && <p className="text-xs text-gray-600">隊員: {rep.guard?.name}</p>}
+                        {rep.submittedAsProxy && <p className="text-xs text-amber-700">{PROXY_SUBMISSION_LABEL}（提出者: {rep.submittedByName}）</p>}
+                        {(rep.site?.client?.name || rep.site?.clientName) && <p className="text-xs text-gray-500">{rep.site?.client?.name || rep.site?.clientName}</p>}
+                        <p className="text-xs text-gray-500 mt-0.5">{rep.reportDate?.split('T')[0]} / 天候: {rep.content?.weather}{rep._count?.photos ? ` / 📷${rep._count.photos}` : ''}</p>
                       </div>
-                      <span className={`badge ${rep.approvedAt ? 'badge-success' : 'badge-warning'}`}>
-                        {rep.approvedAt ? '承認済' : '確認待ち'}
+                      <span className={`badge ${rep.approvedAt || rep.signedAt ? 'badge-success' : 'badge-warning'}`}>
+                        {REPORT_STATUS[reportStatus(rep)]}
                       </span>
                     </div>
+                    {rep.signedAt ? (
+                      <p className="text-xs text-gray-500 mt-2">監督サイン: {rep.signerName}{rep.signerTitle ? `（${rep.signerTitle}）` : ''}</p>
+                    ) : (
+                      <button onClick={() => { setSignTarget(rep.id); setShowPad(true) }} className="btn-primary text-sm w-full mt-3">✍️ 現場監督のサインをもらう</button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -377,19 +438,53 @@ export default function GuardAppPage() {
             {showReportForm && (
               <div className="fixed inset-0 z-50 bg-white overflow-y-auto">
                 <div className="sticky top-0 bg-white px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-                  <h3 className="font-semibold text-gray-800">警備報告書 提出</h3>
+                  <h3 className="font-semibold text-gray-800">{reportTemplate.title} 提出</h3>
                   <button onClick={() => setShowReportForm(false)} className="text-gray-400">✕</button>
                 </div>
                 <form onSubmit={e => {
                   e.preventDefault()
+                  const content = toSubmitContent(reportContent, reportTemplate)
+                  const errors = validateReportAgainstTemplate(content, reportTemplate, reportPhotos.length)
+                  if (errors.length) { setReportError(errors.join(' / ')); return }
+                  setReportError('')
                   submitReportMutation.mutate({
-                    ...reportForm,
-                    content: { patrolRecords: [], incidents: reportForm.incidents, specialNotes: reportForm.specialNotes, weather: reportForm.weather }
+                    guardId: reportForm.guardId, siteId: reportForm.siteId, reportDate: reportForm.reportDate,
+                    content, photos: reportPhotos,
+                    ...(isProxy ? { submissionNote: reportForm.submissionNote } : {}),
+                    ...(signDraft ? { signature: signDraft } : {}),
                   })
                 }} className="p-4 space-y-4">
                   <div>
+                    <label className="form-label">隊員 *</label>
+                    <select value={reportForm.guardId} onChange={e => setReportForm(f => ({ ...f, guardId: e.target.value }))} className="form-input" required>
+                      <option value="">選択してください</option>
+                      {activeGuards.map((g: any) => <option key={g.id} value={g.id}>{g.name}{g.id === myGuardId ? '（自分）' : ''}</option>)}
+                    </select>
+                  </div>
+                  {isProxy && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+                      <p className="text-xs text-amber-800">
+                        {myGuardId
+                          ? `ログイン中の隊員（${me?.guard?.name}）とは別の隊員の報告書です。`
+                          : 'このアカウントは隊員登録と紐付いていません。'}
+                        「{PROXY_SUBMISSION_LABEL}」として、提出者（{user?.name}）と備考が履歴に記録されます。
+                      </p>
+                      <div>
+                        <label className="form-label">備考（提出理由）</label>
+                        <textarea value={reportForm.submissionNote} onChange={e => setReportForm(f => ({ ...f, submissionNote: e.target.value }))}
+                          className="form-input" rows={2} maxLength={300} placeholder="例: 本人の端末故障のため班長が代理で提出" />
+                      </div>
+                    </div>
+                  )}
+                  <div>
                     <label className="form-label">現場 *</label>
-                    <select value={reportForm.siteId} onChange={e => setReportForm(f => ({ ...f, siteId: e.target.value }))} className="form-input" required>
+                    <select value={reportForm.siteId} onChange={e => {
+                      const siteId = e.target.value
+                      setReportForm(f => ({ ...f, siteId }))
+                      // 勤務実績（本日の配員）から実働時間を初期入力
+                      const sch = reportForm.reportDate === today ? todaySchedules.find((x: any) => x.siteId === siteId) : null
+                      if (sch) setReportContent(c => ({ ...c, workStart: sch.startTime, workEnd: sch.endTime }))
+                    }} className="form-input" required>
                       <option value="">選択してください</option>
                       {mySites.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
@@ -398,32 +493,27 @@ export default function GuardAppPage() {
                     <label className="form-label">日付 *</label>
                     <input type="date" value={reportForm.reportDate} onChange={e => setReportForm(f => ({ ...f, reportDate: e.target.value }))} className="form-input" required />
                   </div>
-                  <div>
-                    <label className="form-label">天候</label>
-                    <select value={reportForm.weather} onChange={e => setReportForm(f => ({ ...f, weather: e.target.value }))} className="form-input">
-                      {['晴れ', '曇り', '雨', '雪', '強風'].map(w => <option key={w} value={w}>{w}</option>)}
-                    </select>
+                  <ReportContentForm
+                    value={reportContent}
+                    onChange={setReportContent}
+                    template={reportTemplate}
+                    photos={reportPhotos}
+                    onPhotosChange={setReportPhotos}
+                  />
+                  <div className="border border-gray-200 rounded-lg p-3">
+                    <p className="form-label">現場監督サイン</p>
+                    {signDraft ? (
+                      <div className="flex items-center gap-3">
+                        <img src={signDraft.signatureImage} alt="監督サイン" className="h-16 border rounded bg-white" />
+                        <div className="text-sm flex-1">{signDraft.signerName}{signDraft.signerTitle ? `（${signDraft.signerTitle}）` : ''}</div>
+                        <button type="button" onClick={() => setSignDraft(null)} className="text-xs text-red-600">取消</button>
+                      </div>
+                    ) : (
+                      <button type="button" onClick={() => { setSignTarget(null); setShowPad(true) }} className="btn-secondary w-full text-sm">✍️ 現場監督にサインしてもらう</button>
+                    )}
+                    <p className="text-xs text-gray-400 mt-1">提出後に一覧から後でもらうこともできます。</p>
                   </div>
-                  <div>
-                    <label className="form-label">特記事項・インシデント</label>
-                    <textarea
-                      value={reportForm.incidents}
-                      onChange={e => setReportForm(f => ({ ...f, incidents: e.target.value }))}
-                      className="form-input"
-                      rows={4}
-                      placeholder="異常なし、または発生した事象を記載"
-                    />
-                  </div>
-                  <div>
-                    <label className="form-label">その他連絡事項</label>
-                    <textarea
-                      value={reportForm.specialNotes}
-                      onChange={e => setReportForm(f => ({ ...f, specialNotes: e.target.value }))}
-                      className="form-input"
-                      rows={3}
-                      placeholder="引き継ぎ事項等"
-                    />
-                  </div>
+                  {reportError && <p className="text-sm text-red-600">{reportError}</p>}
                   <div className="flex gap-3 pb-8">
                     <button type="button" onClick={() => setShowReportForm(false)} className="btn-secondary flex-1">キャンセル</button>
                     <button type="submit" disabled={submitReportMutation.isPending} className="btn-primary flex-1 disabled:opacity-50">
@@ -432,6 +522,18 @@ export default function GuardAppPage() {
                   </div>
                 </form>
               </div>
+            )}
+
+            {showPad && (
+              <SignaturePad
+                submitting={signMutation.isPending}
+                error={signMutation.isError ? ((signMutation.error as any)?.response?.data?.error || 'サインの送信に失敗しました。通信状況をご確認ください。') : undefined}
+                onCancel={() => { setShowPad(false); setSignTarget(null) }}
+                onSubmit={v => {
+                  if (signTarget) signMutation.mutate(v)
+                  else { setSignDraft(v); setShowPad(false) }
+                }}
+              />
             )}
           </div>
         )}

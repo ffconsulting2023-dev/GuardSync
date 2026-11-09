@@ -5,7 +5,7 @@ import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 
 const EMPTY_FORM = {
-  name: '', address: '', clientId: '', clientName: '', clientPhone: '', notes: '',
+  name: '', address: '', nearestStation: '', clientId: '', clientName: '', clientPhone: '', notes: '',
   siteCode: '', requiredCount: 1, requiredQualifiedA: 0, requiredQualifiedB: 0,
   assemblyTime: '', defaultStartTime: '', defaultEndTime: '', assemblyPlace: '', cautions: '',
 }
@@ -45,6 +45,7 @@ export default function SitesPage() {
     setForm({
       name: site.name,
       address: site.address,
+      nearestStation: site.nearestStation || '',
       clientId: site.clientId || '',
       clientName: site.clientName || '',
       clientPhone: site.clientPhone || '',
@@ -113,6 +114,9 @@ export default function SitesPage() {
                 <p className="text-sm text-gray-500 flex items-start gap-1">
                   <span>📍</span><span className="leading-tight">{site.address}</span>
                 </p>
+                {site.nearestStation && (
+                  <p className="text-xs text-gray-500">🚉 最寄駅: {site.nearestStation}</p>
+                )}
                 {/* 必要隊員数表示 */}
                 <div className="flex gap-2 text-xs text-gray-500">
                   <span>必要人数: {site.requiredCount ?? 1}</span>
@@ -168,6 +172,10 @@ export default function SitesPage() {
               <div>
                 <label className="form-label">住所 *</label>
                 <input type="text" value={form.address} onChange={e => setForm(f => ({ ...f, address: e.target.value }))} className="form-input" required />
+              </div>
+              <div>
+                <label className="form-label">最寄駅</label>
+                <input type="text" value={form.nearestStation} onChange={e => setForm(f => ({ ...f, nearestStation: e.target.value }))} className="form-input" placeholder="例: JR新宿駅" />
               </div>
 
               {/* 必要隊員数 */}

@@ -4,7 +4,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
-import { CATEGORIES, EMPTY_CLIENT_FORM } from './ClientsPage'
+import { EMPTY_CLIENT_FORM } from './ClientsPage'
+import { CLIENT_CATEGORY } from '../lib/constants'
+import ReportTemplateEditor from '../components/report/ReportTemplateEditor'
 
 const LOG_TYPES: Record<string, { label: string; icon: string }> = {
   NOTE:    { label: 'メモ',   icon: '📝' },
@@ -19,7 +21,15 @@ const DOC_LABELS: Record<string, string> = {
   securityLog: '警備日誌', securityCommission: '警備委託', other: 'その他',
 }
 
-type TabKey = 'basic' | 'contacts' | 'accounting' | 'history'
+type TabKey = 'basic' | 'contacts' | 'accounting' | 'history' | 'reportTemplate'
+
+// 円単位の項目（APIは数値かnullを受け付ける）
+const YEN_KEYS = [
+  'unitPriceDay', 'unitPriceNight', 'unitPriceHolidayDay', 'unitPriceHolidayNight',
+  'overtimeDayRate', 'overtimeNightRate', 'overtimeHolidayDayRate', 'overtimeHolidayNightRate',
+  'qualificationAllowance', 'seasonalAllowance', 'nominationAllowance',
+  'radioAllowance', 'otherAllowance1', 'otherAllowance2',
+] as const
 
 function clientToForm(c: any) {
   const base = { ...EMPTY_CLIENT_FORM }
@@ -34,6 +44,8 @@ function clientToForm(c: any) {
     overtimeDayRate: c.overtimeDayRate ?? '', overtimeNightRate: c.overtimeNightRate ?? '',
     overtimeHolidayDayRate: c.overtimeHolidayDayRate ?? '', overtimeHolidayNightRate: c.overtimeHolidayNightRate ?? '',
     qualificationAllowance: c.qualificationAllowance ?? '', radioAllowance: c.radioAllowance ?? '',
+    seasonalAllowance: c.seasonalAllowance ?? '', nominationAllowance: c.nominationAllowance ?? '',
+    contractMethod: c.contractMethod ?? '',
     otherAllowance1: c.otherAllowance1 ?? '', otherAllowance2: c.otherAllowance2 ?? '',
     documents: c.documents ?? base.documents,
     subContacts,
@@ -85,6 +97,14 @@ export default function ClientDetailPage() {
       ...form,
       subContacts: form.subContacts.filter((c: any) => c.name || c.phone || c.email),
     }
+    for (const key of YEN_KEYS) {
+      const v = form[key]
+      data[key] = v === '' || v == null ? null : Number(v)
+    }
+    // 未入力の文字項目は DB では null。サーバーは文字列のみ受け付けるため、触っていない null は送らない
+    for (const key of Object.keys(data)) {
+      if (data[key] === null && !(YEN_KEYS as readonly string[]).includes(key)) delete data[key]
+    }
     if (isNew) createMutation.mutate(data)
     else updateMutation.mutate(data)
   }
@@ -110,7 +130,7 @@ export default function ClientDetailPage() {
   }
 
   const canEdit = hasRole(user, 'ADMIN', 'MANAGER')
-  const cat = CATEGORIES[form.category] || CATEGORIES.OTHER
+  const cat = CLIENT_CATEGORY[form.category] || CLIENT_CATEGORY.OTHER
 
   if (!isNew && isLoading) return <div className="flex items-center justify-center h-full text-gray-400">読み込み中...</div>
 
@@ -178,6 +198,7 @@ export default function ClientDetailPage() {
               { key: 'contacts',    label: `担当者（${client?.subContacts?.filter((c: any) => c.name)?.length ?? 0}）` },
               { key: 'accounting',  label: '経理情報' },
               { key: 'history',     label: `取引履歴（${client?._count?.sites ?? 0}件）` },
+              { key: 'reportTemplate', label: '報告書帳票' },
             ] as { key: TabKey; label: string }[]).map(t => (
               <button
                 key={t.key}
@@ -270,7 +291,7 @@ export default function ClientDetailPage() {
                       <div>
                         <FormField label="区分" edit={editMode}>
                           <select value={form.category} onChange={e => setForm((f: any) => ({ ...f, category: e.target.value }))} className="form-input">
-                            {Object.entries(CATEGORIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                            {Object.entries(CLIENT_CATEGORY).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                           </select>
                           <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${cat.color}`}>{cat.label}</span>
                         </FormField>
@@ -474,11 +495,17 @@ export default function ClientDetailPage() {
                   {/* ⑥契約単価 */}
                   <Section title="⑥契約単価">
                     <div className="space-y-3">
-                      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                         <div>
                           <FormField label="契約日" edit={editMode}>
                             <input type="date" value={form.contractDate} onChange={e => setForm((f: any) => ({ ...f, contractDate: e.target.value }))} className="form-input" />
                             <span>{form.contractDate || '—'}</span>
+                          </FormField>
+                        </div>
+                        <div>
+                          <FormField label="契約方法" edit={editMode}>
+                            <input type="text" value={form.contractMethod} onChange={e => setForm((f: any) => ({ ...f, contractMethod: e.target.value }))} className="form-input" placeholder="GMO / 郵送 など" />
+                            <span>{form.contractMethod || '—'}</span>
                           </FormField>
                         </div>
                         {[
@@ -510,9 +537,11 @@ export default function ClientDetailPage() {
                           </div>
                         ))}
                       </div>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                         {[
                           { key: 'qualificationAllowance', label: '資格手当' },
+                          { key: 'seasonalAllowance', label: '季節手当' },
+                          { key: 'nominationAllowance', label: '指名料' },
                           { key: 'radioAllowance', label: '無線機/台' },
                           { key: 'otherAllowance1', label: 'その他手当1' },
                           { key: 'otherAllowance2', label: 'その他手当2' },
@@ -536,6 +565,10 @@ export default function ClientDetailPage() {
                     </FormField>
                   </Section>
                 </>
+              )}
+
+              {!isNew && tab === 'reportTemplate' && id && (
+                <ReportTemplateEditor clientId={id} canEdit={hasRole(user, 'ADMIN', 'MANAGER')} />
               )}
 
               {!isNew && tab === 'history' && (
