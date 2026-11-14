@@ -33,6 +33,7 @@ import {
 import { runImport, ImportError } from './server/import'
 import { parseUpload, fetchGoogleSheet, ParseError } from './server/importParse'
 import { ensureRecruitmentChannels } from './server/recruitment'
+import { registerEvaluationRoutes } from './server/evaluation'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -8065,6 +8066,9 @@ app.get('/api/equipment/guard-holdings', authenticate, async (req, res) => {
 
   res.json(guardHoldings.filter((g) => g.holdings.length > 0))
 })
+
+// 隊員評価・申し送り（server/evaluation.ts。会社ごとの機能フラグでオン・オフ）
+registerEvaluationRoutes(app, { prisma, authenticate, requireRole, requireSuperAdmin, linkedGuardForUser })
 
 // ─────────────────────────────────────────────
 // 静的ファイル配信（本番）

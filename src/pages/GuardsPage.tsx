@@ -3,6 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
+import { Link } from 'react-router-dom'
+import { useEvaluationEnabled } from '../hooks/useEvaluation'
 import { recruitmentToSelect, selectToRecruitment, recruitmentLabel, type RecruitmentSelectValue } from '../../shared/recruitment'
 
 import {
@@ -100,6 +102,7 @@ const EMPTY_FORM: GuardFormData = {
 
 export default function GuardsPage() {
   const { user } = useAuth()
+  const evaluationEnabled = useEvaluationEnabled()
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
   const [showArchive, setShowArchive] = useState(false)
@@ -461,6 +464,7 @@ export default function GuardsPage() {
                     <td className="px-4 py-3 text-right">
                       {canEdit && (
                         <div className="flex items-center justify-end gap-2">
+                          {evaluationEnabled && hasRole(user, 'ADMIN', 'MANAGER') && <Link to={`/evaluations?guard=${g.id}`} className="text-amber-700 hover:text-amber-900 text-xs">評価</Link>}
                           <button onClick={() => openEdit(g)} className="text-blue-600 hover:text-blue-800 text-xs">編集</button>
                           <button onClick={() => { if (window.confirm(`${g.name}をアーカイブしますか？\n（後から復元できます）`)) archiveMutation.mutate(g.id) }} className="text-yellow-600 hover:text-yellow-800 text-xs">アーカイブ</button>
                         </div>

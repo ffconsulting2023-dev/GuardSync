@@ -12,80 +12,84 @@ datasource db {
 // ─────────────────────────────────────────────
 
 model Company {
-  id          String   @id @default(uuid())
-  name        String
-  code        String   @unique // 会社コード（ログイン用）
-  plan        Plan     @default(MIN)
-  isActive    Boolean  @default(true)
-  isSuperAdmin Boolean @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String   @id @default(uuid())
+  name         String
+  code         String   @unique // 会社コード（ログイン用）
+  plan         Plan     @default(MIN)
+  isActive     Boolean  @default(true)
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   // ─── SaaS課金関連 ───
-  stripeCustomerId    String?            @unique
-  subscriptionStatus  SubscriptionStatus @default(TRIAL)
-  planType            PlanType           @default(STARTER)
-  trialEndsAt         DateTime?
-  suspendedAt         DateTime?
-  billingEmail        String?
-  lastPaymentAt       DateTime?
+  stripeCustomerId   String?            @unique
+  subscriptionStatus SubscriptionStatus @default(TRIAL)
+  planType           PlanType           @default(STARTER)
+  trialEndsAt        DateTime?
+  suspendedAt        DateTime?
+  billingEmail       String?
+  lastPaymentAt      DateTime?
 
   // ─── 会社概要 ───
-  nameKana              String?
-  representative        String?  // 代表者
-  postalCode            String?
-  address               String?
-  phone                 String?
-  email                 String?
-  website               String?
-  securityLicenseNumber String?  // 警備業認定番号
-  securityLicenseDate   DateTime? @db.Date // 認定年月日
-  securityLicenseExpiry DateTime? @db.Date // 認定の有効期限（認定から5年。警備業法5条）
-  securityLicenseAuthority String? // 認定公安委員会
-  securityServiceCategories String? // 警備業務の区分（1号〜4号）
-  securityEducationManager String?  // 警備員指導教育責任者
-  nameOrigin            String?  // 社名の由来
-  establishedOn         String?  // 設立（「2026年6月」のように年月のみの場合があるため文字列）
-  capital               String?  // 資本金
-  businessDescription   String?  // 事業内容
-  vision                String?  // ビジョン
+  nameKana                        String?
+  representative                  String? // 代表者
+  postalCode                      String?
+  address                         String?
+  phone                           String?
+  email                           String?
+  website                         String?
+  securityLicenseNumber           String? // 警備業認定番号
+  securityLicenseDate             DateTime? @db.Date // 認定年月日
+  securityLicenseExpiry           DateTime? @db.Date // 認定の有効期限（認定から5年。警備業法5条）
+  securityLicenseAuthority        String? // 認定公安委員会
+  securityServiceCategories       String? // 警備業務の区分（1号〜4号）
+  securityEducationManager        String? // 警備員指導教育責任者
+  nameOrigin                      String? // 社名の由来
+  establishedOn                   String? // 設立（「2026年6月」のように年月のみの場合があるため文字列）
+  capital                         String? // 資本金
+  businessDescription             String? // 事業内容
+  vision                          String? // ビジョン
+  // 隊員評価（特許出願前のため既定はオフ。スーパー管理者のみ切り替え可）
+  evaluationEnabled               Boolean   @default(false)
   // ─── 社会保険・労働保険の事業所情報（取り込み項目は shared/import.ts COMPANY_INSURANCE_FIELDS）───
-  socialInsuranceOfficeSymbol     String?  // 事業所整理記号
-  socialInsuranceOfficeNumber     String?  // 事業所番号（社会保険）
-  healthInsuranceNumber           String?  // 健康保険の番号
-  employmentInsuranceOfficeNumber String?  // 雇用保険 適用事業所番号
-  employmentInsuranceJurisdiction String?  // 雇用保険 管轄区分
-  laborInsuranceNumber            String?  // 労働保険番号
-  laborInsuranceEstablishmentType String?  // 労働保険 設置区分
-  industryClassification          String?  // 産業分類
+  socialInsuranceOfficeSymbol     String? // 事業所整理記号
+  socialInsuranceOfficeNumber     String? // 事業所番号（社会保険）
+  healthInsuranceNumber           String? // 健康保険の番号
+  employmentInsuranceOfficeNumber String? // 雇用保険 適用事業所番号
+  employmentInsuranceJurisdiction String? // 雇用保険 管轄区分
+  laborInsuranceNumber            String? // 労働保険番号
+  laborInsuranceEstablishmentType String? // 労働保険 設置区分
+  industryClassification          String? // 産業分類
 
-  users         User[]
-  guards        Guard[]
-  clients       Client[]
-  sites         Site[]
-  contracts     Contract[]
-  partners      Partner[]
-  vehicles      Vehicle[]
-  equipment     Equipment[]
-  equipmentAssignments EquipmentAssignment[]
-  schedules     Schedule[]
-  attendances   Attendance[]
-  invoices      Invoice[]
-  dailyPayRequests DailyPayRequest[]
-  eContracts    ElectronicContract[]
-  notifications Notification[]
-  autoReceipts  AutoReceipt[]
-  invitations   Invitation[]
-  lineWorksSettings LineWorksSettings?
-  securityReports SecurityReport[]
-  shiftSurveys    ShiftSurvey[]
-  payrolls        Payroll[]
+  users                 User[]
+  guards                Guard[]
+  clients               Client[]
+  sites                 Site[]
+  contracts             Contract[]
+  partners              Partner[]
+  vehicles              Vehicle[]
+  equipment             Equipment[]
+  equipmentAssignments  EquipmentAssignment[]
+  schedules             Schedule[]
+  attendances           Attendance[]
+  invoices              Invoice[]
+  dailyPayRequests      DailyPayRequest[]
+  eContracts            ElectronicContract[]
+  notifications         Notification[]
+  autoReceipts          AutoReceipt[]
+  invitations           Invitation[]
+  lineWorksSettings     LineWorksSettings?
+  securityReports       SecurityReport[]
+  shiftSurveys          ShiftSurvey[]
+  payrolls              Payroll[]
   subcontractorPayments SubcontractorPayment[]
   billingSubscriptions  BillingSubscription[]
   billingLogs           BillingLog[]
   siteRequests          SiteRequest[]
   importBatches         ImportBatch[]
   recruitmentChannels   RecruitmentChannel[]
+  evaluations           Evaluation[]
+  confidentialNotes     ConfidentialNote[]
 }
 
 // 採用経路の媒体マスタ（会社ごと。既定値は shared/recruitment.ts DEFAULT_RECRUITMENT_CHANNELS）
@@ -107,13 +111,13 @@ model RecruitmentChannel {
 model RecruitmentFeeRule {
   id                  String    @id @default(uuid())
   companyId           String
-  agencyId            String    // 人材紹介会社（種別が人材紹介会社の取引先）
+  agencyId            String // 人材紹介会社（種別が人材紹介会社の取引先）
   agency              Client    @relation(fields: [agencyId], references: [id])
   effectiveFrom       DateTime  @db.Date
   effectiveTo         DateTime? @db.Date
-  amountPerShift      Int       // 1勤務あたり（税別）
-  nightAmountPerShift Int?      // 夜勤1勤務あたり（空なら amountPerShift）
-  maxMonthsFromHire   Int?      // 入社から何か月までの勤務を対象にするか（空なら期限なし）
+  amountPerShift      Int // 1勤務あたり（税別）
+  nightAmountPerShift Int? // 夜勤1勤務あたり（空なら amountPerShift）
+  maxMonthsFromHire   Int? // 入社から何か月までの勤務を対象にするか（空なら期限なし）
   basis               String    @default("SCHEDULE") // shared/recruitment.ts FEE_BASIS
   notes               String?
   createdAt           DateTime  @default(now())
@@ -128,14 +132,14 @@ enum Plan {
 }
 
 model Invitation {
-  id          String   @id @default(uuid())
-  email       String
-  token       String   @unique @default(uuid())
-  companyId   String?
-  company     Company? @relation(fields: [companyId], references: [id])
-  expiresAt   DateTime
-  usedAt      DateTime?
-  createdAt   DateTime @default(now())
+  id        String    @id @default(uuid())
+  email     String
+  token     String    @unique @default(uuid())
+  companyId String?
+  company   Company?  @relation(fields: [companyId], references: [id])
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
   @@index([companyId])
 }
@@ -145,45 +149,45 @@ model Invitation {
 // ─────────────────────────────────────────────
 
 model User {
-  id          String   @id @default(uuid())
-  email       String?  @unique // 隊員などメールを持たないアカウントは null（ログインIDでログイン）
-  loginId     String?  @unique // 自由設定のログインID（システム全体で一意・小文字で保存。規則は shared/account.ts）
-  password    String
-  name        String
-  role        UserRole @default(OPERATOR)
-  companyId   String
-  company     Company  @relation(fields: [companyId], references: [id])
-  isSuperAdmin Boolean @default(false)
-  isActive    Boolean  @default(true)
-  lastLoginAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String    @id @default(uuid())
+  email        String?   @unique // 隊員などメールを持たないアカウントは null（ログインIDでログイン）
+  loginId      String?   @unique // 自由設定のログインID（システム全体で一意・小文字で保存。規則は shared/account.ts）
+  password     String
+  name         String
+  role         UserRole  @default(OPERATOR)
+  companyId    String
+  company      Company   @relation(fields: [companyId], references: [id])
+  isSuperAdmin Boolean   @default(false)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   // ID発行権限（ADMIN は常に可。それ以外は会社ごとに付与）
   canIssueAccounts Boolean @default(false)
   // 発行直後でパスワード未設定（設定用URLからの設定待ち）
   mustSetPassword  Boolean @default(false)
   // 隊員アカウントの紐付け先（隊員アプリはこの隊員として動作）
-  guardId     String?  @unique
-  guard       Guard?   @relation(fields: [guardId], references: [id])
+  guardId          String? @unique
+  guard            Guard?  @relation(fields: [guardId], references: [id])
 
-  passwordResetTokens  PasswordResetToken[]
-  setupTokens          AccountSetupToken[]
-  createdContracts     Contract[]
-  createdInvoices      Invoice[]
-  approvedDailyPays    DailyPayRequest[] @relation("ApprovedBy")
-  eContractSignatures  EContractSignature[]
+  passwordResetTokens PasswordResetToken[]
+  setupTokens         AccountSetupToken[]
+  createdContracts    Contract[]
+  createdInvoices     Invoice[]
+  approvedDailyPays   DailyPayRequest[]    @relation("ApprovedBy")
+  eContractSignatures EContractSignature[]
 
   @@index([companyId])
 }
 
 enum UserRole {
-  SUPER_ADMIN   // 開発者（全テナント閲覧）
-  ADMIN         // 会社管理者
-  MANAGER       // 管理者（配員・請求）
-  OPERATOR      // オペレーター（管制）
-  VIEWER        // 閲覧のみ
-  GUARD         // 隊員（隊員アプリのみ）
+  SUPER_ADMIN // 開発者（全テナント閲覧）
+  ADMIN // 会社管理者
+  MANAGER // 管理者（配員・請求）
+  OPERATOR // オペレーター（管制）
+  VIEWER // 閲覧のみ
+  GUARD // 隊員（隊員アプリのみ）
 }
 
 // パスワード設定用URL（管理者が発行。メール・URLコピー・QRで本人に渡す）
@@ -205,39 +209,39 @@ model AccountSetupToken {
 // ─────────────────────────────────────────────
 
 model Guard {
-  id              String      @id @default(uuid())
-  companyId       String
-  company         Company     @relation(fields: [companyId], references: [id])
-  employeeNumber  String
-  name            String
-  nameKana        String
-  birthDate       DateTime?
-  gender          Gender?
-  phone           String?
-  email           String?
-  address         String?
-  certifications  String[]    // 警備業務検定等
-  employmentType  EmploymentType @default(PART_TIME)
-  bankAccount     Json?       // { bank, branch, type, number, holder }
-  dailyPayEnabled Boolean     @default(false)
-  dailyPayLimit   Int?        // 日払い1回の上限額（円）。null=制限なし
-  dailyPayMonthlyLimit Int?   // 日払い月間上限額（円）。null=制限なし
-  dailyPayFeeRate Float?      @default(0.03) // 日払い手数料率（デフォルト3%）
-  lineWorksId     String?     // LINE Works メンバーID
-  isActive        Boolean     @default(true)
-  joinedAt        DateTime?
-  leftAt          DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  id                   String         @id @default(uuid())
+  companyId            String
+  company              Company        @relation(fields: [companyId], references: [id])
+  employeeNumber       String
+  name                 String
+  nameKana             String
+  birthDate            DateTime?
+  gender               Gender?
+  phone                String?
+  email                String?
+  address              String?
+  certifications       String[] // 警備業務検定等
+  employmentType       EmploymentType @default(PART_TIME)
+  bankAccount          Json? // { bank, branch, type, number, holder }
+  dailyPayEnabled      Boolean        @default(false)
+  dailyPayLimit        Int? // 日払い1回の上限額（円）。null=制限なし
+  dailyPayMonthlyLimit Int? // 日払い月間上限額（円）。null=制限なし
+  dailyPayFeeRate      Float?         @default(0.03) // 日払い手数料率（デフォルト3%）
+  lineWorksId          String? // LINE Works メンバーID
+  isActive             Boolean        @default(true)
+  joinedAt             DateTime?
+  leftAt               DateTime?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
 
   // 住所（構造化）
-  postalCode     String?
-  prefecture     String?
-  city           String?
-  addressDetail  String?
-  buildingName   String?
-  lat            Float?    // 緯度（Google Geocoding で取得）
-  lng            Float?    // 経度
+  postalCode    String?
+  prefecture    String?
+  city          String?
+  addressDetail String?
+  buildingName  String?
+  lat           Float? // 緯度（Google Geocoding で取得）
+  lng           Float? // 経度
 
   // 最寄駅
   nearestStation1 String?
@@ -246,117 +250,117 @@ model Guard {
   line2           String?
 
   // 追加属性
-  birthplace     String?   // 本籍地
-  medicalHistory String?   // 既往症
-  financialIssues Boolean  @default(false)  // 金銭問題
-  mbti           String?   // MBTI (ESTJ等)
-  dormitory      String?   // 寮利用（寮名または null）
-  guardClass     String?   // クラス（S/A/B/C）
-  skills         String[]  // スキル（隊長、方交 等）
-  nationality    String?   // 国籍
-  notes          String?   // 備考
+  birthplace      String? // 本籍地
+  medicalHistory  String? // 既往症
+  financialIssues Boolean  @default(false) // 金銭問題
+  mbti            String? // MBTI (ESTJ等)
+  dormitory       String? // 寮利用（寮名または null）
+  guardClass      String? // クラス（S/A/B/C）
+  skills          String[] // スキル（隊長、方交 等）
+  nationality     String? // 国籍
+  notes           String? // 備考
 
   // NG設定 (JSON配列)
-  ngGuardIds     Json?  // [{id, name}]
-  ngCompanies    Json?  // [{name}]
-  ngConditions   String?
+  ngGuardIds   Json? // [{id, name}]
+  ngCompanies  Json? // [{name}]
+  ngConditions String?
 
   // 評価
-  overallRating  Int?      // 1-5
-  ratingComment  String?
-  chartRatings   Json?     // {customerComm, teamComm, leadership, trafficControl, attendance} 各1-5
+  overallRating Int? // 1-5
+  ratingComment String?
+  chartRatings  Json? // {customerComm, teamComm, leadership, trafficControl, attendance} 各1-5
 
   // 勤務希望条件
-  workConditions Json?     // {daysPerWeek, annualSalary, maxHours, remarks}
+  workConditions Json? // {daysPerWeek, annualSalary, maxHours, remarks}
 
   // 給与体系
-  payType        String?   @default("DAY")  // DAY/MONTH/HOUR
-  monthlyBase    Int?      // 基本給（月給の場合）
-  hourlyBase     Int?      // 時給（時給の場合）
+  payType     String? @default("DAY") // DAY/MONTH/HOUR
+  monthlyBase Int? // 基本給（月給の場合）
+  hourlyBase  Int? // 時給（時給の場合）
 
   // 勤務単価（日給・時給共通）
-  dayShiftRate        Int?   // 日勤単価
-  nightShiftRate      Int?   // 夜勤単価
-  holidayDayRate      Int?   // 休日日勤単価
-  holidayNightRate    Int?   // 休日夜勤単価
-  dayOvertimeRate     Int?   // (日)残業単価
-  nightOvertimeRate   Int?   // (夜)残業単価
-  holidayDayOtRate    Int?   // (休日)残業単価
-  holidayNightOtRate  Int?   // (休夜)残業単価
+  dayShiftRate       Int? // 日勤単価
+  nightShiftRate     Int? // 夜勤単価
+  holidayDayRate     Int? // 休日日勤単価
+  holidayNightRate   Int? // 休日夜勤単価
+  dayOvertimeRate    Int? // (日)残業単価
+  nightOvertimeRate  Int? // (夜)残業単価
+  holidayDayOtRate   Int? // (休日)残業単価
+  holidayNightOtRate Int? // (休夜)残業単価
 
   // 手当
-  positionAllowance   Int?  @default(0)  // 役職手当
-  qualificationAllowance Int? @default(0) // 資格手当
-  leaderAllowance     Int?  @default(0)  // 隊長手当
-  joiningAllowance    Int?  @default(0)  // 入社手当
-  otherAllowance1     Int?  @default(0)  // その他手当1
-  otherAllowance2     Int?  @default(0)  // その他手当2
-  otherAllowanceName1 String?  // その他手当1名称
-  otherAllowanceName2 String?  // その他手当2名称
+  positionAllowance      Int?    @default(0) // 役職手当
+  qualificationAllowance Int?    @default(0) // 資格手当
+  leaderAllowance        Int?    @default(0) // 隊長手当
+  joiningAllowance       Int?    @default(0) // 入社手当
+  otherAllowance1        Int?    @default(0) // その他手当1
+  otherAllowance2        Int?    @default(0) // その他手当2
+  otherAllowanceName1    String? // その他手当1名称
+  otherAllowanceName2    String? // その他手当2名称
 
   // 社会保険
-  employmentInsurance     Boolean @default(false)
-  healthInsurance         Boolean @default(false)
-  healthInsuranceGrade    Int?
-  pensionInsurance        Boolean @default(false)
-  pensionInsuranceGrade   Int?
-  nursingInsurance        Boolean @default(false)  // 介護保険
+  employmentInsurance   Boolean @default(false)
+  healthInsurance       Boolean @default(false)
+  healthInsuranceGrade  Int?
+  pensionInsurance      Boolean @default(false)
+  pensionInsuranceGrade Int?
+  nursingInsurance      Boolean @default(false) // 介護保険
 
   // 家族構成
-  spouse          Boolean @default(false)  // 配偶者あり
-  spouseDeduction Boolean @default(false)  // 配偶者控除
-  dependents      Int     @default(0)      // 扶養人数
+  spouse          Boolean @default(false) // 配偶者あり
+  spouseDeduction Boolean @default(false) // 配偶者控除
+  dependents      Int     @default(0) // 扶養人数
 
   // 緊急連絡先（構造化）
-  emergencyName       String?
-  emergencyKana       String?
-  emergencyRelation   String?
-  emergencyPostal     String?
-  emergencyPrefecture String?
-  emergencyCity       String?
+  emergencyName          String?
+  emergencyKana          String?
+  emergencyRelation      String?
+  emergencyPostal        String?
+  emergencyPrefecture    String?
+  emergencyCity          String?
   emergencyAddressDetail String?
 
   // 外国人就労管理
-  residenceStatus       String?   // 在留資格（留学/技能実習/特定技能/永住者 等）
-  residenceCardNumber   String?   // 在留カード番号
-  residenceExpiry       DateTime? // 在留期限
-  workPermitType        String?   // 資格外活動許可の種類（包括許可/個別許可）
-  workPermitExpiry      DateTime? // 資格外活動許可期限
-  weeklyHoursLimit      Int?      @default(28) // 就労時間上限（通常28h、長期休暇中40h）
-  schoolName            String?   // 学校名（留学生の場合）
-  schoolVacationStart   DateTime? // 長期休暇開始日
-  schoolVacationEnd     DateTime? // 長期休暇終了日
+  residenceStatus     String? // 在留資格（留学/技能実習/特定技能/永住者 等）
+  residenceCardNumber String? // 在留カード番号
+  residenceExpiry     DateTime? // 在留期限
+  workPermitType      String? // 資格外活動許可の種類（包括許可/個別許可）
+  workPermitExpiry    DateTime? // 資格外活動許可期限
+  weeklyHoursLimit    Int?      @default(28) // 就労時間上限（通常28h、長期休暇中40h）
+  schoolName          String? // 学校名（留学生の場合）
+  schoolVacationStart DateTime? // 長期休暇開始日
+  schoolVacationEnd   DateTime? // 長期休暇終了日
 
   // 書類（構造化：true=提出済）
-  docMyNumber         Boolean @default(false)
-  docIdCard           Boolean @default(false)
-  docIdentityCert     Boolean @default(false)
-  docResidenceCard    Boolean @default(false)
-  docResume           Boolean @default(false)
-  docPledge           Boolean @default(false)
-  docPhoto            Boolean @default(false)
-  docOther            Boolean @default(false)
-  docWorkPermit       Boolean @default(false)  // 資格外活動許可書
+  docMyNumber      Boolean @default(false)
+  docIdCard        Boolean @default(false)
+  docIdentityCert  Boolean @default(false)
+  docResidenceCard Boolean @default(false)
+  docResume        Boolean @default(false)
+  docPledge        Boolean @default(false)
+  docPhoto         Boolean @default(false)
+  docOther         Boolean @default(false)
+  docWorkPermit    Boolean @default(false) // 資格外活動許可書
 
   employmentInsuranceNumber String? // 雇用保険被保険者番号
-  pensionNumber     String?   // 基礎年金番号（社保番号）
-  commuteNotes      String?   // 交通費の取り決め（例: 往復バス500円追加）
+  pensionNumber             String? // 基礎年金番号（社保番号）
+  commuteNotes              String? // 交通費の取り決め（例: 往復バス500円追加）
   // 採用経路（媒体・人材紹介会社のどちらか。その他は recruitmentNote のみ。表示は shared/recruitment.ts）
-  recruitmentChannelId String?
-  recruitmentChannel   RecruitmentChannel? @relation(fields: [recruitmentChannelId], references: [id])
-  recruitmentAgencyId  String?
-  recruitmentAgency    Client? @relation("RecruitmentAgency", fields: [recruitmentAgencyId], references: [id])
-  recruitmentNote      String?   // 自由記入（その他）または補足
-  myNumber          String?   // マイナンバー（AES-256暗号化して保存）
-  myNumberUpdatedAt DateTime? // 最終更新日時
+  recruitmentChannelId      String?
+  recruitmentChannel        RecruitmentChannel? @relation(fields: [recruitmentChannelId], references: [id])
+  recruitmentAgencyId       String?
+  recruitmentAgency         Client?             @relation("RecruitmentAgency", fields: [recruitmentAgencyId], references: [id])
+  recruitmentNote           String? // 自由記入（その他）または補足
+  myNumber                  String? // マイナンバー（AES-256暗号化して保存）
+  myNumberUpdatedAt         DateTime? // 最終更新日時
 
-  userAccount     User?       // 隊員アプリのログインアカウント
-  schedules       Schedule[]
-  attendances     Attendance[]
-  dailyPayRequests DailyPayRequest[]
-  securityReports SecurityReport[]
+  userAccount          User? // 隊員アプリのログインアカウント
+  schedules            Schedule[]
+  attendances          Attendance[]
+  dailyPayRequests     DailyPayRequest[]
+  securityReports      SecurityReport[]
   shiftSurveyResponses ShiftSurveyResponse[]
-  payrolls        Payroll[]
+  payrolls             Payroll[]
 
   // 相性関連
   compatibilitiesFrom GuardCompatibility[] @relation("CompatibilityFrom")
@@ -366,7 +370,11 @@ model Guard {
   equipmentAssignments EquipmentAssignment[]
 
   // 書類ファイル
-  documents       GuardDocument[]
+  documents GuardDocument[]
+
+  // 評価・申し送り（shared/evaluation.ts）
+  evaluations       Evaluation[]
+  confidentialNotes ConfidentialNote[]
 
   @@unique([companyId, employeeNumber])
   @@index([companyId])
@@ -377,17 +385,17 @@ model Guard {
 // ─────────────────────────────────────────────
 
 model GuardCompatibility {
-  id            String              @id @default(uuid())
+  id            String            @id @default(uuid())
   companyId     String
   guardId       String
-  guard         Guard               @relation("CompatibilityFrom", fields: [guardId], references: [id])
+  guard         Guard             @relation("CompatibilityFrom", fields: [guardId], references: [id])
   targetGuardId String
-  targetGuard   Guard               @relation("CompatibilityTo", fields: [targetGuardId], references: [id])
-  type          CompatibilityType   // GOOD=相性良好 / BAD=相性悪い / NG=配置不可
-  reason        String?             // 理由メモ
+  targetGuard   Guard             @relation("CompatibilityTo", fields: [targetGuardId], references: [id])
+  type          CompatibilityType // GOOD=相性良好 / BAD=相性悪い / NG=配置不可
+  reason        String? // 理由メモ
 
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([guardId, targetGuardId])
   @@index([companyId])
@@ -396,9 +404,9 @@ model GuardCompatibility {
 }
 
 enum CompatibilityType {
-  GOOD   // 相性良好（同じ現場に配置すると加点）
-  BAD    // 相性悪い（同じ現場に配置すると減点）
-  NG     // 配置不可（同じ現場に絶対配置しない）
+  GOOD // 相性良好（同じ現場に配置すると加点）
+  BAD // 相性悪い（同じ現場に配置すると減点）
+  NG // 配置不可（同じ現場に絶対配置しない）
 }
 
 // ─────────────────────────────────────────────
@@ -406,16 +414,16 @@ enum CompatibilityType {
 // ─────────────────────────────────────────────
 
 model GuardDocument {
-  id            String   @id @default(uuid())
-  companyId     String
-  guardId       String
-  guard         Guard    @relation(fields: [guardId], references: [id])
-  docType       String               // docMyNumber, docIdCard, docResume 等
-  fileName      String               // 元ファイル名
-  filePath      String               // サーバー上の保存パス
-  fileSize      Int                  // バイト数
-  mimeType      String               // application/pdf, image/jpeg 等
-  createdAt     DateTime @default(now())
+  id        String   @id @default(uuid())
+  companyId String
+  guardId   String
+  guard     Guard    @relation(fields: [guardId], references: [id])
+  docType   String // docMyNumber, docIdCard, docResume 等
+  fileName  String // 元ファイル名
+  filePath  String // サーバー上の保存パス
+  fileSize  Int // バイト数
+  mimeType  String // application/pdf, image/jpeg 等
+  createdAt DateTime @default(now())
 
   @@index([companyId])
   @@index([guardId])
@@ -428,11 +436,11 @@ enum Gender {
 }
 
 enum EmploymentType {
-  EXECUTIVE     // 役員
-  FULL_TIME     // 正社員
-  PART_TIME     // アルバイト・パート
-  CONTRACT      // 契約社員
-  DISPATCH      // 派遣
+  EXECUTIVE // 役員
+  FULL_TIME // 正社員
+  PART_TIME // アルバイト・パート
+  CONTRACT // 契約社員
+  DISPATCH // 派遣
 }
 
 // ─────────────────────────────────────────────
@@ -440,32 +448,32 @@ enum EmploymentType {
 // ─────────────────────────────────────────────
 
 model Client {
-  id          String   @id @default(uuid())
-  companyId   String
-  company     Company  @relation(fields: [companyId], references: [id])
+  id        String  @id @default(uuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
 
   // ①基本情報
-  clientCode    String?  // C00001
-  name          String
-  nameKana      String?
-  category      ClientCategory @default(OTHER)
-  positionTitle String?  // 代表役職
-  contactName   String?  // 代表者名
-  phone         String?  // 代表電話
-  fax           String?  // FAX番号
-  email         String?
-  website       String?  // HP
-  industry      String?  // 業種
-  relationship  String?  // 関係性（依頼主/協力会社等）
+  clientCode            String? // C00001
+  name                  String
+  nameKana              String?
+  category              ClientCategory @default(OTHER)
+  positionTitle         String? // 代表役職
+  contactName           String? // 代表者名
+  phone                 String? // 代表電話
+  fax                   String? // FAX番号
+  email                 String?
+  website               String? // HP
+  industry              String? // 業種
+  relationship          String? // 関係性（依頼主/協力会社等）
   // 経理担当
   accountingContactName String?
   accountingPhone       String?
   accountingEmail       String?
-  notes         String?
+  notes                 String?
 
   // ②担当者（最大4名・JSON配列）
   // [{ name, phone, email }, ...]
-  subContacts   Json?
+  subContacts Json?
 
   // ③会社住所（構造化）
   postalCode    String?
@@ -473,7 +481,7 @@ model Client {
   city          String?
   addressDetail String?
   buildingName  String?
-  addressee     String?  // 宛名
+  addressee     String? // 宛名
 
   // ④請求先住所
   billingSameAsCompany Boolean @default(true)
@@ -486,46 +494,46 @@ model Client {
 
   // ④書類チェック（JSON）
   // { unitPriceContract, otherContract, invoiceSend, invoiceReceive, securityLog, securityCommission, other }
-  documents     Json?
+  documents Json?
 
   // ⑤振込先
   bankName          String?
   bankBranch        String?
-  bankAccountType   String?  // 普通/当座
+  bankAccountType   String? // 普通/当座
   bankAccountNumber String?
   bankAccountHolder String?
 
   // ⑥契約単価
-  contractDate           DateTime?
-  unitPriceDay           Int?
-  unitPriceNight         Int?
-  unitPriceHolidayDay    Int?
-  unitPriceHolidayNight  Int?
-  overtimeDayRate        Int?
-  overtimeNightRate      Int?
-  overtimeHolidayDayRate Int?
+  contractDate             DateTime?
+  unitPriceDay             Int?
+  unitPriceNight           Int?
+  unitPriceHolidayDay      Int?
+  unitPriceHolidayNight    Int?
+  overtimeDayRate          Int?
+  overtimeNightRate        Int?
+  overtimeHolidayDayRate   Int?
   overtimeHolidayNightRate Int?
-  qualificationAllowance Int?
-  seasonalAllowance      Int?     // 季節手当
-  nominationAllowance    Int?     // 指名料
-  contractMethod         String?  // 契約方法（GMO・郵送 等）
-  radioAllowance         Int?
-  otherAllowance1        Int?
-  otherAllowance2        Int?
+  qualificationAllowance   Int?
+  seasonalAllowance        Int? // 季節手当
+  nominationAllowance      Int? // 指名料
+  contractMethod           String? // 契約方法（GMO・郵送 等）
+  radioAllowance           Int?
+  otherAllowance1          Int?
+  otherAllowance2          Int?
 
   // 旧フィールド（後方互換）
-  address       String?
+  address                   String?
   invoiceRegistrationNumber String?
 
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  sites       Site[]
-  logs        ClientLog[]
-  reportTemplate SecurityReportTemplate?
-  invoices    Invoice[]
-  recruitedGuards Guard[] @relation("RecruitmentAgency")
+  sites               Site[]
+  logs                ClientLog[]
+  reportTemplate      SecurityReportTemplate?
+  invoices            Invoice[]
+  recruitedGuards     Guard[]                 @relation("RecruitmentAgency")
   recruitmentFeeRules RecruitmentFeeRule[]
 
   @@index([companyId])
@@ -550,37 +558,37 @@ model ClientLog {
 // ─────────────────────────────────────────────
 
 model Site {
-  id          String   @id @default(uuid())
-  companyId   String
-  company     Company  @relation(fields: [companyId], references: [id])
-  clientId    String?
-  client      Client?  @relation(fields: [clientId], references: [id])
-  name        String
-  address     String
-  lat         Float?
-  lng         Float?
-  clientName  String?  // 発注元名（clientId未設定時の手入力用）
+  id             String   @id @default(uuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  clientId       String?
+  client         Client?  @relation(fields: [clientId], references: [id])
+  name           String
+  address        String
+  lat            Float?
+  lng            Float?
+  clientName     String? // 発注元名（clientId未設定時の手入力用）
   nearestStation String?
-  clientPhone String?
-  notes       String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  clientPhone    String?
+  notes          String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  siteCode           String?  // 現場コード
-  requiredCount      Int      @default(1)       // 必要隊員数
-  requiredQualifiedA Int      @default(0)       // 資格者A必要数
-  requiredQualifiedB Int      @default(0)       // 資格者B必要数
-  assemblyTime       String?  // 集合時間 "08:00"
-  defaultStartTime   String?  // 開始予定 "08:30"
-  defaultEndTime     String?  // 終了予定 "17:30"
-  assemblyPlace      String?  // 集合場所
-  cautions           String?  // 注意点
+  siteCode           String? // 現場コード
+  requiredCount      Int     @default(1) // 必要隊員数
+  requiredQualifiedA Int     @default(0) // 資格者A必要数
+  requiredQualifiedB Int     @default(0) // 資格者B必要数
+  assemblyTime       String? // 集合時間 "08:00"
+  defaultStartTime   String? // 開始予定 "08:30"
+  defaultEndTime     String? // 終了予定 "17:30"
+  assemblyPlace      String? // 集合場所
+  cautions           String? // 注意点
 
-  contracts   Contract[]
-  schedules   Schedule[]
-  siteRequests SiteRequest[]
-  securityReports SecurityReport[]
+  contracts            Contract[]
+  schedules            Schedule[]
+  siteRequests         SiteRequest[]
+  securityReports      SecurityReport[]
   equipmentAssignments EquipmentAssignment[]
 
   @@index([companyId])
@@ -592,33 +600,33 @@ model Site {
 // ─────────────────────────────────────────────
 
 model Contract {
-  id            String         @id @default(uuid())
-  companyId     String
-  company       Company        @relation(fields: [companyId], references: [id])
-  siteId        String
-  site          Site           @relation(fields: [siteId], references: [id])
-  contractNumber String        @unique
-  clientName    String        // スナップショット：契約作成時の取引先名（Site→Clientで最新値を参照可能）
-  startDate     DateTime
-  endDate       DateTime?
+  id                    String         @id @default(uuid())
+  companyId             String
+  company               Company        @relation(fields: [companyId], references: [id])
+  siteId                String
+  site                  Site           @relation(fields: [siteId], references: [id])
+  contractNumber        String         @unique
+  clientName            String // スナップショット：契約作成時の取引先名（Site→Clientで最新値を参照可能）
+  startDate             DateTime
+  endDate               DateTime?
   // 契約単価（4区分）- SSOTの正はContract。Client.unitPrice* はデフォルト値の参照元
-  unitPriceDay          Int?  // 日勤単価（円）
-  unitPriceNight        Int?  // 夜勤単価（円）
-  unitPriceHolidayDay   Int?  // 休日日勤単価（円）
-  unitPriceHolidayNight Int?  // 休日夜勤単価（円）
-  unitPrice     Int            // 旧単価フィールド（後方互換用。新規は unitPriceDay/Night を使用）
-  guardCount    Int            @default(1)
-  shiftPattern  Json?          // { start, end, breakMinutes }
-  status        ContractStatus @default(ACTIVE)
-  notes         String?
-  createdById   String
-  createdBy     User           @relation(fields: [createdById], references: [id])
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  unitPriceDay          Int? // 日勤単価（円）
+  unitPriceNight        Int? // 夜勤単価（円）
+  unitPriceHolidayDay   Int? // 休日日勤単価（円）
+  unitPriceHolidayNight Int? // 休日夜勤単価（円）
+  unitPrice             Int // 旧単価フィールド（後方互換用。新規は unitPriceDay/Night を使用）
+  guardCount            Int            @default(1)
+  shiftPattern          Json? // { start, end, breakMinutes }
+  status                ContractStatus @default(ACTIVE)
+  notes                 String?
+  createdById           String
+  createdBy             User           @relation(fields: [createdById], references: [id])
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
 
-  invoiceItems  InvoiceItem[]
-  eContracts    ElectronicContract[]
-  schedules     Schedule[]
+  invoiceItems InvoiceItem[]
+  eContracts   ElectronicContract[]
+  schedules    Schedule[]
 
   @@index([companyId])
   @@index([siteId])
@@ -637,19 +645,19 @@ enum ContractStatus {
 // ─────────────────────────────────────────────
 
 model Partner {
-  id          String      @id @default(uuid())
-  companyId   String
-  company     Company     @relation(fields: [companyId], references: [id])
-  name        String
-  type        PartnerType @default(GENERAL)
-  contactName String?
-  phone       String?
-  email       String?
-  priority    Int         @default(0) // 優先度（高いほど優先）
-  isActive    Boolean     @default(true)
-  address     String?
-  website     String?
-  notes       String?
+  id                       String      @id @default(uuid())
+  companyId                String
+  company                  Company     @relation(fields: [companyId], references: [id])
+  name                     String
+  type                     PartnerType @default(GENERAL)
+  contactName              String?
+  phone                    String?
+  email                    String?
+  priority                 Int         @default(0) // 優先度（高いほど優先）
+  isActive                 Boolean     @default(true)
+  address                  String?
+  website                  String?
+  notes                    String?
   // 契約単価（再委託・相互応援の単価。区分は Client の契約単価と同じ）
   contractDate             DateTime?
   contractMethod           String?
@@ -664,10 +672,10 @@ model Partner {
   qualificationAllowance   Int?
   seasonalAllowance        Int?
   nominationAllowance      Int?
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  createdAt                DateTime    @default(now())
+  updatedAt                DateTime    @updatedAt
 
-  payments    SubcontractorPayment[]
+  payments     SubcontractorPayment[]
   reportShares SecurityReportShare[]
   siteRequests SiteRequest[]
 
@@ -675,9 +683,9 @@ model Partner {
 }
 
 enum PartnerType {
-  GROUP      // グループ会社（最優先）
-  PREFERRED  // 優先協力会社
-  GENERAL    // 一般協力会社
+  GROUP // グループ会社（最優先）
+  PREFERRED // 優先協力会社
+  GENERAL // 一般協力会社
 }
 
 // ─────────────────────────────────────────────
@@ -703,55 +711,55 @@ model Vehicle {
 // ─────────────────────────────────────────────
 
 model Equipment {
-  id              String   @id @default(uuid())
-  companyId       String
-  company         Company  @relation(fields: [companyId], references: [id])
-  name            String               // 備品名（例: トランシーバー、誘導灯、ヘルメット）
-  category        EquipmentCategory     // カテゴリ
-  totalQuantity   Int                   // 会社保有数
-  unitCost        Int?                  // 単価（円）
-  manufacturer    String?               // メーカー名
-  modelNumber     String?               // 型番
-  notes           String?               // 備考
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id            String            @id @default(uuid())
+  companyId     String
+  company       Company           @relation(fields: [companyId], references: [id])
+  name          String // 備品名（例: トランシーバー、誘導灯、ヘルメット）
+  category      EquipmentCategory // カテゴリ
+  totalQuantity Int // 会社保有数
+  unitCost      Int? // 単価（円）
+  manufacturer  String? // メーカー名
+  modelNumber   String? // 型番
+  notes         String? // 備考
+  isActive      Boolean           @default(true)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
 
-  assignments     EquipmentAssignment[]
+  assignments EquipmentAssignment[]
 
   @@index([companyId])
 }
 
 enum EquipmentCategory {
-  RADIO           // トランシーバー・無線機
-  LIGHT           // 誘導灯・LED合図灯
-  SAFETY          // ヘルメット・安全ベスト・安全靴
-  SIGN            // コーン・バリケード・看板
-  UNIFORM         // 制服・雨具
-  VEHICLE_EQUIP   // 車載備品（発煙筒・三角表示板）
-  OFFICE          // 事務用品（バインダー・報告書用紙）
-  SIGNAGE         // サイネージ（電光掲示板・デジタル看板）
-  OTHER           // その他
+  RADIO // トランシーバー・無線機
+  LIGHT // 誘導灯・LED合図灯
+  SAFETY // ヘルメット・安全ベスト・安全靴
+  SIGN // コーン・バリケード・看板
+  UNIFORM // 制服・雨具
+  VEHICLE_EQUIP // 車載備品（発煙筒・三角表示板）
+  OFFICE // 事務用品（バインダー・報告書用紙）
+  SIGNAGE // サイネージ（電光掲示板・デジタル看板）
+  OTHER // その他
 }
 
 model EquipmentAssignment {
-  id              String   @id @default(uuid())
-  companyId       String
-  company         Company  @relation(fields: [companyId], references: [id])
-  equipmentId     String
-  equipment       Equipment @relation(fields: [equipmentId], references: [id])
-  assigneeType    AssigneeType          // GUARD=隊員貸出 / SITE=現場配備
-  guardId         String?               // 隊員に貸出の場合
-  guard           Guard?   @relation(fields: [guardId], references: [id])
-  siteId          String?               // 現場に配備の場合
-  site            Site?    @relation(fields: [siteId], references: [id])
-  quantity        Int      @default(1)  // 数量
-  assignedAt      DateTime @default(now()) // 貸出・配備日
-  returnedAt      DateTime?             // 返却日（null=未返却）
-  notes           String?               // 備考（シリアル番号等）
+  id           String       @id @default(uuid())
+  companyId    String
+  company      Company      @relation(fields: [companyId], references: [id])
+  equipmentId  String
+  equipment    Equipment    @relation(fields: [equipmentId], references: [id])
+  assigneeType AssigneeType // GUARD=隊員貸出 / SITE=現場配備
+  guardId      String? // 隊員に貸出の場合
+  guard        Guard?       @relation(fields: [guardId], references: [id])
+  siteId       String? // 現場に配備の場合
+  site         Site?        @relation(fields: [siteId], references: [id])
+  quantity     Int          @default(1) // 数量
+  assignedAt   DateTime     @default(now()) // 貸出・配備日
+  returnedAt   DateTime? // 返却日（null=未返却）
+  notes        String? // 備考（シリアル番号等）
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([companyId])
   @@index([equipmentId])
@@ -760,8 +768,8 @@ model EquipmentAssignment {
 }
 
 enum AssigneeType {
-  GUARD   // 隊員への貸出
-  SITE    // 現場への配備
+  GUARD // 隊員への貸出
+  SITE // 現場への配備
 }
 
 // ─────────────────────────────────────────────
@@ -777,23 +785,23 @@ model Schedule {
   siteId      String
   site        Site           @relation(fields: [siteId], references: [id])
   date        DateTime       @db.Date
-  startTime   String         // "09:00"
-  endTime     String         // "17:00"
+  startTime   String // "09:00"
+  endTime     String // "17:00"
   status      ScheduleStatus @default(ASSIGNED)
-  confirmedAt DateTime?      // 前日確認送信日時
+  confirmedAt DateTime? // 前日確認送信日時
   notes       String?
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
-  shiftType      String   @default("DAY")  // DAY/NIGHT/DAY_AM/DAY_PM
-  assemblyTime   String?  // 集合時間
-  sentAt         DateTime?  // 送信日時
-  contractId     String?  // FK to Contract（どの契約に基づくシフトか）
-  contract       Contract? @relation(fields: [contractId], references: [id])
-  siteRequestId  String?  // FK to SiteRequest（どの依頼に対する配員か）
-  siteRequest    SiteRequest? @relation(fields: [siteRequestId], references: [id])
+  shiftType     String       @default("DAY") // DAY/NIGHT/DAY_AM/DAY_PM
+  assemblyTime  String? // 集合時間
+  sentAt        DateTime? // 送信日時
+  contractId    String? // FK to Contract（どの契約に基づくシフトか）
+  contract      Contract?    @relation(fields: [contractId], references: [id])
+  siteRequestId String? // FK to SiteRequest（どの依頼に対する配員か）
+  siteRequest   SiteRequest? @relation(fields: [siteRequestId], references: [id])
 
-  attendance  Attendance?
+  attendance Attendance?
 
   @@index([companyId, date])
   @@index([guardId, date])
@@ -803,33 +811,33 @@ model Schedule {
 
 // 現場依頼（受注実績）: 1日・1現場の依頼。配員（Schedule）はこれに紐付き、再委託分は協力会社として記録する
 model SiteRequest {
-  id                   String    @id @default(uuid())
+  id                   String     @id @default(uuid())
   companyId            String
-  company              Company   @relation(fields: [companyId], references: [id])
+  company              Company    @relation(fields: [companyId], references: [id])
   siteId               String
-  site                 Site      @relation(fields: [siteId], references: [id])
-  date                 DateTime  @db.Date
-  timeLabel            String?   // 元の表記（「巡回」など時刻で表せない依頼も保持）
-  startTime            String?   // "08:30"
-  endTime              String?   // "17:30"
-  shiftType            String    @default("DAY") // DAY / NIGHT
-  status               String    @default("CONFIRMED") // shared/siteRequest.ts SITE_REQUEST_STATUS（稼働 / 予定 / 中止）
-  requestedCount       Int       @default(1)     // 依頼人数
-  qualifiedCount       Int       @default(0)     // うち資格者
-  unitPrice            Int?      // 依頼単価（1人1日・税別）
-  transportFee         Int?      // 交通費単価
-  overtimeRate         Int?      // 残業単価
-  overtimeHours        Float?    // 残業時間
-  overtimeCount        Int?      // 残業人数
-  subcontractPartnerId String?   // 再委託先
-  subcontractPartner   Partner?  @relation(fields: [subcontractPartnerId], references: [id])
-  subcontractCount     Int       @default(0)     // 再委託の人数
-  subcontractUnitPrice Int?      // 再委託単価
+  site                 Site       @relation(fields: [siteId], references: [id])
+  date                 DateTime   @db.Date
+  timeLabel            String? // 元の表記（「巡回」など時刻で表せない依頼も保持）
+  startTime            String? // "08:30"
+  endTime              String? // "17:30"
+  shiftType            String     @default("DAY") // DAY / NIGHT
+  status               String     @default("CONFIRMED") // shared/siteRequest.ts SITE_REQUEST_STATUS（稼働 / 予定 / 中止）
+  requestedCount       Int        @default(1) // 依頼人数
+  qualifiedCount       Int        @default(0) // うち資格者
+  unitPrice            Int? // 依頼単価（1人1日・税別）
+  transportFee         Int? // 交通費単価
+  overtimeRate         Int? // 残業単価
+  overtimeHours        Float? // 残業時間
+  overtimeCount        Int? // 残業人数
+  subcontractPartnerId String? // 再委託先
+  subcontractPartner   Partner?   @relation(fields: [subcontractPartnerId], references: [id])
+  subcontractCount     Int        @default(0) // 再委託の人数
+  subcontractUnitPrice Int? // 再委託単価
   notes                String?
-  sourceKey            String?   // 取り込み元の行（例: 現場管理#12）。再取り込み時に同じ依頼を更新するための照合キー
+  sourceKey            String? // 取り込み元の行（例: 現場管理#12）。再取り込み時に同じ依頼を更新するための照合キー
   importBatchId        String?
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
   schedules            Schedule[]
 
   @@unique([companyId, sourceKey])
@@ -842,21 +850,21 @@ model ImportBatch {
   id            String   @id @default(uuid())
   companyId     String
   company       Company  @relation(fields: [companyId], references: [id])
-  kind          String   // shared/import.ts IMPORT_KINDS のキー
-  sourceName    String   // ファイル名・シート名
+  kind          String // shared/import.ts IMPORT_KINDS のキー
+  sourceName    String // ファイル名・シート名
   createdById   String?
   createdByName String
-  summary       Json     // { created, updated, skipped, errors, ... }
+  summary       Json // { created, updated, skipped, errors, ... }
   createdAt     DateTime @default(now())
 
   @@index([companyId])
 }
 
 enum ScheduleStatus {
-  DRAFT       // 下書き
-  ASSIGNED    // 配員済み
-  CONFIRMED   // 隊員確認済み
-  CANCELLED   // キャンセル
+  DRAFT // 下書き
+  ASSIGNED // 配員済み
+  CONFIRMED // 隊員確認済み
+  CANCELLED // キャンセル
 }
 
 // ─────────────────────────────────────────────
@@ -879,22 +887,22 @@ model Attendance {
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
 
-  isHoliday          Boolean @default(false)  // 日・祝日フラグ
-  earlyOvertimeMin   Int     @default(0)      // 早出残業（分）
-  lateOvertimeMin    Int     @default(0)      // 遅出残業（分）
-  transportAmount    Int     @default(0)      // 旅費
-  otherAmount        Int     @default(0)      // その他手当
+  isHoliday        Boolean @default(false) // 日・祝日フラグ
+  earlyOvertimeMin Int     @default(0) // 早出残業（分）
+  lateOvertimeMin  Int     @default(0) // 遅出残業（分）
+  transportAmount  Int     @default(0) // 旅費
+  otherAmount      Int     @default(0) // その他手当
 
   @@index([companyId])
   @@index([guardId])
 }
 
 enum AttendanceStatus {
-  PENDING     // 未打刻
-  CLOCKED_IN  // 出勤済み
-  COMPLETED   // 退勤済み
-  ABSENT      // 欠勤
-  LATE        // 遅刻
+  PENDING // 未打刻
+  CLOCKED_IN // 出勤済み
+  COMPLETED // 退勤済み
+  ABSENT // 欠勤
+  LATE // 遅刻
 }
 
 // ─────────────────────────────────────────────
@@ -906,10 +914,10 @@ model Invoice {
   companyId     String
   company       Company       @relation(fields: [companyId], references: [id])
   invoiceNumber String        @unique
-  clientId      String?       // FK to Client（SSOTの正。clientName/clientEmail はスナップショット）
+  clientId      String? // FK to Client（SSOTの正。clientName/clientEmail はスナップショット）
   client        Client?       @relation(fields: [clientId], references: [id])
-  clientName    String        // スナップショット：発行時点の取引先名（法的文書用）
-  clientEmail   String?       // スナップショット：発行時点のメールアドレス
+  clientName    String // スナップショット：発行時点の取引先名（法的文書用）
+  clientEmail   String? // スナップショット：発行時点のメールアドレス
   issueDate     DateTime      @db.Date
   dueDate       DateTime      @db.Date
   subtotal      Int
@@ -925,7 +933,7 @@ model Invoice {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  items         InvoiceItem[]
+  items InvoiceItem[]
 
   @@index([companyId])
   @@index([status])
@@ -941,9 +949,9 @@ enum InvoiceStatus {
 }
 
 model InvoiceItem {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   invoiceId   String
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoice     Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   contractId  String?
   contract    Contract? @relation(fields: [contractId], references: [id])
   description String
@@ -960,25 +968,25 @@ model InvoiceItem {
 // ─────────────────────────────────────────────
 
 model DailyPayRequest {
-  id           String          @id @default(uuid())
+  id           String         @id @default(uuid())
   companyId    String
-  company      Company         @relation(fields: [companyId], references: [id])
+  company      Company        @relation(fields: [companyId], references: [id])
   guardId      String
-  guard        Guard           @relation(fields: [guardId], references: [id])
-  requestDate  DateTime        @db.Date
-  amount       Int             // 申請金額
-  feeRate      Float           @default(0.03) // 手数料率（3%等）
-  feeAmount    Int             // 手数料
-  netAmount    Int             // 振込額
-  status       DailyPayStatus  @default(PENDING)
+  guard        Guard          @relation(fields: [guardId], references: [id])
+  requestDate  DateTime       @db.Date
+  amount       Int // 申請金額
+  feeRate      Float          @default(0.03) // 手数料率（3%等）
+  feeAmount    Int // 手数料
+  netAmount    Int // 振込額
+  status       DailyPayStatus @default(PENDING)
   approvedById String?
-  approvedBy   User?           @relation("ApprovedBy", fields: [approvedById], references: [id])
+  approvedBy   User?          @relation("ApprovedBy", fields: [approvedById], references: [id])
   approvedAt   DateTime?
   paidAt       DateTime?
-  deductedAt   DateTime?       // 月末給与差引日
+  deductedAt   DateTime? // 月末給与差引日
   notes        String?
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
 
   @@index([companyId])
   @@index([guardId])
@@ -986,11 +994,11 @@ model DailyPayRequest {
 }
 
 enum DailyPayStatus {
-  PENDING     // 申請中
-  APPROVED    // 承認済み
-  PAID        // 支払済み
-  REJECTED    // 否認
-  DEDUCTED    // 給与差引済み
+  PENDING // 申請中
+  APPROVED // 承認済み
+  PAID // 支払済み
+  REJECTED // 否認
+  DEDUCTED // 給与差引済み
 }
 
 // ─────────────────────────────────────────────
@@ -998,23 +1006,23 @@ enum DailyPayStatus {
 // ─────────────────────────────────────────────
 
 model ElectronicContract {
-  id              String          @id @default(uuid())
-  companyId       String
-  company         Company         @relation(fields: [companyId], references: [id])
-  contractId      String?
-  contract        Contract?       @relation(fields: [contractId], references: [id])
-  title           String
-  content         String          // 契約文書テキスト
-  pdfPath         String?         // 生成されたPDFパス
-  status          EContractStatus @default(DRAFT)
-  expiresAt       DateTime?       // 署名期限
-  timestampToken  String?         // RFC3161 TSAトークン（Base64）
-  timestampAt     DateTime?       // タイムスタンプ取得日時
-  auditLog        Json[]          @default([]) // 操作ログ
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  id             String          @id @default(uuid())
+  companyId      String
+  company        Company         @relation(fields: [companyId], references: [id])
+  contractId     String?
+  contract       Contract?       @relation(fields: [contractId], references: [id])
+  title          String
+  content        String // 契約文書テキスト
+  pdfPath        String? // 生成されたPDFパス
+  status         EContractStatus @default(DRAFT)
+  expiresAt      DateTime? // 署名期限
+  timestampToken String? // RFC3161 TSAトークン（Base64）
+  timestampAt    DateTime? // タイムスタンプ取得日時
+  auditLog       Json[]          @default([]) // 操作ログ
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 
-  signatures      EContractSignature[]
+  signatures EContractSignature[]
 
   @@index([companyId])
   @@index([contractId])
@@ -1022,26 +1030,26 @@ model ElectronicContract {
 
 enum EContractStatus {
   DRAFT
-  SENT       // 署名依頼送信済み
+  SENT // 署名依頼送信済み
   PARTIALLY_SIGNED
-  COMPLETED  // 全員署名済み
+  COMPLETED // 全員署名済み
   EXPIRED
   CANCELLED
 }
 
 model EContractSignature {
-  id              String     @id @default(uuid())
-  eContractId     String
-  eContract       ElectronicContract @relation(fields: [eContractId], references: [id], onDelete: Cascade)
-  signerEmail     String
-  signerName      String
-  userId          String?
-  user            User?      @relation(fields: [userId], references: [id])
-  token           String     @unique @default(uuid()) // 署名URLトークン
-  signedAt        DateTime?
-  ipAddress       String?
-  userAgent       String?
-  createdAt       DateTime   @default(now())
+  id          String             @id @default(uuid())
+  eContractId String
+  eContract   ElectronicContract @relation(fields: [eContractId], references: [id], onDelete: Cascade)
+  signerEmail String
+  signerName  String
+  userId      String?
+  user        User?              @relation(fields: [userId], references: [id])
+  token       String             @unique @default(uuid()) // 署名URLトークン
+  signedAt    DateTime?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime           @default(now())
 
   @@index([eContractId])
 }
@@ -1051,37 +1059,39 @@ model EContractSignature {
 // ─────────────────────────────────────────────
 
 model SecurityReport {
-  id          String   @id @default(uuid())
-  companyId   String
-  company     Company  @relation(fields: [companyId], references: [id])
-  guardId     String
-  guard       Guard    @relation(fields: [guardId], references: [id])
-  siteId      String
-  site        Site     @relation(fields: [siteId], references: [id])
-  reportDate  DateTime @db.Date
-  content     Json     // 報告内容（パトロール記録・特記事項等）
-  approvalToken String? @unique @default(uuid()) // メールリンク承認用
-  approvedAt  DateTime?
-  approvedBy  String?
+  id                String    @id @default(uuid())
+  companyId         String
+  company           Company   @relation(fields: [companyId], references: [id])
+  guardId           String
+  guard             Guard     @relation(fields: [guardId], references: [id])
+  siteId            String
+  site              Site      @relation(fields: [siteId], references: [id])
+  reportDate        DateTime  @db.Date
+  content           Json // 報告内容（パトロール記録・特記事項等）
+  approvalToken     String?   @unique @default(uuid()) // メールリンク承認用
+  approvedAt        DateTime?
+  approvedBy        String?
   // 現場監督の手書きサイン（承認者名は signerName、署名日時は signedAt が正）
-  signerName     String?
-  signerTitle    String?
-  signatureImage String?  @db.Text // PNG data URL
-  signedAt       DateTime?
-  signedLat      Float?   // サイン取得位置
-  signedLng      Float?
+  signerName        String?
+  signerTitle       String?
+  signatureImage    String?   @db.Text // PNG data URL
+  signedAt          DateTime?
+  signedLat         Float? // サイン取得位置
+  signedLng         Float?
   // 提出者（報告対象の隊員と異なる場合は submittedAsProxy=true、理由は submissionNote）
   submittedByUserId String?
   submittedByName   String?
-  submittedAsProxy  Boolean  @default(false)
+  submittedAsProxy  Boolean   @default(false)
   submissionNote    String?
-  pdfPath     String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  pdfPath           String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  photos      SecurityReportPhoto[]
-  revisions   SecurityReportRevision[]
-  shares      SecurityReportShare[]
+  photos            SecurityReportPhoto[]
+  revisions         SecurityReportRevision[]
+  shares            SecurityReportShare[]
+  evaluations       Evaluation[]
+  confidentialNotes ConfidentialNote[]
 }
 
 // 現場写真（Railwayのディスクは再デプロイで消えるためDBに保存。端末側で縮小済み）
@@ -1106,10 +1116,10 @@ model SecurityReportRevision {
   reportId    String
   report      SecurityReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
   companyId   String
-  action      String         // shared/securityReport.ts REPORT_REVISION_ACTION のキー
+  action      String // shared/securityReport.ts REPORT_REVISION_ACTION のキー
   actorName   String
   actorUserId String?
-  changes     Json?          // [{ field, before, after }] または補足情報
+  changes     Json? // [{ field, before, after }] または補足情報
   createdAt   DateTime       @default(now())
 
   @@index([reportId])
@@ -1150,16 +1160,16 @@ model SecurityReportTemplate {
 // ─────────────────────────────────────────────
 
 model LineWorksSettings {
-  id            String   @id @default(uuid())
-  companyId     String   @unique
-  company       Company  @relation(fields: [companyId], references: [id])
-  botId         String
-  botSecret     String?
-  channelId     String
-  accessToken   String?
+  id             String    @id @default(uuid())
+  companyId      String    @unique
+  company        Company   @relation(fields: [companyId], references: [id])
+  botId          String
+  botSecret      String?
+  channelId      String
+  accessToken    String?
   tokenExpiresAt DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 }
 
 // ─────────────────────────────────────────────
@@ -1167,28 +1177,28 @@ model LineWorksSettings {
 // ─────────────────────────────────────────────
 
 model Notification {
-  id          String           @id @default(uuid())
-  companyId   String
-  company     Company          @relation(fields: [companyId], references: [id])
-  type        NotificationType
-  title       String
-  body        String
-  targetId    String?          // 対象ID（guardId等）
-  channel     String           @default("LINE_WORKS") // LINE_WORKS / EMAIL / BOTH
-  sentAt      DateTime?
-  status      String           @default("PENDING")
-  createdAt   DateTime         @default(now())
+  id        String           @id @default(uuid())
+  companyId String
+  company   Company          @relation(fields: [companyId], references: [id])
+  type      NotificationType
+  title     String
+  body      String
+  targetId  String? // 対象ID（guardId等）
+  channel   String           @default("LINE_WORKS") // LINE_WORKS / EMAIL / BOTH
+  sentAt    DateTime?
+  status    String           @default("PENDING")
+  createdAt DateTime         @default(now())
 
   @@index([companyId])
   @@index([status])
 }
 
 enum NotificationType {
-  DAY_BEFORE_CONFIRM  // 前日確認
-  SHIFT_CHANGE        // シフト変更
-  EMERGENCY           // 緊急連絡
-  ANNOUNCEMENT        // お知らせ
-  DAILY_PAY           // 日払い通知
+  DAY_BEFORE_CONFIRM // 前日確認
+  SHIFT_CHANGE // シフト変更
+  EMERGENCY // 緊急連絡
+  ANNOUNCEMENT // お知らせ
+  DAILY_PAY // 日払い通知
 }
 
 // ─────────────────────────────────────────────
@@ -1196,16 +1206,16 @@ enum NotificationType {
 // ─────────────────────────────────────────────
 
 model AutoReceipt {
-  id          String            @id @default(uuid())
+  id          String        @id @default(uuid())
   companyId   String
-  company     Company           @relation(fields: [companyId], references: [id])
+  company     Company       @relation(fields: [companyId], references: [id])
   source      ReceiptSource
-  rawContent  String            // OCR結果・メール本文等
-  parsedData  Json?             // 解析済みデータ
-  suggestion  Json?             // サジェスト（現場・日時・人数）
-  status      ReceiptStatus     @default(PENDING)
+  rawContent  String // OCR結果・メール本文等
+  parsedData  Json? // 解析済みデータ
+  suggestion  Json? // サジェスト（現場・日時・人数）
+  status      ReceiptStatus @default(PENDING)
   processedAt DateTime?
-  createdAt   DateTime          @default(now())
+  createdAt   DateTime      @default(now())
 
   @@index([companyId])
   @@index([status])
@@ -1218,10 +1228,10 @@ enum ReceiptSource {
 }
 
 enum ReceiptStatus {
-  PENDING     // 未処理
-  SUGGESTED   // サジェスト表示中
-  ACCEPTED    // 受入済み（スケジュール登録）
-  REJECTED    // 却下
+  PENDING // 未処理
+  SUGGESTED // サジェスト表示中
+  ACCEPTED // 受入済み（スケジュール登録）
+  REJECTED // 却下
 }
 
 // ─────────────────────────────────────────────
@@ -1235,8 +1245,8 @@ model ShiftSurvey {
   title         String
   // シフト種別定義 JSON: [{type:"DAY", label:"①日勤8:00-17:00", startTime:"08:00", endTime:"17:00"}]
   shiftTypes    Json
-  startDate     DateTime @db.Date  // 対象期間開始
-  endDate       DateTime @db.Date  // 対象期間終了
+  startDate     DateTime @db.Date // 対象期間開始
+  endDate       DateTime @db.Date // 対象期間終了
   answerStartAt DateTime
   answerEndAt   DateTime
   isExported    Boolean  @default(false)
@@ -1247,17 +1257,17 @@ model ShiftSurvey {
 }
 
 model ShiftSurveyResponse {
-  id          String       @id @default(uuid())
+  id          String      @id @default(uuid())
   surveyId    String
-  survey      ShiftSurvey  @relation(fields: [surveyId], references: [id])
+  survey      ShiftSurvey @relation(fields: [surveyId], references: [id])
   guardId     String
-  guard       Guard        @relation(fields: [guardId], references: [id])
+  guard       Guard       @relation(fields: [guardId], references: [id])
   companyId   String
   // answers JSON: [{date:"2025-04-14", shiftType:"DAY", available:true, note:""}]
   answers     Json
   submittedAt DateTime?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
   @@unique([surveyId, guardId])
 }
@@ -1267,52 +1277,52 @@ model ShiftSurveyResponse {
 // ─────────────────────────────────────────────
 
 model Payroll {
-  id          String        @id @default(uuid())
-  companyId   String
-  company     Company       @relation(fields: [companyId], references: [id])
-  guardId     String
-  guard       Guard         @relation(fields: [guardId], references: [id])
-  year        Int
-  month       Int           // 1-12
-  status      PayrollStatus @default(DRAFT)
+  id        String        @id @default(uuid())
+  companyId String
+  company   Company       @relation(fields: [companyId], references: [id])
+  guardId   String
+  guard     Guard         @relation(fields: [guardId], references: [id])
+  year      Int
+  month     Int // 1-12
+  status    PayrollStatus @default(DRAFT)
 
   // 勤怠サマリ
-  workDays        Int @default(0)
-  holidayWorkDays Int @default(0)
+  workDays         Int @default(0)
+  holidayWorkDays  Int @default(0)
   totalWorkMinutes Int @default(0)
-  regularMinutes  Int @default(0)
-  overtimeMinutes Int @default(0)
-  earlyOtMinutes  Int @default(0)
-  lateOtMinutes   Int @default(0)
-  paidLeaveDays   Int @default(0)
-  absentDays      Int @default(0)
+  regularMinutes   Int @default(0)
+  overtimeMinutes  Int @default(0)
+  earlyOtMinutes   Int @default(0)
+  lateOtMinutes    Int @default(0)
+  paidLeaveDays    Int @default(0)
+  absentDays       Int @default(0)
 
   // 支給
-  basicPay          Int @default(0)
-  overtimePay       Int @default(0)
-  holidayPay        Int @default(0)
-  positionAllowance Int @default(0)
+  basicPay               Int @default(0)
+  overtimePay            Int @default(0)
+  holidayPay             Int @default(0)
+  positionAllowance      Int @default(0)
   qualificationAllowance Int @default(0)
-  leaderAllowance   Int @default(0)
-  commuteAllowance  Int @default(0)
-  travelExpense     Int @default(0)
-  otherAllowance    Int @default(0)
-  taxableTotal      Int @default(0)
-  nonTaxableTotal   Int @default(0)
-  grossPay          Int @default(0)
+  leaderAllowance        Int @default(0)
+  commuteAllowance       Int @default(0)
+  travelExpense          Int @default(0)
+  otherAllowance         Int @default(0)
+  taxableTotal           Int @default(0)
+  nonTaxableTotal        Int @default(0)
+  grossPay               Int @default(0)
 
   // 控除
-  healthInsurance   Int @default(0)
-  pension           Int @default(0)
-  employmentIns     Int @default(0)
-  incomeTax         Int @default(0)
-  residentTax       Int @default(0)
-  otherDeduction    Int @default(0)
-  totalDeduction    Int @default(0)
+  healthInsurance Int @default(0)
+  pension         Int @default(0)
+  employmentIns   Int @default(0)
+  incomeTax       Int @default(0)
+  residentTax     Int @default(0)
+  otherDeduction  Int @default(0)
+  totalDeduction  Int @default(0)
 
   // その他調整
-  yearEndAdj        Int @default(0)
-  netPay            Int @default(0)
+  yearEndAdj Int @default(0)
+  netPay     Int @default(0)
 
   // 発行・送信
   issueDate   DateTime?
@@ -1321,17 +1331,17 @@ model Payroll {
   payDate     DateTime?
   notes       String?
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([companyId, guardId, year, month])
 }
 
 enum PayrollStatus {
-  DRAFT       // 未入力
-  IN_REVIEW   // 確認中
-  CONFIRMED   // 確認済み
-  PAID        // 支払済み
+  DRAFT // 未入力
+  IN_REVIEW // 確認中
+  CONFIRMED // 確認済み
+  PAID // 支払済み
 }
 
 // ─────────────────────────────────────────────
@@ -1339,50 +1349,50 @@ enum PayrollStatus {
 // ─────────────────────────────────────────────
 
 model SubcontractorPayment {
-  id            String            @id @default(uuid())
+  id            String           @id @default(uuid())
   companyId     String
-  company       Company           @relation(fields: [companyId], references: [id])
+  company       Company          @relation(fields: [companyId], references: [id])
   partnerId     String?
-  partner       Partner?          @relation(fields: [partnerId], references: [id])
-  partnerName   String            // スナップショット：協力会社名（partnerId未設定の手入力対応のため保持）
+  partner       Partner?         @relation(fields: [partnerId], references: [id])
+  partnerName   String // スナップショット：協力会社名（partnerId未設定の手入力対応のため保持）
   invoiceNumber String?
   year          Int
   month         Int
-  status        SubPaymentStatus  @default(PENDING)
-  clientName    String?           // 発注先
-  siteNames     String?           // 現場名（カンマ区切り）
-  periodStart   DateTime          @db.Date
-  periodEnd     DateTime          @db.Date
-  amount        Int               // 税込金額
-  taxRate       Float             @default(0.1)
+  status        SubPaymentStatus @default(PENDING)
+  clientName    String? // 発注先
+  siteNames     String? // 現場名（カンマ区切り）
+  periodStart   DateTime         @db.Date
+  periodEnd     DateTime         @db.Date
+  amount        Int // 税込金額
+  taxRate       Float            @default(0.1)
   notes         String?
-  receivedAt    DateTime?         // 受領日
-  paidAt        DateTime?         // 支払日
+  receivedAt    DateTime? // 受領日
+  paidAt        DateTime? // 支払日
 
   // 明細 JSON: [{date, siteName, amount, count, qualifiedCount, unitPrice, qualifiedUnitPrice}]
-  items         Json?
+  items Json?
 
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([companyId])
   @@index([partnerId])
 }
 
 enum SubPaymentStatus {
-  PENDING   // 未受領
-  RECEIVED  // 受領済
-  PAID      // 支払済
+  PENDING // 未受領
+  RECEIVED // 受領済
+  PAID // 支払済
 }
 
 enum ClientCategory {
-  GOVERNMENT    // 官公庁
-  PRIVATE       // 民間企業
-  CONSTRUCTION  // 建設・工事
-  COMMERCIAL    // 商業施設
-  INDIVIDUAL    // 個人
-  OTHER         // その他
-  RECRUITMENT   // 人材紹介会社（隊員の採用経路の選択肢になる）
+  GOVERNMENT // 官公庁
+  PRIVATE // 民間企業
+  CONSTRUCTION // 建設・工事
+  COMMERCIAL // 商業施設
+  INDIVIDUAL // 個人
+  OTHER // その他
+  RECRUITMENT // 人材紹介会社（隊員の採用経路の選択肢になる）
 }
 
 // ─────────────────────────────────────────────
@@ -1390,44 +1400,44 @@ enum ClientCategory {
 // ─────────────────────────────────────────────
 
 enum SubscriptionStatus {
-  TRIAL      // 無料トライアル中
-  ACTIVE     // 支払い済み・有効
-  PAST_DUE   // 支払い遅延中（猶予期間内）
-  SUSPENDED  // 利用停止
-  CANCELLED  // 解約済み
+  TRIAL // 無料トライアル中
+  ACTIVE // 支払い済み・有効
+  PAST_DUE // 支払い遅延中（猶予期間内）
+  SUSPENDED // 利用停止
+  CANCELLED // 解約済み
 }
 
 enum PlanType {
-  STARTER    // スターター（月額9,800円）
-  STANDARD   // スタンダード（月額29,800円）
+  STARTER // スターター（月額9,800円）
+  STANDARD // スタンダード（月額29,800円）
   ENTERPRISE // エンタープライズ（月額49,800円）
 }
 
 enum BillingLogType {
-  PAYMENT_LINK_SENT       // Payment Link送付
-  PAYMENT_SUCCEEDED       // 支払い成功
-  PAYMENT_FAILED          // 支払い失敗
-  SUBSCRIPTION_CREATED    // サブスクリプション作成
-  SUBSCRIPTION_UPDATED    // サブスクリプション更新
-  SUBSCRIPTION_CANCELLED  // サブスクリプション解約
-  MANUAL_SUSPEND          // 手動停止
-  MANUAL_REACTIVATE       // 手動再開
-  AUTO_SUSPEND            // 自動停止
-  REMINDER_SENT           // リマインドメール送付
+  PAYMENT_LINK_SENT // Payment Link送付
+  PAYMENT_SUCCEEDED // 支払い成功
+  PAYMENT_FAILED // 支払い失敗
+  SUBSCRIPTION_CREATED // サブスクリプション作成
+  SUBSCRIPTION_UPDATED // サブスクリプション更新
+  SUBSCRIPTION_CANCELLED // サブスクリプション解約
+  MANUAL_SUSPEND // 手動停止
+  MANUAL_REACTIVATE // 手動再開
+  AUTO_SUSPEND // 自動停止
+  REMINDER_SENT // リマインドメール送付
 }
 
 model BillingSubscription {
-  id                   String   @id @default(uuid())
+  id                   String    @id @default(uuid())
   companyId            String
-  company              Company  @relation(fields: [companyId], references: [id])
-  stripeSubscriptionId String?  @unique
+  company              Company   @relation(fields: [companyId], references: [id])
+  stripeSubscriptionId String?   @unique
   stripePriceId        String?
   status               String
   currentPeriodStart   DateTime?
   currentPeriodEnd     DateTime?
   cancelledAt          DateTime?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   @@index([companyId])
 }
@@ -1470,15 +1480,15 @@ model PasswordResetToken {
 
 // 都道府県別健康保険等級表（協会けんぽ）
 model HealthInsGradeTable {
-  id               String @id @default(uuid())
-  fiscalYear       Int    // 年度（例: 2026）
-  prefecture       String // 都道府県名
-  grade            Int    // 等級（1-50）
-  standardMonthly  Int    // 標準報酬月額（円）
-  employeeShare    Int    // 被保険者負担額（円）
-  employerShare    Int    // 事業主負担額（円）
-  nursingEmployee  Int    @default(0) // 介護保険被保険者負担額（円）※40歳以上
-  nursingEmployer  Int    @default(0) // 介護保険事業主負担額（円）
+  id              String @id @default(uuid())
+  fiscalYear      Int // 年度（例: 2026）
+  prefecture      String // 都道府県名
+  grade           Int // 等級（1-50）
+  standardMonthly Int // 標準報酬月額（円）
+  employeeShare   Int // 被保険者負担額（円）
+  employerShare   Int // 事業主負担額（円）
+  nursingEmployee Int    @default(0) // 介護保険被保険者負担額（円）※40歳以上
+  nursingEmployer Int    @default(0) // 介護保険事業主負担額（円）
 
   @@unique([fiscalYear, prefecture, grade])
   @@index([fiscalYear, prefecture])
@@ -1486,12 +1496,12 @@ model HealthInsGradeTable {
 
 // 厚生年金等級表（全32等級）
 model PensionGradeTable {
-  id               String @id @default(uuid())
-  fiscalYear       Int
-  grade            Int    // 等級（1-32）
-  standardMonthly  Int    // 標準報酬月額（円）
-  employeeShare    Int    // 被保険者負担額（円）
-  employerShare    Int    // 事業主負担額（円）
+  id              String @id @default(uuid())
+  fiscalYear      Int
+  grade           Int // 等級（1-32）
+  standardMonthly Int // 標準報酬月額（円）
+  employeeShare   Int // 被保険者負担額（円）
+  employerShare   Int // 事業主負担額（円）
 
   @@unique([fiscalYear, grade])
   @@index([fiscalYear])
@@ -1499,11 +1509,11 @@ model PensionGradeTable {
 
 // 雇用保険料率（事業種類別）
 model EmploymentInsRate {
-  id            String @id @default(uuid())
-  fiscalYear    Int
-  businessType  String // 一般/建設/農林水産
-  employeeRate  Float  // 被保険者負担率（例: 0.006）
-  employerRate  Float  // 事業主負担率（例: 0.0095）
+  id           String @id @default(uuid())
+  fiscalYear   Int
+  businessType String // 一般/建設/農林水産
+  employeeRate Float // 被保険者負担率（例: 0.006）
+  employerRate Float // 事業主負担率（例: 0.0095）
 
   @@unique([fiscalYear, businessType])
   @@index([fiscalYear])
@@ -1511,31 +1521,31 @@ model EmploymentInsRate {
 
 // 月額源泉徴収税額表（甲欄）
 model IncomeTaxTable {
-  id          String @id @default(uuid())
-  fiscalYear  Int
-  salaryFrom  Int    // 月額給与下限（円）
-  salaryTo    Int    // 月額給与上限（円）
-  dep0        Int    // 扶養0人の税額
-  dep1        Int    // 扶養1人
-  dep2        Int    // 扶養2人
-  dep3        Int    // 扶養3人
-  dep4        Int    // 扶養4人
-  dep5        Int    // 扶養5人
-  dep6        Int    // 扶養6人
-  dep7        Int    // 扶養7人
+  id         String @id @default(uuid())
+  fiscalYear Int
+  salaryFrom Int // 月額給与下限（円）
+  salaryTo   Int // 月額給与上限（円）
+  dep0       Int // 扶養0人の税額
+  dep1       Int // 扶養1人
+  dep2       Int // 扶養2人
+  dep3       Int // 扶養3人
+  dep4       Int // 扶養4人
+  dep5       Int // 扶養5人
+  dep6       Int // 扶養6人
+  dep7       Int // 扶養7人
 
   @@index([fiscalYear, salaryFrom])
 }
 
 // 住民税特別徴収（隊員別・月別）
 model ResidentTax {
-  id            String @id @default(uuid())
-  companyId     String
-  guardId       String
-  fiscalYear    Int    // 年度
-  month         Int    // 月（1-12）
-  amount        Int    // 特別徴収額（円）
-  municipality  String // 市区町村名
+  id           String @id @default(uuid())
+  companyId    String
+  guardId      String
+  fiscalYear   Int // 年度
+  month        Int // 月（1-12）
+  amount       Int // 特別徴収額（円）
+  municipality String // 市区町村名
 
   @@unique([guardId, fiscalYear, month])
   @@index([companyId])
@@ -1544,13 +1554,13 @@ model ResidentTax {
 
 // 有給休暇管理
 model PaidLeave {
-  id          String   @id @default(uuid())
-  companyId   String
-  guardId     String
-  grantDate   DateTime @db.Date // 付与日
-  grantDays   Float    // 付与日数
-  usedDays    Float    @default(0) // 使用日数
-  expiryDate  DateTime @db.Date // 有効期限（付与日から2年）
+  id         String   @id @default(uuid())
+  companyId  String
+  guardId    String
+  grantDate  DateTime @db.Date // 付与日
+  grantDays  Float // 付与日数
+  usedDays   Float    @default(0) // 使用日数
+  expiryDate DateTime @db.Date // 有効期限（付与日から2年）
 
   @@index([companyId])
   @@index([guardId])
@@ -1558,21 +1568,21 @@ model PaidLeave {
 
 // 賞与明細
 model BonusPayroll {
-  id               String   @id @default(uuid())
-  companyId        String
-  guardId          String
-  paymentDate      DateTime @db.Date
-  bonusType        String   // SUMMER/WINTER/OTHER
-  grossAmount      Int      // 総支給額
-  healthInsurance  Int      @default(0)
-  pension          Int      @default(0)
-  employmentIns    Int      @default(0)
-  incomeTax        Int      @default(0) // 賞与用源泉徴収税
-  otherDeduction   Int      @default(0)
-  netAmount        Int      // 差引支給額
-  notes            String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id              String   @id @default(uuid())
+  companyId       String
+  guardId         String
+  paymentDate     DateTime @db.Date
+  bonusType       String // SUMMER/WINTER/OTHER
+  grossAmount     Int // 総支給額
+  healthInsurance Int      @default(0)
+  pension         Int      @default(0)
+  employmentIns   Int      @default(0)
+  incomeTax       Int      @default(0) // 賞与用源泉徴収税
+  otherDeduction  Int      @default(0)
+  netAmount       Int // 差引支給額
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([companyId])
   @@index([guardId])
@@ -1582,7 +1592,7 @@ model BonusPayroll {
 model ModulePermission {
   id       String  @id @default(uuid())
   userId   String
-  module   String  // HR/ATTENDANCE/PAYROLL/INSURANCE/YEAREND/MYNUMBER/BONUS/TRANSFER
+  module   String // HR/ATTENDANCE/PAYROLL/INSURANCE/YEAREND/MYNUMBER/BONUS/TRANSFER
   canView  Boolean @default(false)
   canEdit  Boolean @default(false)
   canAdmin Boolean @default(false)
@@ -1593,15 +1603,15 @@ model ModulePermission {
 
 // マイナンバー監査ログ
 model MyNumberAuditLog {
-  id          String   @id @default(uuid())
-  companyId   String
-  guardId     String
-  userId      String   // アクセスしたユーザーID
-  userName    String   // アクセスしたユーザー名
-  action      String   // VIEW / UPDATE / DELETE
-  ipAddress   String?
-  userAgent   String?
-  createdAt   DateTime @default(now())
+  id        String   @id @default(uuid())
+  companyId String
+  guardId   String
+  userId    String // アクセスしたユーザーID
+  userName  String // アクセスしたユーザー名
+  action    String // VIEW / UPDATE / DELETE
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
 
   @@index([companyId])
   @@index([guardId])
@@ -1610,17 +1620,87 @@ model MyNumberAuditLog {
 
 // 外国人就労時間アラートログ
 model ForeignWorkerAlert {
-  id          String   @id @default(uuid())
-  companyId   String
-  guardId     String
-  weekStart   DateTime @db.Date // 週の開始日
-  totalHours  Float    // その週の実労働時間
-  limitHours  Int      // 上限時間（28 or 40）
-  isVacation  Boolean  // 長期休暇中か
-  alertType   String   // WARNING（超過間近）/ VIOLATION（超過）/ EXPIRY（期限切れ）
-  message     String
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid())
+  companyId  String
+  guardId    String
+  weekStart  DateTime @db.Date // 週の開始日
+  totalHours Float // その週の実労働時間
+  limitHours Int // 上限時間（28 or 40）
+  isVacation Boolean // 長期休暇中か
+  alertType  String // WARNING（超過間近）/ VIOLATION（超過）/ EXPIRY（期限切れ）
+  message    String
+  createdAt  DateTime @default(now())
 
   @@index([companyId])
   @@index([guardId])
+}
+
+// ─────────────────────────────────────────────
+// 隊員評価（項目・点数の定義は shared/evaluation.ts）
+// ─────────────────────────────────────────────
+
+enum EvaluationRaterType {
+  SELF // 本人
+  SUPERVISOR // 上司・隊長
+  CLIENT // 依頼先（現場監督）
+  PEER // 同僚（第2段階）
+  MANAGEMENT // 経営者面談（第2段階）
+}
+
+// 1件 = ある評価者がある現場完了（警備報告書）について付けた評価
+model Evaluation {
+  id               String              @id @default(uuid())
+  companyId        String
+  company          Company             @relation(fields: [companyId], references: [id])
+  guardId          String
+  guard            Guard               @relation(fields: [guardId], references: [id], onDelete: Cascade)
+  securityReportId String?
+  securityReport   SecurityReport?     @relation(fields: [securityReportId], references: [id], onDelete: SetNull)
+  siteId           String?
+  evalDate         DateTime            @db.Date
+  raterType        EvaluationRaterType
+  raterKey         String // 同じ評価者の重複防止用（本人・依頼先は固定値、上司はユーザーID）
+  raterUserId      String?
+  raterName        String
+  raterTitle       String?
+  scores           Json // { 項目キー: 点数 }（shared/evaluation.ts EVAL_CRITERIA / SITE_SCALE）
+  repeatWish       Boolean? // 依頼先：また来てほしいか
+  comment          String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@unique([securityReportId, raterType, raterKey])
+  @@index([companyId, guardId, evalDate])
+}
+
+// 申し送り事項（経営者・上司のみ閲覧。隊員本人・同僚・依頼先には出さない）
+model ConfidentialNote {
+  id               String          @id @default(uuid())
+  companyId        String
+  company          Company         @relation(fields: [companyId], references: [id])
+  guardId          String
+  guard            Guard           @relation(fields: [guardId], references: [id], onDelete: Cascade)
+  securityReportId String?
+  securityReport   SecurityReport? @relation(fields: [securityReportId], references: [id], onDelete: SetNull)
+  authorUserId     String
+  authorName       String
+  body             String
+  tags             String[]
+  createdAt        DateTime        @default(now())
+
+  @@index([companyId, guardId])
+}
+
+// 申し送りの閲覧・作成・削除の記録（追記のみ）
+model ConfidentialNoteAccessLog {
+  id        String   @id @default(uuid())
+  companyId String
+  guardId   String
+  noteId    String?
+  userId    String
+  userName  String
+  action    String // VIEW / CREATE / DELETE
+  createdAt DateTime @default(now())
+
+  @@index([companyId, guardId])
 }

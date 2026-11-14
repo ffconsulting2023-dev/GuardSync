@@ -24,6 +24,7 @@ import SetupPasswordPage from './pages/SetupPasswordPage'
 import ImportPage from './pages/ImportPage'
 import SiteRequestsPage from './pages/SiteRequestsPage'
 import RecruitmentReportPage from './pages/RecruitmentReportPage'
+import EvaluationsPage from './pages/EvaluationsPage'
 import GuardAppPage from './pages/guard/GuardAppPage'
 import SettingsPage from './pages/SettingsPage'
 import VehiclesPage from './pages/VehiclesPage'
@@ -97,6 +98,7 @@ export default function App() {
 
                     {/* ── 人事管理モジュール ── */}
                     <Route path="guards/*" element={<GuardsPage />} />
+                    <Route path="evaluations" element={<EvaluationsPage />} />
                     <Route path="partners/*" element={<PartnersPage />} />
                     <Route path="vehicles/*" element={<VehiclesPage />} />
                     <Route path="equipment/*" element={<EquipmentPage />} />
