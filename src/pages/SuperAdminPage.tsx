@@ -385,6 +385,19 @@ function CompaniesTab() {
     queryFn: () => api.get('/super-admin/companies').then(r => r.data),
   })
 
+  // 隊員評価機能のオン・オフ（特許出願前のため既定はオフ。スーパー管理者のみ切り替え可）
+  const evaluationToggle = useMutation({
+    mutationFn: (v: { id: string; enabled: boolean }) => api.patch(`/super-admin/companies/${v.id}/evaluation`, { enabled: v.enabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['super-admin-companies'] }),
+  })
+  const toggleEvaluation = (c: any) => {
+    const enabled = !c.evaluationEnabled
+    const msg = enabled
+      ? `「${c.name}」の隊員評価機能をオンにします。\nこの会社の管理者・隊員に評価画面が表示されます。\n（特許出願前は、社外に公開されない範囲での利用をおすすめします）`
+      : `「${c.name}」の隊員評価機能をオフにします。\n評価画面は非表示になります（入力済みの評価は削除されません）。`
+    if (window.confirm(msg)) evaluationToggle.mutate({ id: c.id, enabled })
+  }
+
   const inviteMutation = useMutation({
     mutationFn: (email: string) => api.post('/super-admin/invite', { email }),
     onSuccess: (res) => { setInviteResult(res.data); setInviteEmail('') },
@@ -443,6 +456,7 @@ function CompaniesTab() {
                 <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 hidden md:table-cell">隊員</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 hidden lg:table-cell">登録日</th>
                 <th className="text-center px-4 py-3 text-xs font-medium text-gray-500">状態</th>
+                <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 whitespace-nowrap">評価機能</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -460,6 +474,19 @@ function CompaniesTab() {
                   <td className="px-4 py-3 text-center">
                     <span className={`badge ${c.isActive ? 'badge-success' : 'badge-danger'}`}>{c.isActive ? '有効' : '停止'}</span>
                   </td>
+                  <td className="px-4 py-3 text-center">
+                    <button
+                      type="button" role="switch" aria-checked={!!c.evaluationEnabled} aria-label={`${c.name}の評価機能`}
+                      onClick={() => toggleEvaluation(c)}
+                      disabled={evaluationToggle.isPending && evaluationToggle.variables?.id === c.id}
+                      className="inline-flex items-center gap-2 disabled:opacity-50"
+                    >
+                      <span className={`relative inline-block w-10 h-6 rounded-full transition-colors ${c.evaluationEnabled ? 'bg-green-500' : 'bg-gray-300'}`}>
+                        <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${c.evaluationEnabled ? 'translate-x-4' : ''}`} />
+                      </span>
+                      <span className={`text-xs w-8 whitespace-nowrap text-left ${c.evaluationEnabled ? 'text-green-700 font-medium' : 'text-gray-400'}`}>{c.evaluationEnabled ? 'オン' : 'オフ'}</span>
+                    </button>
+                  </td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => setAccountsFor({ id: c.id, name: c.name })} className="text-blue-600 text-xs whitespace-nowrap">ID発行・管理者設定</button>
                   </td>
@@ -468,6 +495,7 @@ function CompaniesTab() {
             </tbody>
           </table>
         )}
+        {evaluationToggle.isError && <p className="px-4 py-2 text-sm text-red-600">{(evaluationToggle.error as any)?.response?.data?.error || '評価機能を切り替えられませんでした'}</p>}
       </div>
       {accountsFor && (
         <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/50 p-4 overflow-y-auto">

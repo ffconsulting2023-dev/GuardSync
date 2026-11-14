@@ -9,6 +9,8 @@ import { useAuth } from '../../hooks/useAuth'
 import { format, addMonths, subMonths } from 'date-fns'
 import { ja } from 'date-fns/locale'
 import SignaturePad from '../../components/SignaturePad'
+import { SelfEvaluationSheet, ClientEvaluationSheet } from '../../components/evaluation/EvaluationInputs'
+import { useEvaluationEnabled } from '../../hooks/useEvaluation'
 import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent } from '../../components/report/ReportContentForm'
 import {
   REPORT_STATUS, reportStatus, DEFAULT_REPORT_TEMPLATE, validateReportAgainstTemplate, PROXY_SUBMISSION_LABEL,
@@ -31,7 +33,10 @@ export default function GuardAppPage() {
   const [signTarget, setSignTarget] = useState<string | null>(null) // サイン対象の既存報告書ID
   const [signDraft, setSignDraft] = useState<any>(null)            // 提出時に取得したサイン
   const [showPad, setShowPad] = useState(false)
+  // 報告書の提出・サインの後に続けて表示する評価（依頼先 → 本人の順）
+  const [evalFlow, setEvalFlow] = useState<{ reportId: string; siteName?: string; guardName?: string; signerName?: string; steps: ('client' | 'self')[] } | null>(null)
   const qc = useQueryClient()
+  const evaluationEnabled = useEvaluationEnabled()
 
   // ログインユーザーに紐付く隊員（User.id と Guard.id は別物のため、サーバーで同一ID→メールアドレスの順に突き合わせる）
   const { data: me, isLoading: meLoading } = useQuery<{ guard: { id: string; name: string } | null }>({
@@ -77,6 +82,18 @@ export default function GuardAppPage() {
     enabled: !!user?.id && tab === 'reports',
   })
 
+  // 自分の報告書に付いた評価の有無（振り返り未入力の表示用）
+  const { data: myEvals } = useQuery<{ evaluations: { securityReportId: string; raterType: string }[] }>({
+    queryKey: ['my-evaluations', user?.id],
+    queryFn: () => api.get('/evaluations/mine').then(r => r.data),
+    enabled: evaluationEnabled && tab === 'reports',
+  })
+  const hasEval = (reportId: string, raterType: string) => !!myEvals?.evaluations.some(e => e.securityReportId === reportId && e.raterType === raterType)
+  const nextEvalStep = () => {
+    qc.invalidateQueries({ queryKey: ['my-evaluations'] })
+    setEvalFlow(f => (f && f.steps.length > 1 ? { ...f, steps: f.steps.slice(1) } : null))
+  }
+
   // 隊員一覧（報告対象の隊員を選ぶため。紐付けが無い・他の隊員の分を提出する場合に使う）
   const { data: activeGuards = [] } = useQuery({
     queryKey: ['guards-active'],
@@ -101,8 +118,10 @@ export default function GuardAppPage() {
 
   const signMutation = useMutation({
     mutationFn: (v: any) => api.post(`/security-reports/${signTarget}/sign`, v),
-    onSuccess: () => {
+    onSuccess: (_res, v) => {
       qc.invalidateQueries({ queryKey: ['guard-reports'] })
+      const rep = myReports.find((r: any) => r.id === signTarget)
+      if (evaluationEnabled && rep) setEvalFlow({ reportId: rep.id, siteName: rep.site?.name, guardName: rep.guard?.name, signerName: v.signerName, steps: ['client'] })
       setSignTarget(null)
       setShowPad(false)
     },
@@ -110,8 +129,15 @@ export default function GuardAppPage() {
 
   const submitReportMutation = useMutation({
     mutationFn: (data: any) => api.post('/security-reports', data),
-    onSuccess: () => {
+    onSuccess: (res, v) => {
       qc.invalidateQueries({ queryKey: ['guard-reports'] })
+      if (evaluationEnabled) {
+        const r = res.data
+        const steps: ('client' | 'self')[] = []
+        if (v.signature) steps.push('client')
+        if (myGuardId && r.guardId === myGuardId) steps.push('self')
+        if (steps.length) setEvalFlow({ reportId: r.id, siteName: r.site?.name, guardName: r.guard?.name, signerName: v.signature?.signerName, steps })
+      }
       setShowReportForm(false)
       setReportForm(EMPTY_REPORT)
       setReportContent(EMPTY_REPORT_CONTENT)
@@ -429,6 +455,10 @@ export default function GuardAppPage() {
                     ) : (
                       <button onClick={() => { setSignTarget(rep.id); setShowPad(true) }} className="btn-primary text-sm w-full mt-3">✍️ 現場監督のサインをもらう</button>
                     )}
+                    {evaluationEnabled && myEvals && myGuardId && rep.guardId === myGuardId && !hasEval(rep.id, 'SELF') && (
+                      <button onClick={() => setEvalFlow({ reportId: rep.id, siteName: rep.site?.name, steps: ['self'] })} className="btn-secondary text-sm w-full mt-2">📝 今日の振り返りを入力</button>
+                    )}
+                    {evaluationEnabled && myEvals && hasEval(rep.id, 'SELF') && <p className="text-xs text-green-700 mt-2">✓ 振り返り入力済み</p>}
                   </div>
                 ))}
               </div>
@@ -522,6 +552,13 @@ export default function GuardAppPage() {
                   </div>
                 </form>
               </div>
+            )}
+
+            {evalFlow?.steps[0] === 'client' && (
+              <ClientEvaluationSheet key={`c-${evalFlow.reportId}`} reportId={evalFlow.reportId} guardName={evalFlow.guardName} signerName={evalFlow.signerName} onDone={nextEvalStep} />
+            )}
+            {evalFlow?.steps[0] === 'self' && (
+              <SelfEvaluationSheet key={`s-${evalFlow.reportId}`} reportId={evalFlow.reportId} siteName={evalFlow.siteName} onDone={nextEvalStep} />
             )}
 
             {showPad && (
