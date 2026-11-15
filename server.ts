@@ -300,8 +300,26 @@ app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
-// M-1: レート制限を強化
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'リクエストが多すぎます。しばらくしてからお試しください。' } })
+// 本番はリバースプロキシ（HTTPS終端）経由のため、プロキシが付ける X-Forwarded-For から利用者のIPを取る。
+// これがないと全利用者がプロキシの1つのIPとして数えられ、全社でレート制限を共有してしまう
+app.set('trust proxy', Number(process.env.TRUST_PROXY ?? 1))
+
+// M-1: レート制限。ログイン中は利用者ごと（同じ回線・携帯会社のNATを共有する隊員を巻き込まない）、未ログインはIPごとに数える。
+// 画面の自動更新（30秒ごと）や複数タブでも通常の利用では上限に届かない値にする
+const API_LIMIT_PER_USER = 1500
+const API_LIMIT_PER_IP = 300
+const authenticatedUserId = (req: express.Request): string | null => {
+  const auth = req.headers.authorization
+  if (!auth?.startsWith('Bearer ')) return null
+  try { return (jwt.verify(auth.slice(7), JWT_SECRET) as { userId?: string }).userId ?? null } catch { return null }
+}
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: req => (authenticatedUserId(req) ? API_LIMIT_PER_USER : API_LIMIT_PER_IP),
+  keyGenerator: req => { const u = authenticatedUserId(req); return u ? `user:${u}` : `ip:${req.ip}` },
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: 'リクエストが多すぎます。しばらくしてからお試しください。' },
+})
 app.use('/api/', limiter)
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'ログイン試行回数の上限に達しました。15分後にお試しください。' } })
