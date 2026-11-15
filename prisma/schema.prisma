@@ -1740,34 +1740,46 @@ model Interview {
 
 // 指導タスク：本人と他者の評価の乖離が続いたとき（または面談で乖離があったとき）に自動作成
 model CoachingTask {
-  id              String     @id @default(uuid())
-  companyId       String
-  company         Company    @relation(fields: [companyId], references: [id])
-  guardId         String
-  guard           Guard      @relation(fields: [guardId], references: [id], onDelete: Cascade)
-  criterionKey    String // shared/evaluation.ts EVAL_CRITERIA
-  direction       String // OVER（本人の評価が高い）/ UNDER（本人の評価が低い）
-  gap             Float // 検知時の乖離（本人 − 他者）
-  trigger         String // SITE（現場ごとの評価の連続）/ INTERVIEW（面談）
-  interviewId     String?
-  interview       Interview? @relation(fields: [interviewId], references: [id], onDelete: SetNull)
-  evidence        Json? // 検知に使った評価（日付・本人・他者）
-  detectedAt      DateTime   @default(now())
-  dueDate         DateTime   @db.Date
-  status          String     @default("OPEN") // shared/evaluation.ts COACHING_STATUS
+  id                 String     @id @default(uuid())
+  companyId          String
+  company            Company    @relation(fields: [companyId], references: [id])
+  guardId            String
+  guard              Guard      @relation(fields: [guardId], references: [id], onDelete: Cascade)
+  criterionKey       String // shared/evaluation.ts EVAL_CRITERIA
+  direction          String // OVER（本人の評価が高い）/ UNDER（本人の評価が低い）
+  gap                Float // 検知時の乖離（本人 − 他者）
+  trigger            String // SITE（現場ごとの評価の連続）/ INTERVIEW（面談）
+  interviewId        String?
+  interview          Interview? @relation(fields: [interviewId], references: [id], onDelete: SetNull)
+  evidence           Json? // 検知に使った評価（日付・本人・他者）
+  detectedAt         DateTime   @default(now())
+  dueDate            DateTime   @db.Date
+  status             String     @default("OPEN") // shared/evaluation.ts COACHING_STATUS
   // 指導の記録
-  coachedAt       DateTime?
-  coachUserId     String?
-  coachName       String?
-  method          String? // shared/evaluation.ts COACHING_METHODS
-  content         String? // 指導内容（本人に表示する）
-  followUpDate    DateTime?  @db.Date
+  coachedAt          DateTime?
+  coachUserId        String?
+  coachName          String?
+  method             String? // shared/evaluation.ts COACHING_METHODS
+  content            String? // 指導内容（本人に表示する）
+  followUpDate       DateTime?  @db.Date
   // 本人の受け止め
-  acknowledgedAt  DateTime?
-  guardCommitment String? // 本人の目標・取り組み
-  dismissReason   String?
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  acknowledgedAt     DateTime?
+  guardCommitment    String? // 本人の目標・取り組み
+  dismissReason      String?
+  // 指導後の変化（システムの判定。shared/evaluation.ts computeCoachingOutcome）
+  outcomeVerdict     String? // OUTCOME_VERDICT のキー
+  outcomeImprovement Float? // 改善度
+  outcomeWillingness Int? // 改善意欲（0〜100）
+  outcomeDetail      Json?
+  outcomeComputedAt  DateTime?
+  // 上司の確定（最終判断は人が行う）
+  confirmedVerdict   String?
+  confirmedNote      String?
+  confirmedByUserId  String?
+  confirmedByName    String?
+  confirmedAt        DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
 
   @@index([companyId, status])
   @@index([companyId, guardId])

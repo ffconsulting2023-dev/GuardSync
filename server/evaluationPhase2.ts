@@ -3,11 +3,11 @@ import type express from 'express'
 import type { PrismaClient } from '@prisma/client'
 import { z } from 'zod'
 import {
-  evaluationInputSchema, summarizeEvaluations, coachingInputSchema,
+  evaluationInputSchema, summarizeEvaluations, coachingInputSchema, CONFIRMABLE_VERDICTS,
   INTERVIEW_TEXT_MAX, INTERVIEW_DEFAULT_PERIOD_MONTHS, COACHING_FOLLOW_UP_DAYS, NOTE_MAX,
   type EvaluationLike,
 } from '../shared/evaluation'
-import { detectSiteCoaching, detectInterviewCoaching, todayJst, addDays, ymd } from './coaching'
+import { detectSiteCoaching, detectInterviewCoaching, refreshOutcomes, growthScores, loadRaterOffsets, todayJst, addDays, ymd } from './coaching'
 
 interface JwtPayload { userId: string; companyId: string; role: string; isSuperAdmin: boolean }
 type Mw = express.RequestHandler
@@ -273,6 +273,9 @@ export function registerEvaluationPhase2Routes(app: express.Express, d: Phase2De
   app.get('/api/coaching-tasks', authenticate, supervisorOnly, on, async (req, res) => {
     const { companyId } = userOf(req)
     const status = typeof req.query.status === 'string' ? req.query.status : undefined
+    // 指導済みのタスクは、表示の前に指導後の変化を計算し直す（確認日の経過などで判定が変わるため）
+    const coachedGuards = await prisma.coachingTask.findMany({ where: { companyId, status: 'COACHED' }, select: { guardId: true }, distinct: ['guardId'] })
+    for (const g of coachedGuards) await refreshOutcomes(prisma, companyId, g.guardId)
     const tasks = await prisma.coachingTask.findMany({
       where: { companyId, ...(status ? { status } : {}), ...(typeof req.query.guardId === 'string' ? { guardId: req.query.guardId } : {}) },
       include: { guard: { select: { id: true, name: true, employeeNumber: true } } },
@@ -286,12 +289,13 @@ export function registerEvaluationPhase2Routes(app: express.Express, d: Phase2De
   app.get('/api/evaluations/counts', authenticate, supervisorOnly, on, async (req, res) => {
     const { companyId, role, isSuperAdmin } = userOf(req)
     const today = todayJst()
-    const [openTasks, overdueTasks, upcomingInterviews] = await Promise.all([
+    const [openTasks, overdueTasks, upcomingInterviews, toConfirm] = await Promise.all([
       prisma.coachingTask.count({ where: { companyId, status: 'OPEN' } }),
       prisma.coachingTask.count({ where: { companyId, status: 'OPEN', dueDate: { lt: today } } }),
       role === 'ADMIN' || isSuperAdmin ? prisma.interview.count({ where: { companyId, status: 'SCHEDULED', scheduledDate: { lte: addDays(today, 7) } } }) : Promise.resolve(0),
+      prisma.coachingTask.count({ where: { companyId, status: 'COACHED', outcomeVerdict: { in: CONFIRMABLE_VERDICTS } } }),
     ])
-    res.json({ openTasks, overdueTasks, upcomingInterviews })
+    res.json({ openTasks, overdueTasks, upcomingInterviews, toConfirm })
   })
 
   app.put('/api/coaching-tasks/:id/coach', authenticate, supervisorOnly, on, async (req, res) => {
@@ -307,7 +311,7 @@ export function registerEvaluationPhase2Routes(app: express.Express, d: Phase2De
     res.json(await prisma.coachingTask.update({
       where: { id: task.id },
       data: { status: 'COACHED', coachedAt, coachUserId: user.userId, coachName: await userName(user.userId), method: parsed.data.method, content: parsed.data.content, followUpDate: followUp },
-    }))
+    }).then(async t => { await refreshOutcomes(prisma, user.companyId, t.guardId); return prisma.coachingTask.findUniqueOrThrow({ where: { id: t.id } }) }))
   })
 
   app.put('/api/coaching-tasks/:id/dismiss', authenticate, supervisorOnly, on, async (req, res) => {
@@ -318,6 +322,52 @@ export function registerEvaluationPhase2Routes(app: express.Express, d: Phase2De
     if (!task) { res.status(404).json({ error: '指導タスクが見つかりません' }); return }
     if (task.status !== 'OPEN') { res.status(409).json({ error: '未指導のタスクのみ対応不要にできます' }); return }
     res.json(await prisma.coachingTask.update({ where: { id: task.id }, data: { status: 'DISMISSED', dismissReason: reason.data, coachUserId: user.userId, coachName: await userName(user.userId) } }))
+  })
+
+  // 指導後の変化の判定を上司が確定する（システムの判定は提案。最終判断は人が行う）
+  const confirmSchema = z.object({ verdict: z.enum(CONFIRMABLE_VERDICTS as [string, ...string[]]), note: z.string().max(NOTE_MAX).optional().nullable() })
+  app.put('/api/coaching-tasks/:id/confirm', authenticate, supervisorOnly, on, async (req, res) => {
+    const user = userOf(req)
+    const parsed = confirmSchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: '判定が不正です' }); return }
+    const task = await prisma.coachingTask.findFirst({ where: { id: req.params.id, companyId: user.companyId } })
+    if (!task) { res.status(404).json({ error: '指導タスクが見つかりません' }); return }
+    if (task.status !== 'COACHED') { res.status(409).json({ error: '指導済みのタスクのみ確定できます' }); return }
+    await refreshOutcomes(prisma, user.companyId, task.guardId)
+    res.json(await prisma.coachingTask.update({
+      where: { id: task.id },
+      data: { status: 'CLOSED', confirmedVerdict: parsed.data.verdict, confirmedNote: parsed.data.note?.trim() || null, confirmedByUserId: user.userId, confirmedByName: await userName(user.userId), confirmedAt: new Date() },
+    }))
+  })
+
+  // 成長スコアの一覧（在籍中の隊員。30日前との比較つき）
+  app.get('/api/evaluations/growth', authenticate, supervisorOnly, on, async (req, res) => {
+    const { companyId } = userOf(req)
+    const guards = await prisma.guard.findMany({ where: { companyId, isActive: true }, select: { id: true, name: true, employeeNumber: true }, orderBy: { employeeNumber: 'asc' } })
+    const ids = guards.map(g => g.id)
+    const offsets = await loadRaterOffsets(prisma, companyId)
+    const [now, before, open] = await Promise.all([
+      growthScores(prisma, companyId, ids, todayJst(), offsets),
+      growthScores(prisma, companyId, ids, addDays(todayJst(), -30), offsets),
+      prisma.coachingTask.groupBy({ by: ['guardId'], where: { companyId, status: { in: ['OPEN', 'COACHED'] } }, _count: true }),
+    ])
+    res.json(guards.map(g => ({
+      ...g, ...now.get(g.id)!, previous: before.get(g.id)?.score ?? null,
+      activeTasks: open.find(o => o.guardId === g.id)?._count ?? 0,
+    })))
+  })
+
+  // ─── 隊員アプリ：自分の成長スコア（内訳の点数・他者の評価は返さない） ───
+  app.get('/api/guard-app/my-score', authenticate, on, async (req, res) => {
+    const user = userOf(req)
+    const linked = await linkedGuardForUser(user)
+    if (!linked) { res.json(null); return }
+    const offsets = await loadRaterOffsets(prisma, user.companyId)
+    const [now, before] = await Promise.all([
+      growthScores(prisma, user.companyId, [linked.id], todayJst(), offsets),
+      growthScores(prisma, user.companyId, [linked.id], addDays(todayJst(), -30), offsets),
+    ])
+    res.json({ score: now.get(linked.id)?.score ?? null, previous: before.get(linked.id)?.score ?? null })
   })
 
   // ─── 隊員アプリ：上司からの指導と本人の受け止め ───
@@ -341,7 +391,9 @@ export function registerEvaluationPhase2Routes(app: express.Express, d: Phase2De
     const linked = await linkedGuardForUser(user)
     if (!task || linked?.id !== task.guardId) { res.status(404).json({ error: '指導が見つかりません' }); return }
     if (task.status !== 'COACHED') { res.status(409).json({ error: '指導の記録後に入力できます' }); return }
-    res.json(await prisma.coachingTask.update({ where: { id: task.id }, data: { acknowledgedAt: new Date(), guardCommitment: c.data }, select: { id: true, acknowledgedAt: true, guardCommitment: true } }))
+    const saved = await prisma.coachingTask.update({ where: { id: task.id }, data: { acknowledgedAt: new Date(), guardCommitment: c.data }, select: { id: true, acknowledgedAt: true, guardCommitment: true } })
+    await refreshOutcomes(prisma, user.companyId, task.guardId)
+    res.json(saved)
   })
 
 }
