@@ -5,7 +5,8 @@ import { format, addDays } from 'date-fns'
 import { api } from '../../lib/api'
 import {
   COACHING_STATUS, COACHING_METHODS, COACHING_GUIDE, COACHING_FOLLOW_UP_DAYS, DIRECTION_LABEL, DIRECTION_SHORT, NOTE_MAX,
-  criterionLabel, coachingTemplate, type CoachingStatus, type GapDirection,
+  OUTCOME_VERDICT, CONFIRMABLE_VERDICTS, OUTCOME_IMPROVED_MIN, OUTCOME_WILL_HIGH, OUTCOME_WILL_LOW,
+  criterionLabel, coachingTemplate, type CoachingStatus, type GapDirection, type OutcomeVerdict, type OutcomeResult,
 } from '../../../shared/evaluation'
 
 export interface CoachingTask {
@@ -13,6 +14,8 @@ export interface CoachingTask {
   evidence: { date: string; self: number; others: number }[] | null; detectedAt: string; dueDate: string; status: CoachingStatus
   coachedAt: string | null; coachName: string | null; method: string | null; content: string | null; followUpDate: string | null
   acknowledgedAt: string | null; guardCommitment: string | null; dismissReason: string | null
+  outcomeVerdict: OutcomeVerdict | null; outcomeImprovement: number | null; outcomeWillingness: number | null; outcomeDetail: OutcomeResult['detail'] | null
+  confirmedVerdict: OutcomeVerdict | null; confirmedNote: string | null; confirmedByName: string | null; confirmedAt: string | null
   guard?: { id: string; name: string; employeeNumber: string }
 }
 
@@ -29,7 +32,7 @@ export default function CoachingTab() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        {(['OPEN', 'COACHED', 'DISMISSED', ''] as const).map(s => (
+        {(['OPEN', 'COACHED', 'CLOSED', 'DISMISSED', ''] as const).map(s => (
           <button key={s} onClick={() => setStatus(s)} className={`text-xs px-3 py-1.5 rounded-full border ${status === s ? 'bg-[#1e3a5f] text-white border-[#1e3a5f]' : 'bg-white text-gray-600 border-gray-200'}`}>
             {s ? COACHING_STATUS[s] : 'すべて'}
           </button>
@@ -66,7 +69,7 @@ export function CoachingCard({ task: t, showGuard }: { task: CoachingTask; showG
           {DIRECTION_SHORT[t.direction]}（{t.gap > 0 ? '+' : ''}{t.gap}）
         </span>
         <span className="text-[11px] text-gray-400">{t.trigger === 'INTERVIEW' ? '面談で検知' : '現場の評価で検知'} {t.detectedAt.slice(0, 10)}</span>
-        <span className={`text-[11px] ml-auto px-1.5 py-0.5 rounded ${t.status === 'OPEN' ? (overdue ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700') : t.status === 'COACHED' ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-400'}`}>
+        <span className={`text-[11px] ml-auto px-1.5 py-0.5 rounded ${t.status === 'OPEN' ? (overdue ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700') : t.status === 'COACHED' || t.status === 'CLOSED' ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-400'}`}>
           {COACHING_STATUS[t.status]}{t.status === 'OPEN' && `・期限 ${t.dueDate.slice(0, 10)}${overdue ? '（超過）' : ''}`}
         </span>
       </div>
@@ -76,7 +79,7 @@ export function CoachingCard({ task: t, showGuard }: { task: CoachingTask; showG
           {t.evidence.map((e, i) => <span key={i} className="px-1.5 rounded bg-gray-50">{e.date.slice(5)} {e.self}／{e.others}</span>)}
         </div>
       )}
-      {t.status === 'COACHED' && (
+      {(t.status === 'COACHED' || t.status === 'CLOSED') && (
         <div className="text-sm bg-gray-50 rounded-lg p-2 space-y-1">
           <p className="text-xs text-gray-500">{t.coachedAt?.slice(0, 10)} {t.coachName}（{t.method}）・変化の確認日 {t.followUpDate?.slice(0, 10)}</p>
           <p className="whitespace-pre-wrap text-gray-800">{t.content}</p>
@@ -85,6 +88,7 @@ export function CoachingCard({ task: t, showGuard }: { task: CoachingTask; showG
             : <p className="text-xs text-amber-700">本人はまだ確認していません（隊員アプリに表示されています）</p>}
         </div>
       )}
+      {(t.status === 'COACHED' || t.status === 'CLOSED') && t.outcomeVerdict && <OutcomeBox task={t} onDone={done} />}
       {t.status === 'DISMISSED' && <p className="text-xs text-gray-500">対応不要: {t.dismissReason}（{t.coachName}）</p>}
       {t.status === 'OPEN' && !mode && (
         <div className="flex gap-2">
@@ -118,6 +122,70 @@ export function CoachingCard({ task: t, showGuard }: { task: CoachingTask; showG
             <button type="button" disabled={!reason.trim() || dismiss.isPending} onClick={() => dismiss.mutate()} className="btn-primary text-sm disabled:opacity-50">対応不要にする</button>
           </div>
         </div>
+      )}
+    </div>
+  )
+}
+
+export const VERDICT_STYLE: Record<OutcomeVerdict, string> = {
+  IMPROVED: 'bg-green-100 text-green-800',
+  CONTINUE: 'bg-sky-100 text-sky-800',
+  NO_WILL: 'bg-red-100 text-red-700',
+  INSUFFICIENT: 'bg-gray-100 text-gray-500',
+}
+
+// 指導後の変化（システムの判定）と、上司による確定
+function OutcomeBox({ task: t, onDone }: { task: CoachingTask; onDone: () => void }) {
+  const suggested = t.outcomeVerdict && CONFIRMABLE_VERDICTS.includes(t.outcomeVerdict) ? t.outcomeVerdict : 'CONTINUE'
+  const [verdict, setVerdict] = useState<OutcomeVerdict>(suggested)
+  const [note, setNote] = useState('')
+  const [open, setOpen] = useState(false)
+  const confirm = useMutation({ mutationFn: () => api.put(`/coaching-tasks/${t.id}/confirm`, { verdict, note: note.trim() || null }), onSuccess: onDone })
+  const d = t.outcomeDetail
+  const fmt = (v: number | null | undefined) => (v == null ? '—' : v)
+  return (
+    <div className="border border-gray-200 rounded-lg p-2 space-y-2 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-gray-500">指導後の変化</span>
+        <span className={`text-xs px-2 py-0.5 rounded ${VERDICT_STYLE[t.outcomeVerdict!]}`} title="システムの判定（提案）">{OUTCOME_VERDICT[t.outcomeVerdict!]}</span>
+        <span className="text-xs text-gray-600">改善度 <b>{t.outcomeImprovement == null ? '—' : `${t.outcomeImprovement > 0 ? '+' : ''}${t.outcomeImprovement}`}</b></span>
+        <span className="text-xs text-gray-600">改善意欲 <b>{t.outcomeWillingness ?? '—'}</b>/100</span>
+        {t.status === 'CLOSED' && t.confirmedVerdict && (
+          <span className={`text-xs px-2 py-0.5 rounded ml-auto ${VERDICT_STYLE[t.confirmedVerdict]}`}>確定: {OUTCOME_VERDICT[t.confirmedVerdict]}（{t.confirmedByName} {t.confirmedAt?.slice(0, 10)}）</span>
+        )}
+      </div>
+      {d && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-[11px] text-gray-600">
+          <span>他者の評価 {fmt(d.preOthers)} → <b>{fmt(d.postOthers)}</b></span>
+          <span>乖離 {fmt(d.preGap)} → <b>{fmt(d.postGap)}</b></span>
+          <span>現場 指導前{d.preCount}回／後{d.postCount}回</span>
+          <span>意欲の内訳: 確認{d.ackPoints}・振り返り{d.reflectionPoints}・自己認識{d.awarenessPoints}</span>
+        </div>
+      )}
+      {t.status === 'CLOSED' && t.confirmedNote && <p className="text-xs text-gray-600">メモ: {t.confirmedNote}</p>}
+      {t.status === 'COACHED' && (
+        !open ? (
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setOpen(true)} className="btn-secondary text-xs">結果を確定する</button>
+            {t.outcomeVerdict === 'INSUFFICIENT' && <span className="text-[11px] text-gray-400">指導後の評価がまだ足りません（変化の確認日を過ぎるか、指導後の現場が2回以上で判定します）</span>}
+          </div>
+        ) : (
+          <div className="space-y-2 border-t border-gray-100 pt-2">
+            <p className="text-[11px] text-gray-500">判定の目安: 改善度 {OUTCOME_IMPROVED_MIN} 以上かつ改善意欲 {OUTCOME_WILL_HIGH} 以上で「改善」、改善度 0 以下かつ改善意欲 {OUTCOME_WILL_LOW} 未満で「改善が見られない」。最終判断は上司が行ってください。</p>
+            <div className="flex flex-wrap gap-1">
+              {CONFIRMABLE_VERDICTS.map(v => (
+                <button key={v} type="button" aria-pressed={verdict === v} onClick={() => setVerdict(v)}
+                  className={`text-xs px-2 py-1 rounded border ${verdict === v ? VERDICT_STYLE[v] + ' border-transparent font-medium' : 'bg-white text-gray-600 border-gray-200'}`}>{OUTCOME_VERDICT[v]}</button>
+              ))}
+            </div>
+            <input value={note} onChange={e => setNote(e.target.value)} maxLength={NOTE_MAX} className="form-input text-sm" placeholder="メモ（任意。判定を変えた理由など）" />
+            {confirm.isError && <p className="text-sm text-red-600">{errorOf(confirm.error, '確定できませんでした')}</p>}
+            <div className="flex gap-2 justify-end">
+              <button type="button" onClick={() => setOpen(false)} className="btn-secondary text-sm">キャンセル</button>
+              <button type="button" disabled={confirm.isPending} onClick={() => confirm.mutate()} className="btn-primary text-sm disabled:opacity-50">確定</button>
+            </div>
+          </div>
+        )
       )}
     </div>
   )

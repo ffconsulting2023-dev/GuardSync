@@ -10,6 +10,7 @@ import { useEvaluationEnabled } from '../hooks/useEvaluation'
 import { ScaleButtons, criteriaFor, type Scores } from '../components/evaluation/EvaluationInputs'
 import CoachingTab, { CoachingCard, type CoachingTask } from '../components/evaluation/CoachingTab'
 import InterviewsTab from '../components/evaluation/InterviewsTab'
+import GrowthTab, { ScoreBar, GROWTH_EXPLANATION } from '../components/evaluation/GrowthTab'
 import {
   EVAL_CRITERIA, RATER_LABEL, NOTE_TAGS, INTERVIEW_STATUS, type InterviewStatus, NOTE_MAX, COMMENT_MAX, GAP_THRESHOLD, scaleLabel, criterionLabel, gapLabel,
   type CriterionKey, type CriterionSummary, type RaterType,
@@ -29,7 +30,7 @@ export default function EvaluationsPage() {
   const enabled = useEvaluationEnabled()
   const { user } = useAuth()
   const isAdmin = hasRole(user, 'ADMIN')
-  const { data: counts } = useQuery<{ openTasks: number; overdueTasks: number; upcomingInterviews: number }>({
+  const { data: counts } = useQuery<{ openTasks: number; overdueTasks: number; upcomingInterviews: number; toConfirm: number }>({
     queryKey: ['evaluation-counts'],
     queryFn: () => api.get('/evaluations/counts').then(r => r.data),
     enabled,
@@ -50,8 +51,9 @@ export default function EvaluationsPage() {
       <div className="flex gap-1 border-b border-gray-200">
         {[
           { k: 'pending', l: '現場ごとの評価' },
-          { k: 'coaching', l: '指導', badge: counts?.openTasks, warn: !!counts?.overdueTasks },
+          { k: 'coaching', l: '指導', badge: (counts?.openTasks ?? 0) + (counts?.toConfirm ?? 0), warn: !!counts?.overdueTasks },
           ...(isAdmin ? [{ k: 'interviews', l: '定期面談', badge: counts?.upcomingInterviews }] : []),
+          { k: 'growth', l: '成長スコア' },
           { k: 'guard', l: '隊員別' },
         ].map(t => (
           <button key={t.k} onClick={() => setTab(t.k)} className={`px-4 py-2 text-sm -mb-px border-b-2 whitespace-nowrap ${tab === t.k ? 'border-[#1e3a5f] text-[#1e3a5f] font-medium' : 'border-transparent text-gray-500'}`}>
@@ -62,6 +64,7 @@ export default function EvaluationsPage() {
       {tab === 'pending' && <PendingTab />}
       {tab === 'coaching' && <CoachingTab />}
       {tab === 'interviews' && isAdmin && <InterviewsTab />}
+      {tab === 'growth' && <GrowthTab />}
       {tab === 'guard' && <GuardTab guardId={params.get('guard') ?? ''} onSelect={id => setParams(id ? { guard: id } : { tab: 'guard' })} />}
     </div>
   )
@@ -172,7 +175,7 @@ function PendingRow({ report: r, onNote }: { report: PendingReport; onNote: () =
 // ─── 隊員別 ───
 function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: string) => void }) {
   const { data: guards = [] } = useQuery<any[]>({ queryKey: ['guards-active'], queryFn: () => api.get('/guards?isActive=true').then(r => r.data) })
-  const { data, isLoading, error } = useQuery<{ summary: CriterionSummary[]; repeatWish: { yes: number; total: number }; evaluations: (Ev & { evalDate: string; siteName: string | null })[]; from: string; to: string; coachingTasks: CoachingTask[]; interviews: { id: string; scheduledDate: string; status: string; goal: string | null }[] }>({
+  const { data, isLoading, error } = useQuery<{ summary: CriterionSummary[]; repeatWish: { yes: number; total: number }; evaluations: (Ev & { evalDate: string; siteName: string | null })[]; from: string; to: string; coachingTasks: CoachingTask[]; growth: (import('../../shared/evaluation').GrowthResult & { evaluationCount: number }) | null; interviews: { id: string; scheduledDate: string; status: string; goal: string | null }[] }>({
     queryKey: ['guard-evaluations', guardId],
     queryFn: () => api.get(`/guards/${guardId}/evaluations`).then(r => r.data),
     enabled: !!guardId,
@@ -193,6 +196,17 @@ function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: strin
       {data && (
         <>
           <p className="text-xs text-gray-500">{data.from} 〜 {data.to} の評価（{data.evaluations.length}件）。点数は 良い=5・普通=3・要改善=1 の平均です。</p>
+          {data.growth && (
+            <div className="card flex flex-wrap items-center gap-x-6 gap-y-2">
+              <div><p className="text-xs text-gray-500">成長スコア</p><p className="text-3xl font-bold text-[#1e3a5f]">{data.growth.score ?? '—'}</p></div>
+              <div className="text-xs space-y-1">
+                <p className="flex items-center gap-2"><span className="w-16 text-gray-500">評価</span><ScoreBar value={data.growth.parts.evaluation} /></p>
+                <p className="flex items-center gap-2"><span className="w-16 text-gray-500">自己認識</span><ScoreBar value={data.growth.parts.awareness} /></p>
+                <p className="flex items-center gap-2"><span className="w-16 text-gray-500">指導の結果</span><ScoreBar value={data.growth.parts.coaching} /></p>
+              </div>
+              <p className="text-[11px] text-gray-400 flex-1 min-w-[16rem]">{GROWTH_EXPLANATION}</p>
+            </div>
+          )}
           <div className="grid lg:grid-cols-2 gap-4">
             <div className="card">
               <h3 className="font-semibold text-gray-800 mb-2">本人と他者の比較</h3>
@@ -227,9 +241,11 @@ function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: strin
                     const flagged = s.gap != null && Math.abs(s.gap) >= GAP_THRESHOLD
                     return (
                       <tr key={s.key} className={flagged ? 'bg-amber-50' : ''}>
-                        <td className="px-3 py-2">{criterionLabel(s.key)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{criterionLabel(s.key)}</td>
                         {raters.map(r => <td key={r} className="px-3 py-2 text-right whitespace-nowrap">{s.byRater[r] ? <>{s.byRater[r]!.avg}<span className="text-[10px] text-gray-400">（{s.byRater[r]!.count}）</span></> : <span className="text-gray-300">—</span>}</td>)}
-                        <td className="px-3 py-2 text-right font-medium">{s.others ?? '—'}</td>
+                        <td className="px-3 py-2 text-right font-medium" title={s.othersRaw != null && s.othersRaw !== s.others ? `補正前 ${s.othersRaw}` : undefined}>
+                          {s.others ?? '—'}{s.othersRaw != null && s.othersRaw !== s.others && <span className="block text-[10px] font-normal text-gray-400">補正前 {s.othersRaw}</span>}
+                        </td>
                         <td className={`px-3 py-2 text-right ${flagged ? 'text-amber-700 font-bold' : 'text-gray-500'}`} title={gapLabel(s.gap)}>
                           {s.gap == null ? '—' : `${s.gap > 0 ? '+' : ''}${s.gap}`}
                         </td>
@@ -239,7 +255,7 @@ function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: strin
                 </tbody>
               </table>
               <div className="px-3 py-2 text-[11px] text-gray-500 space-y-0.5">
-                <p>乖離 = 本人 − 他者平均。±{GAP_THRESHOLD} 以上を黄色で表示します（＋は本人の評価が高い＝過大評価、−は低い＝過小評価）。</p>
+                <p>他者平均は、評価者ごとの甘い・辛いを補正した値です（同じ評価者が10件以上付けている場合）。乖離 = 本人 − 他者平均。±{GAP_THRESHOLD} 以上を黄色で表示します（＋は本人の評価が高い＝過大評価、−は低い＝過小評価）。</p>
                 {data.repeatWish.total > 0 && <p>依頼先の「また来てほしい」: {data.repeatWish.yes} / {data.repeatWish.total} 件</p>}
               </div>
             </div>

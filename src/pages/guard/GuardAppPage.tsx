@@ -104,6 +104,12 @@ export default function GuardAppPage() {
     staleTime: 0, // 今日タブを開くたびに最新にする（面談の予定・指導は管理者側で追加されるため）
     enabled: evaluationEnabled && tab === 'today',
   })
+  const { data: myScore } = useQuery<{ score: number | null; previous: number | null } | null>({
+    queryKey: ['my-score', user?.id],
+    queryFn: () => api.get('/guard-app/my-score').then(r => r.data),
+    enabled: evaluationEnabled && tab === 'today',
+    staleTime: 0,
+  })
   const hasEval = (reportId: string, raterType: string) => !!myEvals?.evaluations.some(e => e.securityReportId === reportId && e.raterType === raterType)
   const nextEvalStep = () => {
     qc.invalidateQueries({ queryKey: ['my-evaluations'] })
@@ -225,6 +231,21 @@ export default function GuardAppPage() {
                 <button onClick={() => setAckSheet(c)} className="btn-primary text-sm w-full mt-2">確認して取り組みを入力</button>
               </div>
             ))}
+            {evaluationEnabled && myScore?.score != null && (
+              <div className="card py-3 flex items-center gap-4">
+                <div className="w-14 h-14 shrink-0 rounded-full bg-[#1e3a5f] text-white flex items-center justify-center text-xl font-bold">{myScore.score}</div>
+                <div>
+                  <p className="text-sm font-bold text-gray-800">あなたの成長スコア</p>
+                  {myScore.previous != null && (
+                    <p className={`text-xs ${myScore.score > myScore.previous ? 'text-green-700' : myScore.score < myScore.previous ? 'text-amber-700' : 'text-gray-500'}`}>
+                      30日前から {myScore.score - myScore.previous > 0 ? '+' : ''}{myScore.score - myScore.previous}
+                      {myScore.score > myScore.previous ? '　この調子です！' : ''}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-gray-400">上司・依頼先・同僚の評価と、振り返り・指導への取り組みから計算しています</p>
+                </div>
+              </div>
+            )}
             {evaluationEnabled && (() => {
               const goal = myInterviews.find(i => i.status === 'COMPLETED' && i.goal)
               return goal ? <div className="card py-2"><p className="text-xs text-gray-500">今期の目標（{goal.scheduledDate.slice(0, 10)} の面談）</p><p className="text-sm text-gray-800">{goal.goal}</p></div> : null

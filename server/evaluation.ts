@@ -7,7 +7,7 @@ import {
   type RaterType, type EvaluationLike,
 } from '../shared/evaluation'
 import { registerEvaluationPhase2Routes } from './evaluationPhase2'
-import { detectSiteCoaching } from './coaching'
+import { detectSiteCoaching, loadRaterOffsets, growthScores, refreshOutcomes } from './coaching'
 
 interface JwtPayload { userId: string; companyId: string; role: string; isSuperAdmin: boolean }
 type Mw = express.RequestHandler
@@ -180,22 +180,26 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
     const to = day(req.query.to, daysAgo(-1))
     const evaluations = await prisma.evaluation.findMany({
       where: { companyId, guardId: guard.id, interviewId: null, evalDate: { gte: from, lte: to } },
-      select: { id: true, evalDate: true, raterType: true, raterName: true, raterTitle: true, scores: true, comment: true, repeatWish: true, siteId: true, securityReportId: true },
+      select: { id: true, evalDate: true, raterType: true, raterKey: true, raterName: true, raterTitle: true, scores: true, comment: true, repeatWish: true, siteId: true, securityReportId: true },
       orderBy: [{ evalDate: 'desc' }, { createdAt: 'desc' }],
     })
     const siteIds = [...new Set(evaluations.map(e => e.siteId).filter((x): x is string => !!x))]
     const sites = await prisma.site.findMany({ where: { id: { in: siteIds }, companyId }, select: { id: true, name: true } })
     const siteName = new Map(sites.map(s => [s.id, s.name]))
     const client = evaluations.filter(e => e.raterType === 'CLIENT' && e.repeatWish != null)
+    await refreshOutcomes(prisma, companyId, guard.id)
+    const offsets = await loadRaterOffsets(prisma, companyId)
+    const growth = (await growthScores(prisma, companyId, [guard.id], undefined, offsets)).get(guard.id)
     const [coachingTasks, interviews] = await Promise.all([
       prisma.coachingTask.findMany({ where: { companyId, guardId: guard.id }, orderBy: { detectedAt: 'desc' }, take: 50 }),
       prisma.interview.findMany({ where: { companyId, guardId: guard.id }, select: { id: true, scheduledDate: true, status: true, goal: true }, orderBy: { scheduledDate: 'desc' }, take: 20 }),
     ])
     res.json({
-      guard, coachingTasks, interviews, from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10),
-      summary: summarizeEvaluations(evaluations as unknown as EvaluationLike[]),
+      guard, coachingTasks, interviews, growth, from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10),
+      // 他者の点数は評価者の甘い・辛いを補正した値（othersRaw が補正前）
+      summary: summarizeEvaluations(evaluations as unknown as EvaluationLike[], offsets),
       repeatWish: { yes: client.filter(e => e.repeatWish).length, total: client.length },
-      evaluations: evaluations.map(e => ({ ...e, siteName: e.siteId ? siteName.get(e.siteId) ?? null : null })),
+      evaluations: evaluations.map(({ raterKey: _k, ...e }) => ({ ...e, siteName: e.siteId ? siteName.get(e.siteId) ?? null : null })),
     })
   })
 
