@@ -90,6 +90,8 @@ model Company {
   recruitmentChannels   RecruitmentChannel[]
   evaluations           Evaluation[]
   confidentialNotes     ConfidentialNote[]
+  interviews            Interview[]
+  coachingTasks         CoachingTask[]
 }
 
 // 採用経路の媒体マスタ（会社ごと。既定値は shared/recruitment.ts DEFAULT_RECRUITMENT_CHANNELS）
@@ -375,6 +377,8 @@ model Guard {
   // 評価・申し送り（shared/evaluation.ts）
   evaluations       Evaluation[]
   confidentialNotes ConfidentialNote[]
+  interviews        Interview[]
+  coachingTasks     CoachingTask[]
 
   @@unique([companyId, employeeNumber])
   @@index([companyId])
@@ -1647,7 +1651,8 @@ enum EvaluationRaterType {
   MANAGEMENT // 経営者面談（第2段階）
 }
 
-// 1件 = ある評価者がある現場完了（警備報告書）について付けた評価
+// 1件 = ある評価者が、ある現場完了（警備報告書）または定期面談について付けた評価
+// 同僚評価は評価した隊員の報告書に紐付け、guardId は評価された隊員
 model Evaluation {
   id               String              @id @default(uuid())
   companyId        String
@@ -1656,10 +1661,12 @@ model Evaluation {
   guard            Guard               @relation(fields: [guardId], references: [id], onDelete: Cascade)
   securityReportId String?
   securityReport   SecurityReport?     @relation(fields: [securityReportId], references: [id], onDelete: SetNull)
+  interviewId      String?
+  interview        Interview?          @relation(fields: [interviewId], references: [id], onDelete: Cascade)
   siteId           String?
   evalDate         DateTime            @db.Date
   raterType        EvaluationRaterType
-  raterKey         String // 同じ評価者の重複防止用（本人・依頼先は固定値、上司はユーザーID）
+  raterKey         String // 同じ評価者の重複防止用（本人・依頼先は固定値、上司・経営者はユーザーID、同僚は「評価した隊員ID:評価された隊員ID」）
   raterUserId      String?
   raterName        String
   raterTitle       String?
@@ -1670,6 +1677,7 @@ model Evaluation {
   updatedAt        DateTime            @updatedAt
 
   @@unique([securityReportId, raterType, raterKey])
+  @@unique([interviewId, raterType, raterKey])
   @@index([companyId, guardId, evalDate])
 }
 
@@ -1702,5 +1710,65 @@ model ConfidentialNoteAccessLog {
   action    String // VIEW / CREATE / DELETE
   createdAt DateTime @default(now())
 
+  @@index([companyId, guardId])
+}
+
+// 経営者との定期面談（本人は事前に自己評価、経営者は面談時に5段階で評価）
+model Interview {
+  id                String         @id @default(uuid())
+  companyId         String
+  company           Company        @relation(fields: [companyId], references: [id])
+  guardId           String
+  guard             Guard          @relation(fields: [guardId], references: [id], onDelete: Cascade)
+  scheduledDate     DateTime       @db.Date
+  periodFrom        DateTime       @db.Date // 振り返りの対象期間
+  periodTo          DateTime       @db.Date
+  interviewerUserId String
+  interviewerName   String
+  status            String         @default("SCHEDULED") // shared/evaluation.ts INTERVIEW_STATUS
+  guardWish         String? // 本人：今後の希望（事前入力）
+  goal              String? // 次の期間の目標（本人にも表示）
+  managementComment String? // 経営者の所見（本人には表示しない）
+  completedAt       DateTime?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  evaluations       Evaluation[]
+  coachingTasks     CoachingTask[]
+
+  @@index([companyId, guardId])
+}
+
+// 指導タスク：本人と他者の評価の乖離が続いたとき（または面談で乖離があったとき）に自動作成
+model CoachingTask {
+  id              String     @id @default(uuid())
+  companyId       String
+  company         Company    @relation(fields: [companyId], references: [id])
+  guardId         String
+  guard           Guard      @relation(fields: [guardId], references: [id], onDelete: Cascade)
+  criterionKey    String // shared/evaluation.ts EVAL_CRITERIA
+  direction       String // OVER（本人の評価が高い）/ UNDER（本人の評価が低い）
+  gap             Float // 検知時の乖離（本人 − 他者）
+  trigger         String // SITE（現場ごとの評価の連続）/ INTERVIEW（面談）
+  interviewId     String?
+  interview       Interview? @relation(fields: [interviewId], references: [id], onDelete: SetNull)
+  evidence        Json? // 検知に使った評価（日付・本人・他者）
+  detectedAt      DateTime   @default(now())
+  dueDate         DateTime   @db.Date
+  status          String     @default("OPEN") // shared/evaluation.ts COACHING_STATUS
+  // 指導の記録
+  coachedAt       DateTime?
+  coachUserId     String?
+  coachName       String?
+  method          String? // shared/evaluation.ts COACHING_METHODS
+  content         String? // 指導内容（本人に表示する）
+  followUpDate    DateTime?  @db.Date
+  // 本人の受け止め
+  acknowledgedAt  DateTime?
+  guardCommitment String? // 本人の目標・取り組み
+  dismissReason   String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([companyId, status])
   @@index([companyId, guardId])
 }

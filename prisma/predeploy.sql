@@ -13,3 +13,12 @@ BEGIN
     CREATE UNIQUE INDEX IF NOT EXISTS "User_guardId_key" ON "User"("guardId");
   END IF;
 END $$;
+
+-- 2026-11: 定期面談の評価（schema.prisma の Evaluation.interviewId と一意制約）
+DO $$
+BEGIN
+  IF to_regclass('"Evaluation"') IS NOT NULL THEN
+    ALTER TABLE "Evaluation" ADD COLUMN IF NOT EXISTS "interviewId" TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS "Evaluation_interviewId_raterType_raterKey_key" ON "Evaluation"("interviewId", "raterType", "raterKey");
+  END IF;
+END $$;

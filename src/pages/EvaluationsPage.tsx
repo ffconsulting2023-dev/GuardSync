@@ -8,8 +8,10 @@ import { useAuth } from '../hooks/useAuth'
 import { hasRole } from '../lib/auth'
 import { useEvaluationEnabled } from '../hooks/useEvaluation'
 import { ScaleButtons, criteriaFor, type Scores } from '../components/evaluation/EvaluationInputs'
+import CoachingTab, { CoachingCard, type CoachingTask } from '../components/evaluation/CoachingTab'
+import InterviewsTab from '../components/evaluation/InterviewsTab'
 import {
-  EVAL_CRITERIA, RATER_LABEL, NOTE_TAGS, NOTE_MAX, COMMENT_MAX, GAP_THRESHOLD, scaleLabel, criterionLabel, gapLabel,
+  EVAL_CRITERIA, RATER_LABEL, NOTE_TAGS, INTERVIEW_STATUS, type InterviewStatus, NOTE_MAX, COMMENT_MAX, GAP_THRESHOLD, scaleLabel, criterionLabel, gapLabel,
   type CriterionKey, type CriterionSummary, type RaterType,
 } from '../../shared/evaluation'
 
@@ -25,6 +27,13 @@ const scoreText = (s: Scores, keys: CriterionKey[]) => keys.filter(k => s[k]).ma
 
 export default function EvaluationsPage() {
   const enabled = useEvaluationEnabled()
+  const { user } = useAuth()
+  const isAdmin = hasRole(user, 'ADMIN')
+  const { data: counts } = useQuery<{ openTasks: number; overdueTasks: number; upcomingInterviews: number }>({
+    queryKey: ['evaluation-counts'],
+    queryFn: () => api.get('/evaluations/counts').then(r => r.data),
+    enabled,
+  })
   const [params, setParams] = useSearchParams()
   const tab = params.get('guard') ? 'guard' : (params.get('tab') ?? 'pending')
   const setTab = (t: string) => setParams(t === 'pending' ? {} : { tab: t })
@@ -36,14 +45,24 @@ export default function EvaluationsPage() {
     <div className="p-4 md:p-6 space-y-4">
       <div>
         <h1 className="text-xl font-bold text-gray-800">隊員評価</h1>
-        <p className="text-xs text-gray-500">現場が完了するごと（警備報告書の提出ごと）に、本人の振り返り・依頼先の評価・上司の評価を同じ6項目で集めます。</p>
+        <p className="text-xs text-gray-500">現場が完了するごと（警備報告書の提出ごと）に、本人の振り返り・依頼先・上司・同僚の評価を同じ6項目で集めます。本人と他者の評価の差が続くと、指導タスクが自動で作られます。</p>
       </div>
       <div className="flex gap-1 border-b border-gray-200">
-        {[{ k: 'pending', l: '現場ごとの評価' }, { k: 'guard', l: '隊員別' }].map(t => (
-          <button key={t.k} onClick={() => setTab(t.k)} className={`px-4 py-2 text-sm -mb-px border-b-2 ${tab === t.k ? 'border-[#1e3a5f] text-[#1e3a5f] font-medium' : 'border-transparent text-gray-500'}`}>{t.l}</button>
+        {[
+          { k: 'pending', l: '現場ごとの評価' },
+          { k: 'coaching', l: '指導', badge: counts?.openTasks, warn: !!counts?.overdueTasks },
+          ...(isAdmin ? [{ k: 'interviews', l: '定期面談', badge: counts?.upcomingInterviews }] : []),
+          { k: 'guard', l: '隊員別' },
+        ].map(t => (
+          <button key={t.k} onClick={() => setTab(t.k)} className={`px-4 py-2 text-sm -mb-px border-b-2 whitespace-nowrap ${tab === t.k ? 'border-[#1e3a5f] text-[#1e3a5f] font-medium' : 'border-transparent text-gray-500'}`}>
+            {t.l}{!!t.badge && <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full text-white ${'warn' in t && t.warn ? 'bg-red-600' : 'bg-amber-500'}`}>{t.badge}</span>}
+          </button>
         ))}
       </div>
-      {tab === 'pending' ? <PendingTab /> : <GuardTab guardId={params.get('guard') ?? ''} onSelect={id => setParams(id ? { guard: id } : { tab: 'guard' })} />}
+      {tab === 'pending' && <PendingTab />}
+      {tab === 'coaching' && <CoachingTab />}
+      {tab === 'interviews' && isAdmin && <InterviewsTab />}
+      {tab === 'guard' && <GuardTab guardId={params.get('guard') ?? ''} onSelect={id => setParams(id ? { guard: id } : { tab: 'guard' })} />}
     </div>
   )
 }
@@ -153,13 +172,13 @@ function PendingRow({ report: r, onNote }: { report: PendingReport; onNote: () =
 // ─── 隊員別 ───
 function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: string) => void }) {
   const { data: guards = [] } = useQuery<any[]>({ queryKey: ['guards-active'], queryFn: () => api.get('/guards?isActive=true').then(r => r.data) })
-  const { data, isLoading, error } = useQuery<{ summary: CriterionSummary[]; repeatWish: { yes: number; total: number }; evaluations: (Ev & { evalDate: string; siteName: string | null })[]; from: string; to: string }>({
+  const { data, isLoading, error } = useQuery<{ summary: CriterionSummary[]; repeatWish: { yes: number; total: number }; evaluations: (Ev & { evalDate: string; siteName: string | null })[]; from: string; to: string; coachingTasks: CoachingTask[]; interviews: { id: string; scheduledDate: string; status: string; goal: string | null }[] }>({
     queryKey: ['guard-evaluations', guardId],
     queryFn: () => api.get(`/guards/${guardId}/evaluations`).then(r => r.data),
     enabled: !!guardId,
   })
   const chart = (data?.summary ?? []).map(s => ({ item: criterionLabel(s.key), 本人: s.self ?? 0, 他者: s.others ?? 0 }))
-  const raters: RaterType[] = ['SELF', 'SUPERVISOR', 'CLIENT']
+  const raters: RaterType[] = ['SELF', 'SUPERVISOR', 'CLIENT', 'PEER']
 
   return (
     <div className="space-y-4">
@@ -185,7 +204,7 @@ function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: strin
                       <PolarAngleAxis dataKey="item" tick={{ fontSize: 11 }} />
                       <PolarRadiusAxis domain={[0, 5]} tickCount={6} tick={{ fontSize: 10 }} />
                       <Radar name="本人" dataKey="本人" stroke="#e67e22" fill="#e67e22" fillOpacity={0.15} />
-                      <Radar name="他者（上司・依頼先）" dataKey="他者" stroke="#1e3a5f" fill="#1e3a5f" fillOpacity={0.25} />
+                      <Radar name="他者（上司・依頼先・同僚）" dataKey="他者" stroke="#1e3a5f" fill="#1e3a5f" fillOpacity={0.25} />
                       <Legend wrapperStyle={{ fontSize: 12 }} />
                       <Tooltip />
                     </RadarChart>
@@ -242,6 +261,26 @@ function GuardTab({ guardId, onSelect }: { guardId: string; onSelect: (id: strin
             </div>
             <div className="card">
               <ConfidentialNotes guardId={guardId} />
+            </div>
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <h3 className="font-semibold text-gray-800">指導の履歴</h3>
+              {data.coachingTasks.length ? data.coachingTasks.map(t => <CoachingCard key={t.id} task={t} />) : <div className="card text-sm text-gray-400 text-center py-4">指導タスクはありません</div>}
+            </div>
+            <div className="card">
+              <h3 className="font-semibold text-gray-800 mb-2">定期面談</h3>
+              {data.interviews.length ? (
+                <div className="divide-y divide-gray-100 text-sm">
+                  {data.interviews.map(i => (
+                    <div key={i.id} className="py-2">
+                      <p className="text-xs text-gray-500">{i.scheduledDate.slice(0, 10)}・{INTERVIEW_STATUS[i.status as InterviewStatus] ?? i.status}</p>
+                      {i.goal && <p>目標: {i.goal}</p>}
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="text-sm text-gray-400">面談はまだありません</p>}
             </div>
           </div>
         </>

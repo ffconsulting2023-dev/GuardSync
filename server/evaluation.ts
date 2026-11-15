@@ -6,6 +6,8 @@ import {
   evaluationInputSchema, noteInputSchema, summarizeEvaluations, CLIENT_EVAL_WINDOW_MINUTES,
   type RaterType, type EvaluationLike,
 } from '../shared/evaluation'
+import { registerEvaluationPhase2Routes } from './evaluationPhase2'
+import { detectSiteCoaching } from './coaching'
 
 interface JwtPayload { userId: string; companyId: string; role: string; isSuperAdmin: boolean }
 type Mw = express.RequestHandler
@@ -48,6 +50,9 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
     evalDate: report.reportDate, raterType,
   })
 
+  // 同僚評価・定期面談・指導タスク
+  registerEvaluationPhase2Routes(app, { prisma, authenticate, requireRole, requireEvaluation, linkedGuardForUser, userName })
+
   // ─── 機能のオン・オフ ───
   app.get('/api/evaluations/config', authenticate, async (req, res) => {
     res.json({ enabled: await isEnabled(userOf(req).companyId) })
@@ -72,7 +77,7 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
       select: { id: true },
     })
     const evals = await prisma.evaluation.findMany({
-      where: { companyId: user.companyId, securityReportId: { in: reports.map(r => r.id) }, raterType: { in: ['SELF', 'CLIENT'] } },
+      where: { companyId: user.companyId, securityReportId: { in: reports.map(r => r.id) }, raterType: { in: ['SELF', 'CLIENT', 'PEER'] } },
       select: { securityReportId: true, raterType: true },
     })
     res.json({ guardId: linked?.id ?? null, evaluations: evals })
@@ -93,6 +98,7 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
       create: { ...evalData(report, 'SELF'), raterKey: 'self', ...data },
       update: data,
     })
+    await detectSiteCoaching(prisma, user.companyId, report.guardId)
     res.status(201).json({ id: ev.id })
   })
 
@@ -116,6 +122,7 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
         scores: parsed.data.scores, repeatWish: parsed.data.repeatWish ?? null, comment: parsed.data.comment?.trim() || null,
       },
     })
+    await detectSiteCoaching(prisma, user.companyId, report.guardId)
     res.status(201).json({ id: ev.id })
   })
 
@@ -131,14 +138,15 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
         id: true, reportDate: true, guardId: true, signedAt: true,
         guard: { select: { id: true, name: true, employeeNumber: true } },
         site: { select: { id: true, name: true } },
-        evaluations: { select: { id: true, raterType: true, raterKey: true, raterName: true, scores: true, comment: true, repeatWish: true } },
+        evaluations: { select: { id: true, guardId: true, raterType: true, raterKey: true, raterName: true, scores: true, comment: true, repeatWish: true } },
         _count: { select: { confidentialNotes: true } },
       },
       orderBy: [{ reportDate: 'desc' }, { createdAt: 'desc' }],
     })
     res.json({
       from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10),
-      reports: reports.map(r => ({
+      // 同僚評価はその隊員の報告書に紐付くが、評価対象は同僚のため、報告書の隊員への評価だけを返す
+      reports: reports.map(({ evaluations, ...r }) => ({ ...r, evaluations: evaluations.filter(e => e.guardId === r.guardId) })).map(r => ({
         ...r,
         mine: r.evaluations.find(e => e.raterType === 'SUPERVISOR' && e.raterKey === userId) ?? null,
         noteCount: r._count.confidentialNotes,
@@ -159,6 +167,7 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
       create: { ...evalData(report, 'SUPERVISOR'), raterKey: user.userId, ...data },
       update: data,
     })
+    await detectSiteCoaching(prisma, user.companyId, report.guardId)
     res.json(ev)
   })
 
@@ -170,7 +179,7 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
     const from = day(req.query.from, daysAgo(180))
     const to = day(req.query.to, daysAgo(-1))
     const evaluations = await prisma.evaluation.findMany({
-      where: { companyId, guardId: guard.id, evalDate: { gte: from, lte: to } },
+      where: { companyId, guardId: guard.id, interviewId: null, evalDate: { gte: from, lte: to } },
       select: { id: true, evalDate: true, raterType: true, raterName: true, raterTitle: true, scores: true, comment: true, repeatWish: true, siteId: true, securityReportId: true },
       orderBy: [{ evalDate: 'desc' }, { createdAt: 'desc' }],
     })
@@ -178,8 +187,12 @@ export function registerEvaluationRoutes(app: express.Express, d: Deps) {
     const sites = await prisma.site.findMany({ where: { id: { in: siteIds }, companyId }, select: { id: true, name: true } })
     const siteName = new Map(sites.map(s => [s.id, s.name]))
     const client = evaluations.filter(e => e.raterType === 'CLIENT' && e.repeatWish != null)
+    const [coachingTasks, interviews] = await Promise.all([
+      prisma.coachingTask.findMany({ where: { companyId, guardId: guard.id }, orderBy: { detectedAt: 'desc' }, take: 50 }),
+      prisma.interview.findMany({ where: { companyId, guardId: guard.id }, select: { id: true, scheduledDate: true, status: true, goal: true }, orderBy: { scheduledDate: 'desc' }, take: 20 }),
+    ])
     res.json({
-      guard, from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10),
+      guard, coachingTasks, interviews, from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10),
       summary: summarizeEvaluations(evaluations as unknown as EvaluationLike[]),
       repeatWish: { yes: client.filter(e => e.repeatWish).length, total: client.length },
       evaluations: evaluations.map(e => ({ ...e, siteName: e.siteId ? siteName.get(e.siteId) ?? null : null })),

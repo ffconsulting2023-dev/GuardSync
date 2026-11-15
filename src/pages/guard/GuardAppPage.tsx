@@ -9,7 +9,8 @@ import { useAuth } from '../../hooks/useAuth'
 import { format, addMonths, subMonths } from 'date-fns'
 import { ja } from 'date-fns/locale'
 import SignaturePad from '../../components/SignaturePad'
-import { SelfEvaluationSheet, ClientEvaluationSheet } from '../../components/evaluation/EvaluationInputs'
+import { SelfEvaluationSheet, ClientEvaluationSheet, PeerEvaluationSheet, InterviewSelfSheet, CoachingAckSheet } from '../../components/evaluation/EvaluationInputs'
+import { criterionLabel } from '../../../shared/evaluation'
 import { useEvaluationEnabled } from '../../hooks/useEvaluation'
 import ReportContentForm, { EMPTY_REPORT_CONTENT, toSubmitContent } from '../../components/report/ReportContentForm'
 import {
@@ -34,7 +35,9 @@ export default function GuardAppPage() {
   const [signDraft, setSignDraft] = useState<any>(null)            // 提出時に取得したサイン
   const [showPad, setShowPad] = useState(false)
   // 報告書の提出・サインの後に続けて表示する評価（依頼先 → 本人の順）
-  const [evalFlow, setEvalFlow] = useState<{ reportId: string; siteName?: string; guardName?: string; signerName?: string; steps: ('client' | 'self')[] } | null>(null)
+  const [evalFlow, setEvalFlow] = useState<{ reportId: string; siteName?: string; guardName?: string; signerName?: string; steps: ('client' | 'self' | 'peer')[] } | null>(null)
+  const [interviewSheet, setInterviewSheet] = useState<any>(null)
+  const [ackSheet, setAckSheet] = useState<any>(null)
   const qc = useQueryClient()
   const evaluationEnabled = useEvaluationEnabled()
 
@@ -88,6 +91,19 @@ export default function GuardAppPage() {
     queryFn: () => api.get('/evaluations/mine').then(r => r.data),
     enabled: evaluationEnabled && tab === 'reports',
   })
+  // 面談前の自己評価・上司からの指導（今日タブに表示）
+  const { data: myInterviews = [] } = useQuery<any[]>({
+    queryKey: ['my-interviews', user?.id],
+    queryFn: () => api.get('/guard-app/interviews').then(r => r.data),
+    staleTime: 0, // 今日タブを開くたびに最新にする（面談の予定・指導は管理者側で追加されるため）
+    enabled: evaluationEnabled && tab === 'today',
+  })
+  const { data: myCoaching = [] } = useQuery<any[]>({
+    queryKey: ['my-coaching', user?.id],
+    queryFn: () => api.get('/guard-app/coaching').then(r => r.data),
+    staleTime: 0, // 今日タブを開くたびに最新にする（面談の予定・指導は管理者側で追加されるため）
+    enabled: evaluationEnabled && tab === 'today',
+  })
   const hasEval = (reportId: string, raterType: string) => !!myEvals?.evaluations.some(e => e.securityReportId === reportId && e.raterType === raterType)
   const nextEvalStep = () => {
     qc.invalidateQueries({ queryKey: ['my-evaluations'] })
@@ -133,9 +149,9 @@ export default function GuardAppPage() {
       qc.invalidateQueries({ queryKey: ['guard-reports'] })
       if (evaluationEnabled) {
         const r = res.data
-        const steps: ('client' | 'self')[] = []
+        const steps: ('client' | 'self' | 'peer')[] = []
         if (v.signature) steps.push('client')
-        if (myGuardId && r.guardId === myGuardId) steps.push('self')
+        if (myGuardId && r.guardId === myGuardId) steps.push('self', 'peer')
         if (steps.length) setEvalFlow({ reportId: r.id, siteName: r.site?.name, guardName: r.guard?.name, signerName: v.signature?.signerName, steps })
       }
       setShowReportForm(false)
@@ -195,6 +211,26 @@ export default function GuardAppPage() {
         {/* 今日タブ */}
         {tab === 'today' && (
           <div className="p-4 space-y-4">
+            {evaluationEnabled && myInterviews.filter(i => i.status === 'SCHEDULED').map(i => (
+              <div key={i.id} className="card border-l-4 border-[#1e3a5f]">
+                <p className="text-sm font-bold text-gray-800">📅 面談 {i.scheduledDate.slice(0, 10)}</p>
+                <p className="text-xs text-gray-500">{i.selfScores ? '自己評価は入力済みです（面談日まで変更できます）' : '面談の前に、自己評価を入力してください'}</p>
+                <button onClick={() => setInterviewSheet(i)} className={`${i.selfScores ? 'btn-secondary' : 'btn-primary'} text-sm w-full mt-2`}>{i.selfScores ? '自己評価を見直す' : '自己評価を入力'}</button>
+              </div>
+            ))}
+            {evaluationEnabled && myCoaching.filter(c => !c.acknowledgedAt).map(c => (
+              <div key={c.id} className="card border-l-4 border-amber-500">
+                <p className="text-sm font-bold text-gray-800">💬 上司からの指導（{criterionLabel(c.criterionKey)}）</p>
+                <p className="text-xs text-gray-500 line-clamp-2">{c.content}</p>
+                <button onClick={() => setAckSheet(c)} className="btn-primary text-sm w-full mt-2">確認して取り組みを入力</button>
+              </div>
+            ))}
+            {evaluationEnabled && (() => {
+              const goal = myInterviews.find(i => i.status === 'COMPLETED' && i.goal)
+              return goal ? <div className="card py-2"><p className="text-xs text-gray-500">今期の目標（{goal.scheduledDate.slice(0, 10)} の面談）</p><p className="text-sm text-gray-800">{goal.goal}</p></div> : null
+            })()}
+            {interviewSheet && <InterviewSelfSheet interview={interviewSheet} onDone={() => { setInterviewSheet(null); qc.invalidateQueries({ queryKey: ['my-interviews'] }) }} />}
+            {ackSheet && <CoachingAckSheet task={ackSheet} onDone={() => { setAckSheet(null); qc.invalidateQueries({ queryKey: ['my-coaching'] }) }} />}
             <div>
               <p className="text-sm text-gray-500">{format(new Date(), 'yyyy年M月d日(E)', { locale: ja })}</p>
               <h2 className="text-xl font-bold text-gray-800">今日の出動</h2>
@@ -459,6 +495,11 @@ export default function GuardAppPage() {
                       <button onClick={() => setEvalFlow({ reportId: rep.id, siteName: rep.site?.name, steps: ['self'] })} className="btn-secondary text-sm w-full mt-2">📝 今日の振り返りを入力</button>
                     )}
                     {evaluationEnabled && myEvals && hasEval(rep.id, 'SELF') && <p className="text-xs text-green-700 mt-2">✓ 振り返り入力済み</p>}
+                    {evaluationEnabled && myEvals && myGuardId && rep.guardId === myGuardId && (
+                      <button onClick={() => setEvalFlow({ reportId: rep.id, steps: ['peer'] })} className="text-xs text-blue-600 mt-2 block">
+                        👥 一緒に働いた隊員の評価{hasEval(rep.id, 'PEER') ? '（入力済み・変更する）' : ''}
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -559,6 +600,9 @@ export default function GuardAppPage() {
             )}
             {evalFlow?.steps[0] === 'self' && (
               <SelfEvaluationSheet key={`s-${evalFlow.reportId}`} reportId={evalFlow.reportId} siteName={evalFlow.siteName} onDone={nextEvalStep} />
+            )}
+            {evalFlow?.steps[0] === 'peer' && (
+              <PeerEvaluationSheet key={`p-${evalFlow.reportId}`} reportId={evalFlow.reportId} onDone={nextEvalStep} />
             )}
 
             {showPad && (
