@@ -306,7 +306,7 @@ export function registerEvaluationPhase2Routes(app: express.Express, d: Phase2De
     if (!task) { res.status(404).json({ error: '指導タスクが見つかりません' }); return }
     if (task.status === 'DISMISSED') { res.status(409).json({ error: '対応不要にしたタスクです' }); return }
     if (task.acknowledgedAt) { res.status(409).json({ error: '本人が確認済みのため変更できません' }); return }
-    const coachedAt = parsed.data.coachedAt ? toDate(parsed.data.coachedAt) : new Date()
+    const coachedAt = parsed.data.coachedAt ? toDate(parsed.data.coachedAt) : todayJst()
     const followUp = parsed.data.followUpDate ? toDate(parsed.data.followUpDate) : addDays(todayJst(), COACHING_FOLLOW_UP_DAYS)
     res.json(await prisma.coachingTask.update({
       where: { id: task.id },

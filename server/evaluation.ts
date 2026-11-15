@@ -7,7 +7,7 @@ import {
   type RaterType, type EvaluationLike,
 } from '../shared/evaluation'
 import { registerEvaluationPhase2Routes } from './evaluationPhase2'
-import { detectSiteCoaching, loadRaterOffsets, growthScores, refreshOutcomes } from './coaching'
+import { detectSiteCoaching, loadRaterOffsets, growthScores, refreshOutcomes, todayJst, addDays } from './coaching'
 
 interface JwtPayload { userId: string; companyId: string; role: string; isSuperAdmin: boolean }
 type Mw = express.RequestHandler
@@ -24,7 +24,8 @@ const day = (s: unknown, fallback: Date) => {
   const d = typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00Z`) : fallback
   return isNaN(d.getTime()) ? fallback : d
 }
-const daysAgo = (n: number) => { const d = new Date(); d.setUTCHours(0, 0, 0, 0); d.setUTCDate(d.getUTCDate() - n); return d }
+// 日本時間の日付で数える（深夜0〜9時に前日扱いにならないように）
+const daysAgo = (n: number) => addDays(todayJst(), -n)
 
 export function registerEvaluationRoutes(app: express.Express, d: Deps) {
   const { prisma, authenticate, requireRole, requireSuperAdmin, linkedGuardForUser } = d

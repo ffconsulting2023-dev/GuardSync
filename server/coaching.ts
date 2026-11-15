@@ -15,6 +15,8 @@ export function todayJst(): Date {
 }
 export const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86400_000)
 export const ymd = (d: Date) => d.toISOString().slice(0, 10)
+// 日時（タイムスタンプ）を日本時間の日付にする
+export const ymdJst = (d: Date) => new Date(d.getTime() + 9 * 3600_000).toISOString().slice(0, 10)
 
 // 同じ項目で、未指導・指導済み（結果の確定前）のタスクがある、または対応不要にしてから30日以内 の場合は作らない
 async function shouldCreate(db: Db, companyId: string, guardId: string, criterionKey: string) {
@@ -84,14 +86,14 @@ export async function refreshOutcomes(db: Db, companyId: string, guardId: string
   const points = pre?.points ?? (await sitePoints(db, companyId, guardId))
   const today = ymd(todayJst())
   for (const t of tasks) {
-    const coachedAt = ymd(t.coachedAt!)
+    const coachedAt = ymdJst(t.coachedAt!)
     const reports = await db.securityReport.findMany({
       where: { companyId, guardId, reportDate: { gte: new Date(`${coachedAt}T00:00:00Z`) } },
       select: { id: true, evaluations: { where: { raterType: 'SELF' }, select: { id: true } } },
     })
     const r = computeCoachingOutcome({
       direction: t.direction as 'OVER' | 'UNDER', coachedAt, today,
-      acknowledgedAt: t.acknowledgedAt ? ymd(t.acknowledgedAt) : null,
+      acknowledgedAt: t.acknowledgedAt ? ymdJst(t.acknowledgedAt) : null,
       followUpDate: t.followUpDate ? ymd(t.followUpDate) : null,
       pairs: siteEventPairs(points, t.criterionKey as CriterionKey, offsets),
       reportsAfter: reports.length, reflectionsAfter: reports.filter(x => x.evaluations.length).length,
