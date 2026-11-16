@@ -6,6 +6,7 @@ import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { useAuth } from '../../hooks/useAuth'
+import { canUseFeature } from '../../lib/auth'
 import { format, addMonths, subMonths } from 'date-fns'
 import { ja } from 'date-fns/locale'
 import SignaturePad from '../../components/SignaturePad'
@@ -39,7 +40,9 @@ export default function GuardAppPage() {
   const [interviewSheet, setInterviewSheet] = useState<any>(null)
   const [ackSheet, setAckSheet] = useState<any>(null)
   const qc = useQueryClient()
-  const evaluationEnabled = useEvaluationEnabled()
+  // 利用者ごとに使えなくした機能（shared/features.ts）
+  const can = (key: string) => canUseFeature(user, key)
+  const evaluationEnabled = useEvaluationEnabled() && can('guard.evaluation')
 
   // ログインユーザーに紐付く隊員（User.id と Guard.id は別物のため、サーバーで同一ID→メールアドレスの順に突き合わせる）
   const { data: me, isLoading: meLoading } = useQuery<{ guard: { id: string; name: string } | null }>({
@@ -169,12 +172,12 @@ export default function GuardAppPage() {
     onError: (e: any) => setReportError(e.response?.data?.error || '提出に失敗しました。通信状況をご確認ください。'),
   })
 
-  const TAB_ITEMS = [
+  const TAB_ITEMS = ([
     { key: 'today', label: '今日', icon: '🏠' },
-    { key: 'schedule', label: 'シフト', icon: '📅' },
-    { key: 'attendance', label: '出退勤', icon: '⏰' },
-    { key: 'reports', label: '報告書', icon: '📝' },
-  ] as const
+    { key: 'schedule', label: 'シフト', icon: '📅', feature: 'guard.schedule' },
+    { key: 'attendance', label: '出退勤', icon: '⏰', feature: 'guard.attendance' },
+    { key: 'reports', label: '報告書', icon: '📝', feature: 'guard.reports' },
+  ] as const).filter(t => !('feature' in t) || can(t.feature))
 
   // 月間カレンダーデータ
   const calendarDays = (() => {
@@ -300,7 +303,7 @@ export default function GuardAppPage() {
                     </div>
 
                     {/* 打刻ボタン */}
-                    <div className="grid grid-cols-2 gap-3">
+                    {can('guard.attendance') && <div className="grid grid-cols-2 gap-3">
                       <button
                         onClick={() => clockInMutation.mutate(s.id)}
                         disabled={!canClockIn || clockInMutation.isPending}
@@ -323,7 +326,7 @@ export default function GuardAppPage() {
                       >
                         {att?.clockOutAt ? '✅ 退勤済み' : '退勤打刻'}
                       </button>
-                    </div>
+                    </div>}
 
                     {/* 経路案内ボタン */}
                     {s.site?.address && (
@@ -643,7 +646,7 @@ export default function GuardAppPage() {
 
       {/* ボトムナビゲーション */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-gray-200 safe-area-bottom">
-        <div className="grid grid-cols-4">
+        <div className="grid" style={{ gridTemplateColumns: `repeat(${TAB_ITEMS.length}, minmax(0, 1fr))` }}>
           {TAB_ITEMS.map(item => (
             <button
               key={item.key}

@@ -4,6 +4,7 @@ import QRCode from 'qrcode'
 import { api } from '../lib/api'
 import { useAuth } from '../hooks/useAuth'
 import { ACCOUNT_ROLES, LOGIN_ID_RULE_TEXT, SETUP_LINK_TTL_DAYS, normalizeLoginId, type AccountRole } from '../../shared/account'
+import { featuresForRole, isGuardRole } from '../../shared/features'
 
 interface Account {
   id: string
@@ -18,6 +19,7 @@ interface Account {
   guardId: string | null
   guard: { id: string; name: string; employeeNumber: string } | null
   pendingSetupExpiresAt: string | null
+  disabledFeatures: string[]
 }
 interface GuardOption { id: string; name: string; employeeNumber: string; email: string | null; linkedUserId: string | null }
 interface AccountsResponse { company: { id: string; name: string }; actor: { isCompanyAdmin: boolean }; users: Account[]; guards: GuardOption[] }
@@ -49,6 +51,49 @@ function useLoginIdAvailability(loginId: string, companyId: string | undefined, 
   return state
 }
 
+// ─── 使える機能の選択（チェックあり＝使える。ロールで使えない画面はロールの制限が優先） ───
+function FeaturePicker({ role, disabled, onChange }: { role: AccountRole; disabled: string[]; onChange: (v: string[]) => void }) {
+  const features = featuresForRole(role)
+  const groups = [...new Set(features.map(f => f.group))]
+  const off = new Set(disabled)
+  const setGroup = (keys: string[], enable: boolean) => onChange(enable ? disabled.filter(k => !keys.includes(k)) : [...new Set([...disabled, ...keys])])
+  const usable = features.length - features.filter(f => off.has(f.key)).length
+  return (
+    <div className="border border-gray-200 rounded-lg p-3 space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="form-label mb-0">使える機能（{usable}/{features.length}）</p>
+          <p className="text-[11px] text-gray-400">{isGuardRole(role) ? '隊員アプリで使える機能です。' : 'チェックを外した機能はメニューに表示されず、操作もできません。ダッシュボードと設定は常に使えます。'}</p>
+        </div>
+        <span className="flex gap-2 text-xs">
+          <button type="button" onClick={() => onChange([])} className="text-blue-600">すべて使える</button>
+          <button type="button" onClick={() => onChange(features.map(f => f.key))} className="text-gray-500">すべて外す</button>
+        </span>
+      </div>
+      {groups.map(g => {
+        const items = features.filter(f => f.group === g)
+        const allOn = items.every(f => !off.has(f.key))
+        return (
+          <div key={g}>
+            {groups.length > 1 && (
+              <label className="flex items-center gap-2 text-xs font-medium text-gray-600 mt-1">
+                <input type="checkbox" checked={allOn} onChange={e => setGroup(items.map(f => f.key), e.target.checked)} />{g}
+              </label>
+            )}
+            <div className={`grid grid-cols-2 gap-x-3 gap-y-1 ${groups.length > 1 ? 'pl-5' : ''}`}>
+              {items.map(f => (
+                <label key={f.key} className={`flex items-center gap-2 text-sm ${off.has(f.key) ? 'text-gray-400' : 'text-gray-700'}`}>
+                  <input type="checkbox" checked={!off.has(f.key)} onChange={e => setGroup([f.key], e.target.checked)} />{f.label}
+                </label>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── アカウント作成・編集 ───
 function AccountForm({ data, companyId, account, onClose, onSaved }: {
   data: AccountsResponse; companyId?: string; account: Account | null
@@ -62,6 +107,7 @@ function AccountForm({ data, companyId, account, onClose, onSaved }: {
     guardId: account?.guardId ?? '',
     canIssueAccounts: account?.canIssueAccounts ?? false,
     isActive: account?.isActive ?? true,
+    disabledFeatures: account?.disabledFeatures ?? [] as string[],
   })
   const avail = useLoginIdAvailability(f.loginId, companyId, account?.id, account?.loginId)
   const isAdmin = data.actor.isCompanyAdmin
@@ -77,6 +123,8 @@ function AccountForm({ data, companyId, account, onClose, onSaved }: {
         role: f.role, guardId: f.guardId || null,
         ...(isAdmin && f.role !== 'GUARD' ? { canIssueAccounts: f.role === 'ADMIN' ? false : f.canIssueAccounts } : {}),
         ...(account ? { isActive: f.isActive } : {}),
+        // ロールで選べる機能だけを送る（ロールを変えた場合に前のロールの設定を残さない）
+        disabledFeatures: f.disabledFeatures.filter(k => featuresForRole(f.role).some(x => x.key === k)),
         companyId,
       }
       const r = account ? await api.patch(`/accounts/${account.id}`, body, { params: { companyId } }) : await api.post('/accounts', body, { params: { companyId } })
@@ -137,6 +185,7 @@ function AccountForm({ data, companyId, account, onClose, onSaved }: {
               ID発行権限を付与する（この会社のログインID発行・設定用URL発行ができます）
             </label>
           )}
+          <FeaturePicker role={f.role} disabled={f.disabledFeatures.filter(k => featuresForRole(f.role).some(x => x.key === k))} onChange={v => set({ disabledFeatures: v })} />
           {account && (
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input type="checkbox" checked={f.isActive} onChange={e => set({ isActive: e.target.checked })} />
@@ -314,6 +363,7 @@ export default function AccountManager({ companyId }: { companyId?: string }) {
                   <td className="px-4 py-3">
                     <span className="badge badge-info">{ACCOUNT_ROLES[u.role] ?? u.role}</span>
                     {(u.role === 'ADMIN' || u.canIssueAccounts) && <span className="badge badge-success ml-1">ID発行</span>}
+                    {u.disabledFeatures?.length > 0 && <span className="badge badge-warning ml-1" title="使えなくした機能があります">機能制限 {u.disabledFeatures.length}</span>}
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-600 hidden md:table-cell">{u.guard ? `${u.guard.employeeNumber} ${u.guard.name}` : '—'}</td>
                   <td className="px-4 py-3">

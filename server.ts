@@ -34,6 +34,7 @@ import { runImport, ImportError } from './server/import'
 import { parseUpload, fetchGoogleSheet, ParseError } from './server/importParse'
 import { ensureRecruitmentChannels } from './server/recruitment'
 import { registerEvaluationRoutes } from './server/evaluation'
+import { blockedFeatureFor, normalizeDisabledFeatures } from './shared/features'
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PDFDocument = require('pdfkit')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -322,6 +323,25 @@ const limiter = rateLimit({
 })
 app.use('/api/', limiter)
 
+// 利用者ごとに使えなくした機能の API を拒否する（shared/features.ts）。ロールと設定は DB から取り、30秒キャッシュする
+const featureCache = new Map<string, { role: string; isSuperAdmin: boolean; disabled: string[]; expiresAt: number }>()
+const invalidateFeatureCache = (userId: string) => featureCache.delete(userId)
+app.use('/api/', async (req, res, next) => {
+  const userId = authenticatedUserId(req)
+  if (!userId) { next(); return }
+  let entry = featureCache.get(userId)
+  if (!entry || entry.expiresAt < Date.now()) {
+    const u = await prisma.user.findUnique({ where: { id: userId }, select: { role: true, isSuperAdmin: true, disabledFeatures: true } }).catch(() => null)
+    if (!u) { next(); return }
+    entry = { role: u.role, isSuperAdmin: u.isSuperAdmin, disabled: u.disabledFeatures, expiresAt: Date.now() + 30_000 }
+    featureCache.set(userId, entry)
+  }
+  if (entry.isSuperAdmin) { next(); return }
+  const blocked = blockedFeatureFor(req.originalUrl.split('?')[0], req.method, entry.role, entry.disabled)
+  if (blocked) { res.status(403).json({ error: `「${blocked.label}」は利用できません（管理者に確認してください）`, code: 'FEATURE_DISABLED', feature: blocked.key }); return }
+  next()
+})
+
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'ログイン試行回数の上限に達しました。15分後にお試しください。' } })
 app.use('/api/auth/login', authLimiter)
 
@@ -500,7 +520,7 @@ app.post('/api/auth/login', async (req, res) => {
 
   res.json({
     token,
-    user: { id: user.id, name: user.name, email: user.email, loginId: user.loginId, role: user.role, company: { id: user.company.id, name: user.company.name, plan: user.company.plan } },
+    user: { id: user.id, name: user.name, email: user.email, loginId: user.loginId, role: user.role, disabledFeatures: user.disabledFeatures, company: { id: user.company.id, name: user.company.name, plan: user.company.plan } },
   })
 })
 
@@ -509,7 +529,7 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
-      id: true, name: true, email: true, loginId: true, role: true, isSuperAdmin: true, canIssueAccounts: true, guardId: true,
+      id: true, name: true, email: true, loginId: true, role: true, isSuperAdmin: true, canIssueAccounts: true, guardId: true, disabledFeatures: true,
       company: { select: { id: true, name: true, plan: true } },
     },
   })
@@ -662,7 +682,7 @@ async function requireAccountIssuer(req: express.Request, res: express.Response,
 
 const accountSelect = {
   id: true, name: true, loginId: true, email: true, role: true, isActive: true, canIssueAccounts: true,
-  mustSetPassword: true, lastLoginAt: true, createdAt: true, guardId: true,
+  mustSetPassword: true, lastLoginAt: true, createdAt: true, guardId: true, disabledFeatures: true,
   guard: { select: { id: true, name: true, employeeNumber: true } },
   setupTokens: { where: { usedAt: null }, select: { expiresAt: true, createdAt: true }, orderBy: { createdAt: 'desc' as const }, take: 1 },
 } as const
@@ -733,6 +753,7 @@ app.post('/api/accounts', authenticate, requireAccountIssuer, async (req, res) =
       data: {
         companyId: actor.companyId, name: d.name, loginId: d.loginId, email: d.email ?? null, role: d.role,
         guardId: d.guardId ?? null, canIssueAccounts: d.role !== 'GUARD' && !!d.canIssueAccounts,
+        disabledFeatures: normalizeDisabledFeatures(d.disabledFeatures, d.role),
         // 本人が設定用URLでパスワードを決めるまでログイン不可（推測不能なランダム値をハッシュ化）
         password: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12), mustSetPassword: true,
       },
@@ -781,9 +802,13 @@ app.patch('/api/accounts/:id', authenticate, requireAccountIssuer, async (req, r
         ...(d.canIssueAccounts !== undefined ? { canIssueAccounts: d.canIssueAccounts } : {}),
         ...(role === 'GUARD' ? { canIssueAccounts: false } : {}),
         ...(d.isActive !== undefined ? { isActive: d.isActive } : {}),
+        // ロールを変えた場合も、新しいロールで選べる機能だけを残す
+        ...(d.disabledFeatures !== undefined || d.role !== undefined
+          ? { disabledFeatures: normalizeDisabledFeatures(d.disabledFeatures ?? target.disabledFeatures, role) } : {}),
       },
       select: accountSelect,
     })
+    invalidateFeatureCache(target.id)
     // 無効化したアカウントの未使用の設定用URLは失効させる
     if (d.isActive === false) await prisma.accountSetupToken.updateMany({ where: { userId: target.id, usedAt: null }, data: { usedAt: new Date() } })
     res.json(user)

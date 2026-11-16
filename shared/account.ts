@@ -35,6 +35,7 @@ export const accountCreateSchema = z.object({
   role: z.enum(['ADMIN', 'MANAGER', 'OPERATOR', 'VIEWER', 'GUARD']),
   guardId: z.string().uuid().optional().nullable(),
   canIssueAccounts: z.boolean().optional(),
+  disabledFeatures: z.array(z.string().max(50)).max(100).optional(),
 }).refine(v => v.role !== 'GUARD' || !!v.guardId, { message: '隊員アカウントは紐付ける隊員を選択してください', path: ['guardId'] })
 
 export const accountUpdateSchema = z.object({
@@ -45,6 +46,7 @@ export const accountUpdateSchema = z.object({
   guardId: z.string().uuid().nullable().optional(),
   canIssueAccounts: z.boolean().optional(),
   isActive: z.boolean().optional(),
+  disabledFeatures: z.array(z.string().max(50)).max(100).optional(),
 })
 
 export const passwordSetupSchema = z.object({
