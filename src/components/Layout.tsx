@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { useEvaluationEnabled } from '../hooks/useEvaluation'
 import { hasRole } from '../lib/auth'
+import { disabledFeatureForPath } from '../../shared/features'
 
 interface NavItem {
   path: string
@@ -90,6 +91,10 @@ const NAV_GROUPS: NavGroup[] = [
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth()
   const evaluationEnabled = useEvaluationEnabled()
+  const { pathname } = useLocation()
+  // 利用者ごとに使えなくした機能（スーパー管理者は制限しない）
+  const disabled = user?.isSuperAdmin ? [] : user?.disabledFeatures ?? []
+  const blockedHere = disabledFeatureForPath(pathname, disabled)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const navigate = useNavigate()
@@ -138,7 +143,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               スーパー管理者
             </NavLink>
           )}
-          {NAV_GROUPS.map((group, groupIndex) => (
+          {NAV_GROUPS.map(group => ({ ...group, items: group.items.filter(item => (!item.adminOnly || hasRole(user, 'ADMIN')) && (!item.managerOnly || hasRole(user, 'ADMIN', 'MANAGER')) && (!item.evaluation || evaluationEnabled) && !disabledFeatureForPath(item.path, disabled)) }))
+            .filter(group => group.items.length > 0)
+            .map((group, groupIndex) => (
             <div key={group.moduleKey}>
               {groupIndex > 0 && <div className="border-t border-[#2d5282] my-1" />}
               <div className="px-4 pt-3 pb-1">
@@ -146,7 +153,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   {group.module}
                 </span>
               </div>
-              {group.items.filter(item => (!item.adminOnly || hasRole(user, 'ADMIN')) && (!item.managerOnly || hasRole(user, 'ADMIN', 'MANAGER')) && (!item.evaluation || evaluationEnabled)).map((item) => (
+              {group.items.map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}
@@ -224,7 +231,16 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         {/* ページコンテンツ */}
         <main className="flex-1 overflow-y-auto">
-          {children}
+          {blockedHere ? (
+            <div className="p-6">
+              <div className="card text-center py-10 space-y-2">
+                <p className="text-3xl">🔒</p>
+                <p className="font-medium text-gray-800">「{blockedHere.label}」は利用できません</p>
+                <p className="text-sm text-gray-500">このアカウントでは使えない設定になっています。必要な場合は会社の管理者に確認してください。</p>
+                <Link to="/" className="text-sm text-blue-600">ダッシュボードへ</Link>
+              </div>
+            </div>
+          ) : children}
         </main>
       </div>
     </div>

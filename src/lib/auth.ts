@@ -9,6 +9,7 @@ export interface AuthUser {
   isSuperAdmin?: boolean
   canIssueAccounts?: boolean
   guardId?: string | null
+  disabledFeatures?: string[] // 使えなくした機能のキー（shared/features.ts）
   company: { id: string; name: string; plan: string }
 }
 
@@ -45,4 +46,11 @@ export function hasRole(user: AuthUser | null, ...roles: string[]): boolean {
 export function canIssueAccounts(user: AuthUser | null): boolean {
   if (!user) return false
   return !!user.isSuperAdmin || user.role === 'ADMIN' || !!user.canIssueAccounts
+}
+
+// その機能が使えるか（利用者ごとの制限。スーパー管理者は常に使える）
+export function canUseFeature(user: AuthUser | null, key: string): boolean {
+  if (!user) return false
+  if (user.isSuperAdmin) return true
+  return !(user.disabledFeatures ?? []).includes(key)
 }

@@ -172,6 +172,8 @@ model User {
   // 隊員アカウントの紐付け先（隊員アプリはこの隊員として動作）
   guardId          String? @unique
   guard            Guard?  @relation(fields: [guardId], references: [id])
+  // 使えなくした機能のキー（既定は空＝ロールで使える機能はすべて使える。shared/features.ts）
+  disabledFeatures String[] @default([])
 
   passwordResetTokens PasswordResetToken[]
   setupTokens         AccountSetupToken[]
