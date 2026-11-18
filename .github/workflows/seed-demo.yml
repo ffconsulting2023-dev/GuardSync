@@ -1,0 +1,50 @@
+name: Seed demo evaluation data
+
+# 隊員評価のデモデータを作成する（手動実行のみ）。
+# 会社コードが DEMO で始まる会社だけが対象。前回このスクリプトで作ったデータを消してから作り直す。
+on:
+  workflow_dispatch:
+    inputs:
+      company_code:
+        description: 'デモ会社の会社コード（DEMO で始まるもの）'
+        required: true
+        default: 'DEMO001'
+      target:
+        description: '実行先'
+        required: true
+        default: 'production'
+        type: choice
+        options: [production, staging]
+
+concurrency:
+  group: deploy-sakura-vps
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate input
+        env:
+          CODE: ${{ inputs.company_code }}
+        run: |
+          if ! [[ "$CODE" =~ ^DEMO[A-Za-z0-9_-]{0,20}$ ]]; then
+            echo "会社コードは DEMO で始まる英数字のみ指定できます" >&2
+            exit 1
+          fi
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p 22 -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run seed on VPS
+        env:
+          CODE: ${{ inputs.company_code }}
+          DIR: ${{ inputs.target == 'staging' && '/opt/guardsync-staging' || '/opt/guardsync' }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p 22 ubuntu@${{ secrets.VPS_HOST }} "set -e
+            cd $DIR
+            docker compose run --rm app node dist/scripts/seed-demo-evaluation.js $CODE"
